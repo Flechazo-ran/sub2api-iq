@@ -287,7 +287,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { questionPrompt, questionContract, isTextAnswerKind, stateProbeVerdict, STATE_PROBE_QUESTION, type IntelligenceQuestion, type StateProbeVerdict } from '@/utils/intelligenceTest'
+import { questionPrompt, questionContract, isTextAnswerKind, stateProbeVerdict, STATE_PROBE_QUESTION, type IntelligenceQuestion, type StateProbeVerdict, ASTRA_PROBE_QUESTION } from '@/utils/intelligenceTest'
 import { useI18n } from 'vue-i18n'
 import { extractPelicanHtml as extractHtml } from '@/utils/pelicanHtml'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -506,8 +506,9 @@ function editSchedule(config: PelicanTestConfig, model: string) {
   if (running.value) return
   modelId.value = model
   // Server-generated questions belong to quality rules, not manual test inputs.
-  if (config.question_kind === STATE_PROBE_QUESTION || config.question_kind === 'random_reasoning') return
-  questionKind.value = config.question_kind || 'pelican'
+  // astra 探针同样由后端下发，没有可编辑的题面，这里一并跳过。
+  if (config.question_kind === STATE_PROBE_QUESTION || config.question_kind === 'random_reasoning' || config.question_kind === ASTRA_PROBE_QUESTION) return
+  questionKind.value = config.question_kind === 'pelican' ? 'pelican' : 'candy'
   prompt.value = config.prompt
   modelId.value = model
   reasoningEffort.value = config.reasoning_effort

@@ -61,11 +61,11 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	if plan.AutoRecover {
 		return fmt.Errorf("quality plans use auto_restore, not connectivity auto_recover")
 	}
-	if !isQualityAnswerQuestion(plan.PelicanConfig.QuestionKind) && plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind {
+	if !isQualityAnswerQuestion(plan.PelicanConfig.QuestionKind) && plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexAstraProbeQuestionKind {
 		return fmt.Errorf("quality plans require a text answer question")
 	}
 	// 探针自带判定；随机题的参考答案由执行器生成，其他答题规则必须配置答案。
-	if plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != QualityRandomQuestionKind {
+	if plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexAstraProbeQuestionKind && plan.PelicanConfig.QuestionKind != QualityRandomQuestionKind {
 		if strings.TrimSpace(q.ExpectedAnswer) == "" || len(q.ExpectedAnswer) > 4000 {
 			return fmt.Errorf("expected answer must be 1–4000 bytes")
 		}

@@ -13,18 +13,23 @@ export function questionContract(kind: IntelligenceQuestion): string {
 
 // 定时测试 / 质量规则里的探针题型：不下发题目，后端跑一次门票探针判满血/降智。
 export const STATE_PROBE_QUESTION = 'state_probe'
+// astra 探针：只发一次最小请求，按响应流里有没有 safety_buffering 判满血/降智。
+export const ASTRA_PROBE_QUESTION = 'astra_probe'
 export const DEFAULT_STATE_PROBE_CRON = '*/2 * * * *'
 export type StateProbeVerdict = 'healthy' | 'degraded' | 'inconclusive'
 
 // 结果是纯文本（不是 HTML 动画）的题型。
 export function isTextAnswerKind(kind?: string): boolean {
-  return kind === 'candy' || kind === 'random_reasoning' || kind === STATE_PROBE_QUESTION
+  return kind === 'candy' || kind === 'random_reasoning' || kind === STATE_PROBE_QUESTION || kind === ASTRA_PROBE_QUESTION
 }
 
 // 与后端约定：满血 = success；降智 = failed + state_degraded；其余失败都是无法判断。
 export function stateProbeVerdict(result: Pick<ScheduledTestResult, 'status' | 'error_message' | 'pelican_config'>): StateProbeVerdict | null {
-  if (result.pelican_config?.question_kind !== STATE_PROBE_QUESTION || result.status === 'running') return null
+  const kind = result.pelican_config?.question_kind
+  const isStateProbe = kind === STATE_PROBE_QUESTION
+  const isAstraProbe = kind === ASTRA_PROBE_QUESTION
+  if ((!isStateProbe && !isAstraProbe) || result.status === 'running') return null
   if (result.status === 'success') return 'healthy'
-  if (result.error_message === 'state_degraded') return 'degraded'
+  if (result.error_message === (isAstraProbe ? 'astra_degraded' : 'state_degraded')) return 'degraded'
   return 'inconclusive'
 }

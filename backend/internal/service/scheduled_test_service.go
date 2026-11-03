@@ -195,7 +195,7 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 			plan.ModelID = models[0]
 		}
 		// 探针题型不需要题目文本；其余题型题目必填。
-		if isOpenAICodexStateProbePlan(cfg) || cfg.QuestionKind == QualityRandomQuestionKind {
+		if isOpenAICodexStateProbePlan(cfg) || isOpenAICodexAstraProbePlan(cfg) || cfg.QuestionKind == QualityRandomQuestionKind {
 			if len(cfg.Prompt) > 32000 || strings.TrimSpace(plan.ModelID) == "" || len(plan.ModelID) > 100 {
 				return time.Time{}, fmt.Errorf("probe model is required (maximum 32000/100 bytes)")
 			}
@@ -205,11 +205,11 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 		if err := validateQualityPolicy(plan); err != nil {
 			return time.Time{}, err
 		}
-		if cfg.QuestionKind != "" && cfg.QuestionKind != "pelican" && !isQualityAnswerQuestion(cfg.QuestionKind) && cfg.QuestionKind != OpenAICodexStateProbeQuestionKind {
+		if cfg.QuestionKind != "" && cfg.QuestionKind != "pelican" && !isQualityAnswerQuestion(cfg.QuestionKind) && cfg.QuestionKind != OpenAICodexStateProbeQuestionKind && cfg.QuestionKind != OpenAICodexAstraProbeQuestionKind {
 			return time.Time{}, fmt.Errorf("invalid question kind")
 		}
 		// 同一账号同一时刻只允许一次探针，并行只会互相挤掉，直接禁止。
-		if isOpenAICodexStateProbePlan(cfg) && cfg.ParallelCount != 1 {
+		if (isOpenAICodexStateProbePlan(cfg) || isOpenAICodexAstraProbePlan(cfg)) && cfg.ParallelCount != 1 {
 			return time.Time{}, fmt.Errorf("state probe does not support parallel runs")
 		}
 		if cfg.ParallelCount < 1 || cfg.ParallelCount > 8 {

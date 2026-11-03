@@ -182,6 +182,7 @@ export default {
   "questionRandom": "Random reasoning (generated question + grading model)",
   "randomHint": "Fresh questions and local reference answers are generated for every round. No question or answer entry is needed. Batches alternate path counting and weighted XOR; all models receive the same question set. View actual questions in test history. Results are quality indicators only.",
   "generatedQuestion": "Generated question",
+  "questionAstraProbe": "Astra probe (single request, judged by the safety_buffering field)",
   "questionStateProbe": "State probe (full capability or degraded in seconds, no grading model)",
   "probeHint": "No question is sent. Each round runs one ticket probe: full capability passes, degraded counts as a wrong answer and triggers the action below, and inconclusive runs (network, rate limits, account errors) never change the account. OpenAI subscription (OAuth) accounts only; one probe per round.",
   "probeFailureAction": "Action when degraded",

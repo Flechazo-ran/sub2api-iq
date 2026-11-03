@@ -2042,6 +2042,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 
 	applyOpenAIAPIKeyIdentityHeaders(req.Header, account, s.codexIdentityOverrideUA(account))
 
+	// 实验开关（默认关闭）：按账号补注 x-codex-safety-buffering 声明头。
+	// 放在身份收口之后，确保不被后续头部清洗覆盖。
+	// 见 openai_codex_safety_buffering_inject.go。
+	applyCodexSafetyBufferingInjectHeader(account, req.Header)
+
 	// 官方 OpenCode / Command Code 上游收敛为规范客户端 UA：客户端透传的编程库
 	// UA 会命中其前置 Cloudflare bot 拦截（CF 1010/403），并被计入账号 403 strike。
 	applyOpenCodeUpstreamUserAgent(account, targetURL, req.Header)

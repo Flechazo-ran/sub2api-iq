@@ -44,6 +44,10 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 	if isOpenAICodexStateProbePlan(cfg) {
 		return s.runOpenAICodexStateProbeScheduled(ctx, accountID, model, cfg)
 	}
+	// astra 探针同样不下发题目：只发一次最小请求，看响应流里有没有 safety_buffering。
+	if isOpenAICodexAstraProbePlan(cfg) {
+		return s.runOpenAICodexAstraProbeScheduled(ctx, accountID, model, cfg)
+	}
 	// Recognize the exact built-in question in legacy HTML plans as well.
 	if isBuiltinCandyPlan(cfg) {
 		copy := *cfg

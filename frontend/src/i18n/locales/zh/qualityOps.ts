@@ -182,6 +182,7 @@ export default {
   "questionRandom": "随机推理题（现场出题 + 模型判题）",
   "randomHint": "每轮生成新题并在本地计算参考答案，无需填写题目或答案。批量测试轮换路径计数和加权异或，同一轮各模型使用同一组题。实际题目可在检测记录中查看；答题表现仅作质量参考。",
   "generatedQuestion": "本次生成的题目",
+  "questionAstraProbe": "Astra 探针（一次请求，按 safety_buffering 字段判断）",
   "questionStateProbe": "状态探针（几秒判满血 / 降智，不需要判题模型）",
   "probeHint": "不发题目：每轮跑一发门票探针，满血算通过、降智算答错并执行下面的处理，无法判断（网络、限流、账号异常等）不动账号。只适用于 OpenAI 订阅（OAuth）账号；每轮固定跑 1 次。",
   "probeFailureAction": "判定降智后的处理",
