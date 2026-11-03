@@ -1,6 +1,6 @@
 import type { PelicanTestConfig, QualityBPSPolicy, QualityPolicy, ScheduledTestPlan, UpdateScheduledTestPlanRequest } from '@/types'
 import { DEFAULT_EXCEL_BPS_MODELS } from '@/constants/account'
-import { STATE_PROBE_QUESTION } from './intelligenceTest'
+import { FIELD_WATCH_QUESTION, STATE_PROBE_QUESTION } from './intelligenceTest'
 import { DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, isValidBPSRecoveryInterval } from './excelBPSRecovery'
 
 // 新建「降智开 BPS」时的默认勾选；target_group_id = -1 表示还没选 403 后的目标分组。
@@ -40,6 +40,7 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
       expected_answer: source.question_kind === 'random_reasoning' ? '' : policy.expected_answer,
       action: policy.action,
       remove_group_ids: [...(policy.remove_group_ids || [])],
+      add_group_ids: policy.add_group_ids ? [...policy.add_group_ids] : undefined,
       remove_models: policy.remove_models ? [...policy.remove_models] : undefined,
       recovery_concurrency: policy.recovery_concurrency,
       auto_restore: policy.auto_restore,
@@ -91,11 +92,24 @@ export function qualityUsesModelResults(action?: QualityPolicy['action']) {
   return action === 'remove_models' || action === 'isolate_models'
 }
 
+// 字段看护的处理方式只有两种：答错后移出分组并移入降智分组，或只记录。
+export const FIELD_WATCH_ACTIONS: readonly QualityPolicy['action'][] = ['remove_groups', 'observe_only']
+export function fieldWatchSupportsAction(action?: QualityPolicy['action']) {
+  return !!action && FIELD_WATCH_ACTIONS.includes(action)
+}
+
 // Used by single-account creation, templates and bulk editing. Action cleanup
 // and validation belong here so all entry points preserve the same semantics.
 export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
   const next = { ...policy, remove_group_ids: qualityUsesGroups(policy.action) ? [...policy.remove_group_ids] : [] }
   if (qualityUsesGroups(next.action) && !next.remove_group_ids.length) throw new Error('qualityOps.selectGroups')
+  if (next.action === 'remove_groups') {
+    // 「移出」和「同时移入」互斥；表单切换后残留的移入项也不能把账号又加回去。
+    const removed = new Set(next.remove_group_ids)
+    const added = [...new Set((policy.add_group_ids || []).filter(id => !removed.has(id)))]
+    if (added.length) next.add_group_ids = added
+    else delete next.add_group_ids
+  } else delete next.add_group_ids
   if (next.action === 'remove_models') {
     next.remove_models = [...(policy.remove_models || [])]
     if (!next.remove_models.length) throw new Error('qualityOps.selectModels')
@@ -133,7 +147,7 @@ export function qualityRuleFieldValue(rule: Pick<ScheduledTestPlan, 'model_id' |
     case 'test': return [cfg?.question_kind, cfg?.test_channel || 'account', cfg?.prompt, cfg?.reasoning_effort, cfg?.parallel_count,
       q?.expected_answer, q?.judge?.group_id, q?.judge?.model_id, q?.judge?.prompt]
     case 'restore': return [q?.auto_restore, b?.pass_threshold, b?.hold_on_usage]
-    case 'action': return [q?.action, q?.remove_group_ids || [], q?.remove_models || [], q?.recovery_concurrency,
+    case 'action': return [q?.action, q?.remove_group_ids || [], q?.add_group_ids || [], q?.remove_models || [], q?.recovery_concurrency,
       b ? [b.failure_threshold, b.usage_percent, b.require_all, b.all_models, b.models || [], b.omit_unsupported_tools,
         b.ignore_encrypted_content, b.auto_disable_on_403, b.auto_recover_on_403, b.recovery_interval_minutes,
         b.auto_move_on_403, b.target_group_id, b.session_proxy, b.proxy_source, b.cache_creation_as_input] : null]
@@ -175,12 +189,19 @@ export function buildQualityRulePatch(
     config.reasoning_effort = source.reasoning_effort
     const probe = source.question_kind === STATE_PROBE_QUESTION
     const random = source.question_kind === 'random_reasoning'
+    // 字段看护不发题、不用判题模型：复核固定用内置糖果题，后端自己出题判分。
+    const fieldWatch = source.question_kind === FIELD_WATCH_QUESTION
     delete config.random_question
-    config.prompt = probe || random ? '' : source.prompt
-    config.parallel_count = probe ? 1 : source.parallel_count
-    config.quality.expected_answer = probe || random ? '' : source.quality.expected_answer
+    config.prompt = probe || random || fieldWatch ? '' : source.prompt
+    config.parallel_count = probe || fieldWatch ? 1 : source.parallel_count
+    config.quality.expected_answer = probe || random || fieldWatch ? '' : source.quality.expected_answer
     if (probe) { delete config.quality.judge; config.model_ids = [patch.model_id || plan.model_id] }
-    else {
+    else if (fieldWatch) {
+      delete config.quality.judge
+      config.test_channel = 'account'
+      // 字段看护只按真实请求判定，不再由上游 5xx 额外触发检测。
+      config.quality.trigger_on_upstream_5xx = false
+    } else {
       const judge = source.quality.judge
       if (!judge?.group_id || !judge.model_id.trim() || !judge.prompt.trim()) throw new Error('qualityOps.configureJudge')
       if (!random && (!config.prompt.trim() || !config.quality.expected_answer.trim())) throw new Error('qualityOps.questionRequired')
@@ -189,7 +210,7 @@ export function buildQualityRulePatch(
   }
   if (fields.includes('action')) {
     config.quality = qualityActionPayload({ ...config.quality,
-      action: source.quality.action, remove_group_ids: source.quality.remove_group_ids,
+      action: source.quality.action, remove_group_ids: source.quality.remove_group_ids, add_group_ids: source.quality.add_group_ids,
       remove_models: source.quality.remove_models, recovery_concurrency: source.quality.recovery_concurrency,
       bps: source.quality.bps })
   }
@@ -198,12 +219,19 @@ export function buildQualityRulePatch(
   if (config.test_channel === 'bps') config.quality.action = 'observe_only'
   if (config.quality.action === 'observe_only') {
     config.quality.remove_group_ids = []
+    delete config.quality.add_group_ids
     config.quality.auto_restore = false
     delete config.quality.bps
   }
   // Automatic BPS switching remains a separate native-probe policy.
   if (config.quality.action === 'enable_bps' && config.question_kind !== STATE_PROBE_QUESTION) throw new Error('qualityOps.bpsRequiresProbe')
   if (fields.includes('restore') && config.quality.action !== 'observe_only') config.quality.auto_restore = source.quality.auto_restore
+  // 字段看护：答错移出分组并移入降智分组，或只记录；判降智后不再看护，也不自动恢复。
+  if (config.question_kind === FIELD_WATCH_QUESTION) {
+    if (!fieldWatchSupportsAction(config.quality.action)) throw new Error('qualityOps.fieldWatchActionUnsupported')
+    if (config.quality.action === 'remove_groups' && !config.quality.add_group_ids?.length) throw new Error('qualityOps.fieldWatchAddGroupRequired')
+    config.quality.auto_restore = false
+  }
   // 满血关闭次数和「用量仍高时先不关」跟着「自动恢复」走：勾选修改自动恢复且开着时才用表单里的值，
   // 否则各规则保留自己的；原本不是开 BPS 的规则用默认值。
   if (config.quality.action === 'enable_bps' && config.quality.bps) {

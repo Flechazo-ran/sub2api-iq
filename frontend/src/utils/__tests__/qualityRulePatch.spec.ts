@@ -122,6 +122,50 @@ describe('quality rule partial updates', () => {
     expect(updated.pelican_config!.quality).not.toHaveProperty('judge')
   })
 
+  it('bulk switches to field watch without a question, judge, BPS channel, 5xx trigger or restoration', () => {
+    const rule = plan()
+    Object.assign(rule.pelican_config!, { test_channel: 'bps', model_ids: ['old-model', 'gpt-6-sol'] })
+    rule.pelican_config!.quality!.trigger_on_upstream_5xx = true
+    rule.pelican_config!.quality!.auto_restore = true
+    const input = draft()
+    Object.assign(input.pelican_config, { question_kind: 'field_watch', test_channel: 'account', reasoning_effort: 'xhigh' })
+    delete input.pelican_config.quality.judge
+    // 答错要移进降智分组：只改检测方式、原规则没有移入分组时不能保存。
+    expect(() => buildQualityRulePatch(rule, input, ['test'])).toThrow('qualityOps.fieldWatchAddGroupRequired')
+    input.pelican_config.quality.add_group_ids = [9, 21]
+    const updated = buildQualityRulePatch(rule, input, ['test', 'action'])
+    expect(updated.pelican_config).toMatchObject({ question_kind: 'field_watch', test_channel: 'account', prompt: '', parallel_count: 1,
+      reasoning_effort: 'xhigh', model_ids: ['old-model', 'gpt-6-sol'],
+      quality: { expected_answer: '', action: 'remove_groups', remove_group_ids: [21], add_group_ids: [9], trigger_on_upstream_5xx: false, auto_restore: false } })
+    expect(updated.pelican_config!.quality).not.toHaveProperty('judge')
+    expect(updated.pelican_config).not.toHaveProperty('field_watch')
+    // 字段看护只给「移出并移入降智分组」和「只记录」两种处理。
+    for (const action of ['isolate_models', 'disable_scheduling', 'remove_models'] as const) {
+      input.pelican_config.quality.action = action
+      input.pelican_config.quality.remove_models = ['gpt-6-astra']
+      expect(() => buildQualityRulePatch(plan(), input, ['test', 'action']), action).toThrow('qualityOps.fieldWatchActionUnsupported')
+    }
+    input.pelican_config.quality.action = 'observe_only'
+    const observed = buildQualityRulePatch(plan(), input, ['test', 'action', 'restore'])
+    expect(observed.pelican_config!.quality).toMatchObject({ action: 'observe_only', remove_group_ids: [], auto_restore: false })
+    expect(observed.pelican_config!.quality).not.toHaveProperty('add_group_ids')
+  })
+
+  it('keeps add groups only for group removal and never overlapping the removed groups', () => {
+    const input = draft()
+    input.pelican_config.quality.remove_group_ids = [21, 22]
+    input.pelican_config.quality.add_group_ids = [22, 9, 9]
+    expect(buildQualityRulePatch(plan(), input, ['action']).pelican_config!.quality).toMatchObject({ remove_group_ids: [21, 22], add_group_ids: [9] })
+    input.pelican_config.quality.action = 'disable_scheduling'
+    expect(buildQualityRulePatch(plan(), input, ['action']).pelican_config!.quality).not.toHaveProperty('add_group_ids')
+    const source = plan().pelican_config!
+    source.quality!.add_group_ids = [9]
+    const copy = copyQualityRuleConfig(source)
+    expect(copy.quality.add_group_ids).toEqual([9])
+    copy.quality.add_group_ids!.push(10)
+    expect(source.quality!.add_group_ids).toEqual([9])
+  })
+
   it('does not convert probe rules when editing only failure actions', () => {
     const rule = plan()
     rule.pelican_config!.question_kind = 'state_probe'

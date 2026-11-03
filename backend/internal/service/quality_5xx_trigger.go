@@ -127,7 +127,7 @@ func (s *ScheduledTestRunnerService) runQualityTriggeredAccount(ctx context.Cont
 	}
 	qualityPlan := false
 	for _, plan := range plans {
-		if plan != nil && plan.Enabled && plan.PelicanConfig != nil && plan.PelicanConfig.Quality != nil && plan.PelicanConfig.Quality.TriggerOnUpstream5xx {
+		if plan != nil && plan.Enabled && plan.PelicanConfig != nil && plan.PelicanConfig.Quality != nil && plan.PelicanConfig.Quality.TriggerOnUpstream5xx && !isOpenAICodexFieldWatchPlan(plan.PelicanConfig) {
 			qualityPlan = true
 			break
 		}
@@ -142,7 +142,8 @@ func (s *ScheduledTestRunnerService) runQualityTriggeredAccount(ctx context.Cont
 		// probe and make an opted-in 5xx signal ineffective.
 	}
 	for _, plan := range plans {
-		if !plan.Enabled || plan.PelicanConfig == nil || plan.PelicanConfig.Quality == nil || !plan.PelicanConfig.Quality.TriggerOnUpstream5xx {
+		// 字段看护规则只认 safety_buffering，不参与 5xx 触发。
+		if !plan.Enabled || plan.PelicanConfig == nil || plan.PelicanConfig.Quality == nil || !plan.PelicanConfig.Quality.TriggerOnUpstream5xx || isOpenAICodexFieldWatchPlan(plan.PelicanConfig) {
 			continue
 		}
 		plan.TriggerSource = quality5xxSource

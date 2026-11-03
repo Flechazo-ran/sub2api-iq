@@ -2693,6 +2693,8 @@ export interface QualityPolicy {
   expected_answer: string
   action: 'openai_two_fa_admission' | 'isolate_models' | 'remove_groups' | 'remove_models' | 'disable_scheduling' | 'enable_bps' | 'observe_only'
   remove_group_ids: number[]
+  // 只用于 remove_groups：答错时同时把账号加入这些分组（如「降智」分组），不能和移出分组重叠。
+  add_group_ids?: number[]
   remove_models?: string[]
   recovery_concurrency?: number
   auto_restore: boolean
@@ -2721,9 +2723,12 @@ export interface PelicanTestConfig {
   quality_restore_diagnostic?: QualityRestoreDiagnostic
   quality_model_outcomes?: Record<string, 'passed' | 'failed' | 'inconclusive' | 'skipped'>
   quality_model_actions?: Record<string, string>
+  // 'field_watch' = 字段看护连续 3 次没看到 safety_buffering 后触发的糖果题复核。
   trigger_source?: string
+  // Result-only: 字段显示降智、但复核糖果题答对；不处置，等人工确认。
+  field_watch_mismatch?: boolean
   quality?: QualityPolicy
-  question_kind?: 'candy' | 'pelican' | 'state_probe' | 'random_reasoning' | 'astra_probe'
+  question_kind?: 'candy' | 'pelican' | 'state_probe' | 'random_reasoning' | 'astra_probe' | 'field_watch'
   // Result-only identity of a runtime-generated question.
   random_question?: { id: string; family: 'paths' | 'weighted_xor'; version: string }
   // Result-only signature of the candy prompt rendered for this run.

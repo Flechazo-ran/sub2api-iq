@@ -33,7 +33,9 @@ type QualityPolicy struct {
 	ExpectedAnswer       string                      `json:"expected_answer"`
 	Action               string                      `json:"action"`
 	RemoveGroupIDs       []int64                     `json:"remove_group_ids"`
-	RemoveModels         []string                    `json:"remove_models,omitempty"`
+	// 失败时把账号加入这些分组（只用于 remove_groups）。
+	AddGroupIDs  []int64  `json:"add_group_ids,omitempty"`
+	RemoveModels []string `json:"remove_models,omitempty"`
 	// RecoveryConcurrency is the temporary OAuth concurrency cap applied when
 	// this rule quarantines an account. Zero keeps the safe default of five.
 	RecoveryConcurrency int               `json:"recovery_concurrency,omitempty"`
@@ -45,6 +47,13 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	q := plan.PelicanConfig.Quality
 	if q == nil {
 		return nil
+	}
+	if q.Action != "remove_groups" {
+		q.AddGroupIDs = nil
+	}
+	// 字段看护只做「仅记录」或「移出分组（可同时移入指定分组）」，其他处置直接拒绝，不偷偷改。
+	if isOpenAICodexFieldWatchPlan(plan.PelicanConfig) && q.Action != QualityActionObserveOnly && q.Action != "remove_groups" {
+		return fmt.Errorf("字段看护只支持「仅记录」(observe_only) 或「移出分组」(remove_groups，可同时移入 add_group_ids) 处置，不支持 %q", q.Action)
 	}
 	if q.Action == QualityActionOpenAITwoFAAdmission {
 		if q.Admission == nil || !q.Admission.Enabled || q.Admission.Validate() != nil || plan.PelicanConfig.QuestionKind != "candy" || plan.PelicanConfig.ParallelCount != 1 || plan.ModelID != q.Admission.ModelID || plan.PelicanConfig.ReasoningEffort != q.Admission.ReasoningEffort || plan.PelicanConfig.TestChannel == "bps" || q.AutoRestore || plan.AutoRecover || plan.PelicanConfig.Prompt != CandyPrompt {
@@ -61,11 +70,11 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	if plan.AutoRecover {
 		return fmt.Errorf("quality plans use auto_restore, not connectivity auto_recover")
 	}
-	if !isQualityAnswerQuestion(plan.PelicanConfig.QuestionKind) && plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexAstraProbeQuestionKind {
+	if !isQualityAnswerQuestion(plan.PelicanConfig.QuestionKind) && plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexAstraProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexFieldWatchQuestionKind {
 		return fmt.Errorf("quality plans require a text answer question")
 	}
 	// 探针自带判定；随机题的参考答案由执行器生成，其他答题规则必须配置答案。
-	if plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexAstraProbeQuestionKind && plan.PelicanConfig.QuestionKind != QualityRandomQuestionKind {
+	if plan.PelicanConfig.QuestionKind != OpenAICodexStateProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexAstraProbeQuestionKind && plan.PelicanConfig.QuestionKind != OpenAICodexFieldWatchQuestionKind && plan.PelicanConfig.QuestionKind != QualityRandomQuestionKind {
 		if strings.TrimSpace(q.ExpectedAnswer) == "" || len(q.ExpectedAnswer) > 4000 {
 			return fmt.Errorf("expected answer must be 1–4000 bytes")
 		}
@@ -127,6 +136,23 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 			return fmt.Errorf("invalid or duplicate group ID")
 		}
 		seen[id] = true
+	}
+	if q.Action != "remove_groups" {
+		return nil
+	}
+	if len(q.AddGroupIDs) > 100 {
+		return fmt.Errorf("invalid, duplicate or overlapping add group ID")
+	}
+	remove := map[int64]bool{}
+	for _, id := range q.RemoveGroupIDs {
+		remove[id] = true
+	}
+	added := map[int64]bool{}
+	for _, id := range q.AddGroupIDs {
+		if id <= 0 || added[id] || remove[id] {
+			return fmt.Errorf("invalid, duplicate or overlapping add group ID")
+		}
+		added[id] = true
 	}
 	return nil
 }
@@ -211,7 +237,21 @@ func (s *ScheduledTestService) ListQualityPlans(ctx context.Context) ([]*Schedul
 	return s.planRepo.ListQualityPlans(ctx)
 }
 func (s *ScheduledTestService) TriggerQuality(ctx context.Context, id int64) error {
+	// 字段看护规则不会被定时调度领到，「立即检测」直接跑一次糖果题复核。
+	if s.fieldWatchRun != nil {
+		if plan, err := s.planRepo.GetByID(ctx, id); err == nil && plan != nil && isOpenAICodexFieldWatchPlan(plan.PelicanConfig) {
+			return s.fieldWatchRun(ctx, id)
+		}
+	}
+	if plan, err := s.planRepo.GetByID(ctx, id); err == nil && qualityQuarantineHeld(ctx, s.planRepo, plan) {
+		return errQualityQuarantineHeld
+	}
 	return s.planRepo.TriggerQuality(ctx, id)
+}
+
+// FieldWatchStatus 返回字段看护的实时状态；accountIDs 为空时返回所有有状态的账号。
+func (s *ScheduledTestService) FieldWatchStatus(accountIDs []int64) []QualityFieldWatchStatus {
+	return s.fieldWatch.statuses(accountIDs)
 }
 
 func (s *ScheduledTestService) ListQualityHistory(ctx context.Context, beforeID int64) (*QualityHistoryPage, error) {

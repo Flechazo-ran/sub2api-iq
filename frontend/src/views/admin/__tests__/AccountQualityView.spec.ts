@@ -4,7 +4,7 @@ import { createPinia } from 'pinia'
 import AccountQualityView from '../AccountQualityView.vue'
 import * as accountsAPI from '@/api/admin/accounts'
 import scheduledTests from '@/api/admin/scheduledTests'
-import { createQualityPreset, listQualityPresets, type QualityRulePreset, createQualityTemplate, deleteQualityTemplate, listQualityPlans, listQualityOperations, listQualityTemplates, runQualityPlan, updateQualityTemplate, type QualityRuleTemplate } from '@/api/admin/accountQuality'
+import { createQualityPreset, listQualityPresets, type QualityRulePreset, createQualityTemplate, deleteQualityTemplate, listQualityFieldWatch, listQualityPlans, listQualityOperations, listQualityTemplates, runQualityPlan, updateQualityTemplate, type QualityRuleTemplate } from '@/api/admin/accountQuality'
 import { useAccountQualityStore } from '@/stores/accountQuality'
 import { useAuthStore } from '@/stores/auth'
 import type { ScheduledTestPlan } from '@/types'
@@ -18,15 +18,16 @@ vi.mock('@/stores/auth', async () => {
 vi.mock('@/components/layout/AppLayout.vue', () => ({ default: { template: '<main><slot /></main>' } }))
 vi.mock('vue-i18n', async () => ({ ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'), useI18n: () => ({ t: (key: string) => key, te: () => true }) }))
 vi.mock('@/api/admin/accountQuality', () => ({ listQualityPlans: vi.fn(), runQualityPlan: vi.fn(), listQualityOperations: vi.fn().mockResolvedValue({items:[],next_cursor:0}),
-  previewQualityOwnership: vi.fn().mockResolvedValue({ plan_id: 1, models: [], group_ids: [], entries: [], action: '', ownership_retained: false, relinquishable_count: 0 }), reconcileQualityOwnership: vi.fn(), listQualityPresets: vi.fn(), createQualityPreset: vi.fn(), listQualityTemplates: vi.fn().mockResolvedValue([]), createQualityTemplate: vi.fn(), updateQualityTemplate: vi.fn(), deleteQualityTemplate: vi.fn() }))
+  previewQualityOwnership: vi.fn().mockResolvedValue({ plan_id: 1, models: [], group_ids: [], entries: [], action: '', ownership_retained: false, relinquishable_count: 0 }), reconcileQualityOwnership: vi.fn(), listQualityPresets: vi.fn(), createQualityPreset: vi.fn(), listQualityTemplates: vi.fn().mockResolvedValue([]), createQualityTemplate: vi.fn(), updateQualityTemplate: vi.fn(), deleteQualityTemplate: vi.fn(), listQualityFieldWatch: vi.fn().mockResolvedValue([]) }))
 vi.mock('@/api/admin/scheduledTests', () => ({ default: { create: vi.fn(), update: vi.fn(), delete: vi.fn(), listResults: vi.fn(), getResult: vi.fn() } }))
 vi.mock('@/api/admin/accounts', () => ({ list: vi.fn().mockResolvedValue({ items: [{ id: 1, name: 'Test account', platform: 'openai', type: 'oauth' }], total: 1 }) }))
-vi.mock('@/api/admin/groups', () => ({ getModelAllowlistCandidates: vi.fn().mockResolvedValue(["test-judge"]), getAllIncludingInactive: vi.fn().mockResolvedValue([{ id: 21, name: 'Quality pool', status:'active', platform: 'openai' }]) }))
+vi.mock('@/api/admin/groups', () => ({ getModelAllowlistCandidates: vi.fn().mockResolvedValue(["test-judge"]), getAllIncludingInactive: vi.fn().mockResolvedValue([{ id: 1, name: 'Group one', status:'active', platform: 'openai' }, { id: 2, name: 'Group two', status:'active', platform: 'openai' }, { id: 8, name: 'Claude-降智', status:'active', platform: 'anthropic' }, { id: 9, name: 'GPT-降智', status:'active', platform: 'openai' }, { id: 21, name: 'Quality pool', status:'active', platform: 'openai' }]) }))
 vi.mock('@/components/account/ModelWhitelistSelector.vue', () => ({ default: { props: ['modelValue'], template: '<div data-testid="model-selector">{{ modelValue.join(",") }}</div>' } }))
 const mountView = () => mount(AccountQualityView, { global: { plugins: [createPinia()], stubs: { Teleport: true, AppLayout: { template: '<main><slot /></main>' } } } })
 describe('quality operations', () => {
   beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); useAuthStore().user!.id = 1; useAuthStore().user!.role = 'admin'; vi.mocked(scheduledTests.create).mockReset(); vi.mocked(scheduledTests.delete).mockReset().mockResolvedValue(undefined); vi.mocked(scheduledTests.update).mockReset(); vi.mocked(accountsAPI.list).mockReset().mockResolvedValue({ items: [{ id: 1, name: 'Test account', platform: 'openai', type: 'oauth' }], total: 1 } as any); vi.mocked(listQualityPlans).mockResolvedValue([]); vi.mocked(listQualityOperations).mockResolvedValue({items:[],next_cursor:0})
     vi.mocked(listQualityTemplates).mockReset().mockResolvedValue([])
+    vi.mocked(listQualityFieldWatch).mockReset().mockResolvedValue([])
     vi.mocked(listQualityPresets).mockReset().mockResolvedValue([])
     vi.mocked(createQualityPreset).mockReset()
     vi.mocked(createQualityTemplate).mockReset().mockResolvedValue({ template: groupRule(), created: 0 })
@@ -1963,6 +1964,307 @@ describe('quality operations', () => {
     await vm.history({ id: 1 })
     expect(wrapper.find('pre').text()).toContain('<img')
     expect(wrapper.find('pre img').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  const fieldWatchPlan = (): ScheduledTestPlan => ({
+    ...rules()[0], model_id: 'gpt-6-astra', cron_expression: '@random 10-15',
+    pelican_config: { question_kind: 'field_watch', test_channel: 'account', prompt: '', reasoning_effort: 'high', parallel_count: 1, model_ids: ['gpt-6-astra'],
+      quality: { expected_answer: '', action: 'remove_groups', remove_group_ids: [21], add_group_ids: [9], auto_restore: false, trigger_on_upstream_5xx: false } },
+  })
+  // 账号 1 当前在 #1、#9（降智）两个分组；#8 名字带降智但不是 OpenAI 分组，不能当默认移入分组。
+  const groupedAccounts = () => vi.mocked(accountsAPI.list).mockResolvedValue({ items: [
+    { id: 1, name: 'Test account', platform: 'openai', type: 'oauth', group_ids: [1, 9] },
+    { id: 4, name: 'Second account', platform: 'openai', type: 'oauth', group_ids: [2] },
+  ], total: 2 } as any)
+
+  it('saves the selected add group alongside removed groups for remove_groups', async () => {
+    const wrapper = mountView(); await flushPromises()
+    const vm = wrapper.vm as any
+    vm.newPlan(); await flushPromises()
+    vm.accountScope = 'manual'; vm.selectedAccounts = [1]
+    await wrapper.get('[data-testid="quality-remove-groups"] input[value="1"]').setValue(true)
+    expect(wrapper.get('[data-testid="quality-add-groups"] input[value="1"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="quality-add-groups"] input[value="2"]').setValue(true)
+    expect(vm.form.pelican_config.quality.remove_group_ids).toEqual([1])
+    expect(vm.form.pelican_config.quality.add_group_ids).toEqual([2])
+    await vm.save()
+    expect(scheduledTests.create).toHaveBeenCalledWith(expect.objectContaining({ account_id: 1, pelican_config: expect.objectContaining({
+      quality: expect.objectContaining({ action: 'remove_groups', remove_group_ids: [1], add_group_ids: [2] }),
+    }) }))
+    wrapper.unmount()
+  })
+
+  it('drops a pending add group when the action is observe_only', async () => {
+    const wrapper = mountView(); await flushPromises()
+    const vm = wrapper.vm as any
+    vm.newPlan(); await flushPromises()
+    vm.accountScope = 'manual'; vm.selectedAccounts = [1]
+    await wrapper.get('[data-testid="quality-remove-groups"] input[value="1"]').setValue(true)
+    await wrapper.get('[data-testid="quality-add-groups"] input[value="2"]').setValue(true)
+    await wrapper.get('[data-testid="quality-action-observe-only"]').setValue(true)
+    expect(wrapper.find('[data-testid="quality-add-groups"]').exists()).toBe(false)
+    await vm.save()
+    const body = vi.mocked(scheduledTests.create).mock.calls.at(-1)![0] as any
+    expect(body.pelican_config.quality.add_group_ids ?? []).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('hides schedule, question, judge, channel, parallel and restore inputs for field watch and saves the default move into the degraded group', async () => {
+    groupedAccounts()
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newPlan(); vm.accountScope = 'manual'; await flushPromises()
+    vm.form.pelican_config.parallel_count = 3
+    await wrapper.get('[data-testid="quality-question-kind"]').setValue('field_watch')
+    expect(wrapper.find('[data-testid="quality-field-watch-hint"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="quality-field-watch-schedule"]').text()).toBe('qualityOps.fieldWatchSchedule')
+    for (const hidden of ['input[placeholder="*/30 * * * *"]', '[data-testid="quality-schedule-random"]', '[data-testid="quality-schedule-30"]', '#quality-prompt',
+      '[data-testid="quality-judge-settings"]', '#quality-judge-models', '[data-testid="quality-candy-builtin"]', '[data-testid="quality-test-channel"]',
+      '[data-testid="quality-parallel"]', '[data-testid="quality-trigger-5xx"]', '[data-testid="quality-auto-restore"]',
+      '[data-testid="quality-action-isolate-models"]', '[data-testid="quality-action-enable-bps"]', '[data-testid="quality-action-remove-models"]',
+      '[data-testid="quality-action-observe-only"]', 'input[type="radio"][value="disable_scheduling"]']) {
+      expect(wrapper.find(hidden).exists(), hidden).toBe(false)
+    }
+    expect(wrapper.text()).not.toContain('qualityOps.judgeTitle')
+    expect(wrapper.find('[data-testid="quality-field-watch-candy"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-reasoning-effort"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-field-watch-models-hint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-field-watch-settle"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('qualityOps.fieldWatchModels')
+    expect(wrapper.text()).toContain('qualityOps.fieldWatchFailureAction')
+    const action = wrapper.get('[data-testid="quality-field-watch-action"]')
+    expect(action.findAll('option').map(option => option.attributes('value'))).toEqual(['remove_groups', 'observe_only'])
+    expect((action.element as HTMLSelectElement).value).toBe('remove_groups')
+    expect(wrapper.find('input[placeholder="gpt-6-astra"]').element).toHaveProperty('value', 'gpt-6-astra')
+    await wrapper.get('[data-testid="quality-add-model"]').trigger('click')
+    await wrapper.get('[data-testid="quality-extra-model"]').setValue('gpt-6-sol')
+    // 选好账号后，移出 = 账号当前所在分组（不含降智分组），移入 = 名字带降智的 OpenAI 分组。
+    await wrapper.get('[data-testid="quality-account-picker"] input[value="1"]').setValue(true); await flushPromises()
+    expect(vm.form.pelican_config.quality.remove_group_ids).toEqual([1])
+    expect(vm.form.pelican_config.quality.add_group_ids).toEqual([9])
+    vm.form.pelican_config.quality.trigger_on_upstream_5xx = true
+    vm.form.pelican_config.quality.auto_restore = true
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.create).toHaveBeenCalledTimes(1)
+    const body = vi.mocked(scheduledTests.create).mock.calls[0][0] as any
+    expect(body).toMatchObject({ account_id: 1, model_id: 'gpt-6-astra', cron_expression: '*/30 * * * *',
+      pelican_config: { question_kind: 'field_watch', test_channel: 'account', prompt: '', parallel_count: 1, reasoning_effort: 'high',
+        model_ids: ['gpt-6-astra', 'gpt-6-sol'], quality: { expected_answer: '', action: 'remove_groups', remove_group_ids: [1], add_group_ids: [9],
+          auto_restore: false, trigger_on_upstream_5xx: false } } })
+    expect(body.pelican_config.quality).not.toHaveProperty('judge')
+    expect(body.pelican_config).not.toHaveProperty('field_watch')
+    wrapper.unmount()
+  })
+
+  it('defaults a field watch group rule to its filtered group until the operator edits the groups', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newPlan(); await flushPromises()
+    vm.accountGroup = '2'; await flushPromises()
+    await wrapper.get('[data-testid="quality-question-kind"]').setValue('field_watch'); await flushPromises()
+    expect(vm.form.pelican_config.quality).toMatchObject({ action: 'remove_groups', remove_group_ids: [2], add_group_ids: [9] })
+    vm.accountGroup = '1'; await flushPromises()
+    expect(vm.form.pelican_config.quality.remove_group_ids).toEqual([1])
+    await wrapper.get('[data-testid="quality-remove-groups"] input[value="21"]').setValue(true)
+    vm.accountGroup = '2'; await flushPromises()
+    expect(vm.form.pelican_config.quality.remove_group_ids).toEqual([1, 21])
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(createQualityTemplate).toHaveBeenCalledTimes(1)
+    const body = vi.mocked(createQualityTemplate).mock.calls[0][0] as any
+    expect(body.account_filter).toMatchObject({ group: '2' })
+    expect(body.pelican_config).toMatchObject({ question_kind: 'field_watch', quality: { action: 'remove_groups', remove_group_ids: [1, 21], add_group_ids: [9], auto_restore: false } })
+    wrapper.unmount()
+  })
+
+  it('requires a degraded group for field watch moves and lets the rule only record instead', async () => {
+    vi.mocked(listQualityPlans).mockResolvedValue([])
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newPlan(); vm.accountScope = 'manual'; vm.selectedAccounts = [1]; await flushPromises()
+    await wrapper.get('[data-testid="quality-question-kind"]').setValue('field_watch'); await flushPromises()
+    await wrapper.get('[data-testid="quality-add-groups"] input[value="9"]').setValue(false)
+    vm.form.pelican_config.quality.remove_group_ids = [21]
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    expect(scheduledTests.create).not.toHaveBeenCalled()
+    expect(wrapper.get('.editor-error').text()).toContain('qualityOps.fieldWatchAddGroupRequired')
+    await wrapper.get('[data-testid="quality-field-watch-action"]').setValue('observe_only')
+    expect(wrapper.find('[data-testid="quality-remove-groups"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-add-groups"]').exists()).toBe(false)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    const body = vi.mocked(scheduledTests.create).mock.calls[0][0] as any
+    expect(body.pelican_config.quality).toMatchObject({ action: 'observe_only', remove_group_ids: [], auto_restore: false })
+    expect(body.pelican_config.quality).not.toHaveProperty('add_group_ids')
+    wrapper.unmount()
+  })
+
+  it('switches into and out of field watch without carrying probe, random or BPS observation state', async () => {
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    vm.newPlan(); vm.accountScope = 'manual'; await flushPromises()
+    const kind = wrapper.get('[data-testid="quality-question-kind"]')
+    await kind.setValue('state_probe')
+    expect(vm.form.cron_expression).toBe('*/2 * * * *')
+    await kind.setValue('field_watch')
+    expect(vm.form.cron_expression).toBe('*/30 * * * *')
+    expect(vm.form.pelican_config.quality.add_group_ids).toEqual([9])
+    await kind.setValue('candy')
+    // 字段看护自动带出、没人改过的分组不留给糖果题。
+    expect(vm.form.pelican_config.quality).toMatchObject({ remove_group_ids: [], add_group_ids: [] })
+    expect(vm.form.pelican_config.prompt).toBeTruthy()
+    expect(vm.form.pelican_config.quality.expected_answer).toBe('21')
+    await wrapper.get('[data-testid="quality-action-isolate-models"]').setValue(true)
+    await kind.setValue('field_watch')
+    // 不支持的处理方式改回默认的「移出并移入降智分组」，不是只记录。
+    expect(vm.form.pelican_config.quality).toMatchObject({ action: 'remove_groups', auto_restore: false })
+    await kind.setValue('random_reasoning')
+    expect(vm.form.pelican_config.prompt).toBe('')
+    await kind.setValue('field_watch')
+    await kind.setValue('candy')
+    expect(wrapper.find('#quality-prompt').exists()).toBe(true)
+    expect(vm.form.pelican_config.prompt).toBeTruthy()
+    expect(vm.form.pelican_config.quality.expected_answer).toBe('21')
+    expect(wrapper.find('[data-testid="quality-candy-builtin"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="quality-test-channel"]').setValue('bps')
+    expect(wrapper.find('[data-testid="quality-action-observe-only"]').exists()).toBe(false)
+    await kind.setValue('field_watch')
+    expect(vm.form.pelican_config.test_channel).toBe('account')
+    expect(wrapper.find('[data-testid="quality-bps-observation-hint"]').exists()).toBe(false)
+    expect((wrapper.get('[data-testid="quality-field-watch-action"]').element as HTMLSelectElement).value).toBe('observe_only')
+    wrapper.unmount()
+  })
+
+  it('edits and copies a field watch rule without exposing or replacing its stored schedule or groups', async () => {
+    groupedAccounts()
+    vi.mocked(listQualityPlans).mockResolvedValue([fieldWatchPlan()])
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    await wrapper.get('[data-plan-id="1"] .rule-actions button:nth-child(2)').trigger('click'); await flushPromises()
+    expect(wrapper.find('[data-testid="quality-field-watch-schedule"]').exists()).toBe(true)
+    expect(wrapper.find('input[placeholder="*/30 * * * *"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-judge-settings"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="quality-auto-restore"]').exists()).toBe(false)
+    await wrapper.get('#quality-rule-form').trigger('submit'); await flushPromises()
+    const [id, body] = vi.mocked(scheduledTests.update).mock.calls[0] as any
+    expect(id).toBe(1)
+    expect(body).toMatchObject({ cron_expression: '@random 10-15', pelican_config: { question_kind: 'field_watch', prompt: '', parallel_count: 1,
+      quality: { action: 'remove_groups', remove_group_ids: [21], add_group_ids: [9], auto_restore: false } } })
+    expect(body.pelican_config.quality).not.toHaveProperty('judge')
+    vm.copyRule(vm.plans[0]); await flushPromises()
+    expect(vm.form.pelican_config.question_kind).toBe('field_watch')
+    expect(vm.form.pelican_config.quality).toMatchObject({ remove_group_ids: [21], add_group_ids: [9] })
+    expect(wrapper.find('[data-testid="quality-field-watch-schedule"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('describes field watch moves on rule and group-rule cards and formats the Chinese text', async () => {
+    const template = { ...groupRule(), pelican_config: fieldWatchPlan().pelican_config! }
+    vi.mocked(listQualityPlans).mockResolvedValue([fieldWatchPlan()])
+    vi.mocked(listQualityTemplates).mockResolvedValue([template])
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    expect(wrapper.get('[data-plan-id="1"] [data-testid="quality-field-watch-target"]').text()).toBe('qualityOps.fieldWatchTarget · qualityOps.fieldWatchStopNote')
+    expect(wrapper.get('[data-template-id="7"] [data-testid="quality-field-watch-target"]').text()).toBe('qualityOps.fieldWatchTarget · qualityOps.fieldWatchStopNote')
+    expect(vm.planGroups({ pelican_config: { ...fieldWatchPlan().pelican_config!, quality: { ...fieldWatchPlan().pelican_config!.quality!, action: 'observe_only' } } }))
+      .toBe('qualityOps.observeOnly · qualityOps.fieldWatchStopNote')
+    expect(vm.planGroups(rules()[0])).toBe('Group one')
+    wrapper.unmount()
+    const { createI18n } = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
+    const { default: zh } = await import('@/i18n/locales/zh')
+    const i18n = createI18n({ legacy: false, locale: 'zh', messages: { zh } })
+    expect(i18n.global.t('qualityOps.fieldWatchTarget', { removed: 'GPT-速刷-AUTO', added: 'GPT-降智' })).toBe('答错 → 移出 GPT-速刷-AUTO、移入 GPT-降智')
+    expect(i18n.global.t('qualityOps.fieldWatchStopNote')).toBe('判降智后停止看护')
+  })
+
+  it.each([
+    [{ observed: 12, streak: 0, verdict: 'healthy', last_seen_at: '2026-11-03T10:00:00Z', last_miss_at: '2026-11-03T09:00:00Z' }, 'qualityOps.fieldWatchObserved · qualityOps.fieldWatchHealthy'],
+    [{ observed: 12, streak: 2, verdict: 'healthy' }, 'qualityOps.fieldWatchObserved · qualityOps.fieldWatchMissStreak'],
+    [{ observed: 12, streak: 3, verdict: 'healthy', confirming: true }, 'qualityOps.fieldWatchObserved · qualityOps.fieldWatchConfirming'],
+    [{ observed: 12, streak: 0, verdict: 'degraded', settled: true }, 'qualityOps.fieldWatchObserved · qualityOps.fieldWatchSettled'],
+    [{ observed: 12, streak: 0, verdict: 'healthy', last_seen_at: '2026-11-03T09:00:00Z', last_miss_at: '2026-11-03T10:00:00Z' }, 'qualityOps.fieldWatchObserved · qualityOps.fieldWatchCandyPassed'],
+    [null, 'qualityOps.fieldWatchNoRequests'],
+  ] as const)('shows field watch cards as judged per request with live status %#', async (status, expected) => {
+    const candy = rules()[1]
+    candy.pelican_config!.question_kind = 'candy'
+    vi.mocked(listQualityPlans).mockResolvedValue([fieldWatchPlan(), candy])
+    vi.mocked(listQualityTemplates).mockResolvedValue([{ ...groupRule(), cron_expression: '@random 10-15', pelican_config: fieldWatchPlan().pelican_config!, plan_ids: [1] }])
+    vi.mocked(listQualityFieldWatch).mockResolvedValue(status ? [{ account_id: 1, confirming: false, settled: false, reason: 'stream checked', ...status } as any] : [])
+    vi.mocked(scheduledTests.listResults).mockResolvedValue([])
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    expect(listQualityFieldWatch).toHaveBeenCalledWith([1])
+    const card = wrapper.get('[data-plan-id="1"]')
+    expect(card.find('[data-testid="quality-schedule-tag"]').exists()).toBe(false)
+    expect(card.get('[data-testid="quality-field-watch-tag"]').text()).toBe('qualityOps.fieldWatchTag')
+    expect(card.get('[data-testid="quality-field-watch-rule"]').text()).toBe('qualityOps.fieldWatchRuleLine')
+    expect(card.text()).not.toContain('@random')
+    expect(card.text()).not.toContain('qualityOps.nextRun')
+    expect(card.find('.rule-warning').exists()).toBe(false)
+    expect(card.get('[data-testid="quality-field-watch-status"]').text()).toBe(`qualityOps.fieldWatchStatusLabel${expected}`)
+    expect(wrapper.get('[data-plan-id="2"] [data-testid="quality-schedule-tag"]').text()).toBe('*/30 * * * *')
+    expect(wrapper.find('[data-plan-id="2"] [data-testid="quality-field-watch-tag"]').exists()).toBe(false)
+    const template = wrapper.get('[data-template-id="7"]')
+    expect(template.find('[data-testid="quality-schedule-tag"]').exists()).toBe(false)
+    expect(template.get('[data-testid="quality-field-watch-tag"]').text()).toBe('qualityOps.fieldWatchTag')
+    expect(template.text()).not.toContain('@random')
+    expect(template.find('[data-testid="quality-field-watch-rule"]').exists()).toBe(true)
+    await vm.history(vm.plans[0]); await flushPromises()
+    expect(wrapper.get('[data-testid="quality-field-watch-detail-status"]').text()).toContain(expected)
+    wrapper.unmount()
+  })
+
+  it('keeps rules, records and editing usable when the field watch status endpoint is missing', async () => {
+    vi.mocked(listQualityPlans).mockResolvedValue([fieldWatchPlan()])
+    vi.mocked(listQualityFieldWatch).mockRejectedValue({ status: 404, message: 'Not Found' })
+    vi.mocked(listQualityOperations).mockResolvedValue({ items: [{ id: 10, plan_id: 1, account_id: 1, account_name: 'Account 1', status: 'success', error_message: '', quality_action: 'passed',
+      passed_count: 1, total_count: 1, result_ids: [10], pelican_config: { question_kind: 'candy', prompt: '', reasoning_effort: 'high', parallel_count: 1 } }] as any, next_cursor: 0 })
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    expect(listQualityFieldWatch).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.workspace-message').exists()).toBe(false)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.find('[data-plan-id="1"] [data-testid="quality-field-watch-tag"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quality-field-watch-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-operation-id="10"]').exists()).toBe(true)
+    await vm.load(); await flushPromises()
+    expect(listQualityFieldWatch).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.workspace-message').exists()).toBe(false)
+    expect(useAccountQualityStore().rulesError).toBe('')
+    vm.edit(vm.plans[0]); await flushPromises()
+    expect(wrapper.find('[data-testid="quality-field-watch-schedule"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('skips the field watch status request when no rule uses field watch', async () => {
+    vi.mocked(listQualityPlans).mockResolvedValue(rules())
+    const wrapper = mountView(); await flushPromises()
+    expect(listQualityFieldWatch).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('labels field watch reviews and warns when the candy check contradicts the field', async () => {
+    const config = { question_kind: 'candy', trigger_source: 'field_watch', field_watch_mismatch: true, prompt: '', reasoning_effort: 'high', parallel_count: 1, model_id: 'gpt-6-astra',
+      quality: { expected_answer: '21', action: 'remove_groups', remove_group_ids: [21], auto_restore: false } }
+    const operation = { id: 10, plan_id: 1, account_id: 1, account_name: 'Account 1', status: 'success', error_message: '', quality_action: 'passed',
+      passed_count: 1, total_count: 1, result_ids: [10], pelican_config: config }
+    const plain = { ...operation, id: 9, plan_id: 2, account_id: 2, account_name: 'Account 2', result_ids: [9], pelican_config: { ...config, trigger_source: undefined, field_watch_mismatch: undefined } }
+    vi.mocked(listQualityPlans).mockResolvedValue([fieldWatchPlan()])
+    vi.mocked(listQualityOperations).mockResolvedValue({ items: [operation, plain] as any, next_cursor: 0 })
+    vi.mocked(scheduledTests.getResult)
+      .mockResolvedValueOnce({ id: 10, status: 'success', error_message: '', response_text: '{"answer":21}', pelican_config: config } as any)
+      .mockResolvedValueOnce({ id: 9, status: 'success', error_message: '', response_text: '{"answer":21}', pelican_config: plain.pelican_config } as any)
+    const wrapper = mountView(); await flushPromises(); const vm = wrapper.vm as any
+    const row = wrapper.get('[data-operation-id="10"]')
+    expect(row.get('[data-testid="quality-field-watch-trigger"]').text()).toBe('qualityOps.fieldWatchTriggered')
+    expect(row.get('[data-testid="quality-field-watch-mismatch-badge"]').text()).toBe('qualityOps.fieldWatchMismatchShort')
+    const other = wrapper.get('[data-operation-id="9"]')
+    expect(other.find('[data-testid="quality-field-watch-trigger"]').exists()).toBe(false)
+    expect(other.find('[data-testid="quality-field-watch-mismatch-badge"]').exists()).toBe(false)
+    expect(vm.attentionCount).toBe(1)
+    useAccountQualityStore().operationFilter = 'attention'; await flushPromises()
+    expect(wrapper.find('[data-operation-id="10"]').exists()).toBe(true)
+    expect(wrapper.find('[data-operation-id="9"]').exists()).toBe(false)
+    await vm.operationDetails(operation); await flushPromises()
+    const warning = wrapper.get('[data-testid="quality-field-watch-mismatch"]')
+    expect(warning.attributes('role')).toBe('alert')
+    expect(warning.text()).toContain('qualityOps.fieldWatchMismatch')
+    expect(wrapper.get('[data-testid="quality-field-watch-trigger-detail"]').text()).toBe('qualityOps.fieldWatchTriggered')
+    expect(wrapper.get('[data-testid="quality-field-watch-mismatch-nav"]').text()).toBe('qualityOps.fieldWatchMismatchShort')
+    expect(wrapper.get('[data-testid="quality-result-badge"]').text()).toBe('qualityOps.passed')
+    await vm.operationDetails(plain); await flushPromises()
+    expect(wrapper.find('[data-testid="quality-field-watch-mismatch"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

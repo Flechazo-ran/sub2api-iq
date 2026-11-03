@@ -35,6 +35,53 @@ func TestQualityValidationAndGrading(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+func TestQualityAddGroupValidation(t *testing.T) {
+	plan := pelicanPlan()
+	plan.PelicanConfig.QuestionKind = "candy"
+	plan.PelicanConfig.Quality = &QualityPolicy{ExpectedAnswer: "42", Action: "remove_groups", RemoveGroupIDs: []int64{1}, AddGroupIDs: []int64{2, 3}}
+	_, err := nextPlanRun(plan, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, plan.PelicanConfig.Quality.AddGroupIDs)
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*QualityPolicy)
+	}{
+		{name: "overlaps removal", mutate: func(q *QualityPolicy) { q.AddGroupIDs = []int64{1} }},
+		{name: "duplicate", mutate: func(q *QualityPolicy) { q.AddGroupIDs = []int64{2, 2} }},
+		{name: "zero", mutate: func(q *QualityPolicy) { q.AddGroupIDs = []int64{0} }},
+		{name: "negative", mutate: func(q *QualityPolicy) { q.AddGroupIDs = []int64{-1} }},
+		{name: "too many", mutate: func(q *QualityPolicy) {
+			q.AddGroupIDs = make([]int64, 101)
+			for i := range q.AddGroupIDs {
+				q.AddGroupIDs[i] = int64(i + 2)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			copyPlan := *plan
+			cfg := *plan.PelicanConfig
+			q := *cfg.Quality
+			cfg.Quality = &q
+			copyPlan.PelicanConfig = &cfg
+			tc.mutate(copyPlan.PelicanConfig.Quality)
+			_, err := nextPlanRun(&copyPlan, time.Now())
+			require.Error(t, err)
+		})
+	}
+
+	for _, action := range []string{QualityActionObserveOnly, "disable_scheduling"} {
+		t.Run("clears for "+action, func(t *testing.T) {
+			p := pelicanPlan()
+			p.PelicanConfig.QuestionKind = "candy"
+			p.PelicanConfig.Quality = &QualityPolicy{ExpectedAnswer: "42", Action: action, RemoveGroupIDs: []int64{1}, AddGroupIDs: []int64{2, 3}}
+			_, err := nextPlanRun(p, time.Now())
+			require.NoError(t, err)
+			require.Nil(t, p.PelicanConfig.Quality.AddGroupIDs)
+		})
+	}
+}
+
 func TestQualityOutcomeRequiresCompletedWrongAnswerAndAllPassingRecovery(t *testing.T) {
 	passed := &ScheduledTestResult{Status: "success", QualityJudgment: &QualityJudgment{Verdict: "correct"}}
 	wrong := &ScheduledTestResult{Status: "failed", ErrorMessage: "answer_mismatch", QualityJudgment: &QualityJudgment{Verdict: "incorrect"}}

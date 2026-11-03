@@ -63,6 +63,9 @@ func (r *scheduledTestPlanRepository) ListDue(ctx context.Context, now time.Time
 		SELECT id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at, pelican_config, running_until
 		FROM scheduled_test_plans
 		WHERE enabled = true AND next_run_at <= $1
+		-- 字段看护规则只由真实请求触发复核，定时调度永远不领（含旧数据的 field_watch 布尔）。
+		AND COALESCE(pelican_config->>'question_kind', '') <> 'field_watch'
+		AND COALESCE(pelican_config->>'field_watch', '') <> 'true'
 		ORDER BY next_run_at ASC
 	`, now)
 	if err != nil {
@@ -307,14 +310,17 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 	result, err := tx.ExecContext(ctx, `UPDATE scheduled_test_plans
  SET running_until = $3, next_run_at = $4
  WHERE id = $1 AND enabled = true
- AND (next_run_at <= $2 OR ($7 AND pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'))
+ AND (next_run_at <= $2 OR ($7 AND pelican_config->'quality'->>'trigger_on_upstream_5xx'='true')
+   OR ($9 AND (pelican_config->>'question_kind'='field_watch' OR pelican_config->>'field_watch'='true')))
  AND (NOT $7 OR (pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'
    AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id=account_id AND type='oauth')
    AND ($8::timestamptz IS NULL OR last_run_at IS NULL OR last_run_at < $8 OR pelican_config->'quality'->>'action'='remove_models')))
  AND (running_until IS NULL OR running_until < $2) AND updated_at = $5 AND next_run_at = $6
  AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id = account_id AND deleted_at IS NULL)
  AND NOT EXISTS (SELECT 1 FROM scheduled_test_plans other WHERE other.account_id = scheduled_test_plans.account_id
- AND other.id <> scheduled_test_plans.id AND other.pelican_config IS NOT NULL AND other.running_until > $2)`, plan.ID, now, until, next, plan.UpdatedAt, plan.NextRunAt, plan.TriggerSource == "upstream_5xx", plan.TriggerObservedAt)
+ AND other.id <> scheduled_test_plans.id AND other.pelican_config IS NOT NULL AND other.running_until > $2)`, plan.ID, now, until, next, plan.UpdatedAt, plan.NextRunAt, plan.TriggerSource == "upstream_5xx", plan.TriggerObservedAt,
+		// 字段看护复核由真实请求（或「立即检测」）触发，规则的 next_run_at 永远在远期，按触发来源领取。
+		service.IsQualityFieldWatchTrigger(plan.TriggerSource))
 	if err != nil {
 		return false, err
 	}

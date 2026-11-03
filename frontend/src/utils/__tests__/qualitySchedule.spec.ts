@@ -38,4 +38,10 @@ describe('formatQualitySchedule', () => {
     expect(formatQualitySchedule('*/30 * * * *', t)).toBe('*/30 * * * *')
     expect(formatQualitySchedule(' @random 15-10 ', t)).toBe(' @random 15-10 ')
   })
+
+  it('shows field watch rules as judged per request instead of their stored cron', () => {
+    expect(formatQualitySchedule('*/30 * * * *', t, 'field_watch')).toBe('qualityOps.fieldWatchTag:{}')
+    expect(formatQualitySchedule('@random 10-15', t, 'field_watch')).toBe('qualityOps.fieldWatchTag:{}')
+    expect(formatQualitySchedule('*/30 * * * *', t, 'candy')).toBe('*/30 * * * *')
+  })
 })

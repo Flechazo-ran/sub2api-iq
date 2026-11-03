@@ -21,6 +21,30 @@ export async function listQualityOperations(beforeId = 0): Promise<{ items: Qual
   return { items: data.items ?? [], next_cursor: data.next_cursor ?? 0 }
 }
 
+// 字段看护的实时状态（只读，后端进程内存里的计数，重启后从 0 开始）。
+// observed = 进程启动以来计入看护的请求数；streak = 当前连续没看到 safety_buffering 的次数；
+// confirming = 糖果题复核进行中；settled = 已复核判降智、停止复测，直到再看到字段。
+export interface QualityFieldWatchStatus {
+  account_id: number
+  observed: number
+  streak: number
+  last_observed_at?: string | null
+  last_seen_at?: string | null
+  last_miss_at?: string | null
+  verdict: 'healthy' | 'degraded' | 'unknown' | ''
+  reason?: string
+  confirming: boolean
+  settled: boolean
+}
+// account_ids 不传 = 全部；id 太多时也不传，避免查询串过长。
+export async function listQualityFieldWatch(accountIds: number[] = []): Promise<QualityFieldWatchStatus[]> {
+  const ids = accountIds.join(',')
+  const { data } = await apiClient.get<{ items?: QualityFieldWatchStatus[] }>('/admin/account-quality-field-watch', {
+    params: ids && ids.length <= 2000 ? { account_ids: ids } : undefined,
+  })
+  return data?.items ?? []
+}
+
 // 「分组规则」：按账户筛选保存的规则，现在和之后匹配的账户各自得到一条规则。
 // group 为空 = 全部分组，'ungrouped' = 未分组，否则是分组 id；statuses 任一命中，空 = 全部状态。
 export interface QualityRuleAccountFilter {

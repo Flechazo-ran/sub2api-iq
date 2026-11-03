@@ -48,6 +48,10 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 	if isOpenAICodexAstraProbePlan(cfg) {
 		return s.runOpenAICodexAstraProbeScheduled(ctx, accountID, model, cfg)
 	}
+	// 字段看护规则没有可执行的题目：复核由规则执行器改写成糖果题后才会走到这里。
+	if isOpenAICodexFieldWatchPlan(cfg) {
+		return nil, errFieldWatchNotRunnable
+	}
 	// Recognize the exact built-in question in legacy HTML plans as well.
 	if isBuiltinCandyPlan(cfg) {
 		copy := *cfg
@@ -93,6 +97,12 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 }
 
 func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *ScheduledTestPlan) bool {
+	// 字段看护规则只在真实请求连续未见 safety_buffering（或页面「立即检测」）时跑复核，
+	// 定时轮次和 5xx 触发都不跑任何题。
+	fieldWatch := isOpenAICodexFieldWatchPlan(plan.PelicanConfig)
+	if fieldWatch && !isQualityFieldWatchSource(plan.TriggerSource) {
+		return false
+	}
 	var triggeredAccount *Account
 	if plan.TriggerSource == quality5xxSource && s.accountTestSvc != nil {
 		var lookupErr error
@@ -123,6 +133,17 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	if err != nil || !claimed {
 		return false
 	}
+	// 答错移出分组且不自动恢复的规则：号还在隔离中（被移进降智分组、没被人工放回）就不再检测，
+	// 只推进检测周期；人工把号放回承载分组后自动恢复检测。
+	if !fieldWatch && qualityQuarantineHeld(ctx, s.planRepo, plan) {
+		logger.LegacyPrintf("service.scheduled_test_runner", "quality plan=%d account=%d skipped: account is quarantined (no auto restore)", plan.ID, plan.AccountID)
+		finishCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stop()
+		if finishErr := s.planRepo.FinishPelican(finishCtx, plan.ID, until, time.Now()); finishErr != nil {
+			logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d finish failed: %v", plan.ID, finishErr)
+		}
+		return false
+	}
 	// Result-only metadata must not mutate the stored rule or shared plan config.
 	snapshot := *plan.PelicanConfig
 	snapshot.QualityRestoreDiagnostic = nil
@@ -134,6 +155,10 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	applyTriggeredQuality := true
 	if triggeredAccount != nil {
 		snapshot, applyTriggeredQuality = quality5xxTestConfig(triggeredAccount, plan.ModelID, snapshot)
+	}
+	if fieldWatch {
+		// 复核固定跑内置糖果题（答案 21、内置判分），模型和推理强度用规则里的。
+		snapshot = qualityFieldWatchTestConfig(snapshot)
 	}
 	plan.PelicanConfig = &snapshot
 	// Legacy rules can target API-key accounts, or an account can change type
@@ -254,15 +279,38 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 		plan.QualityModelOutcomes = qualityModelOutcomes(results, QualityModels(plan))
 	}
 	qualityAction := ""
+	fieldWatchOutcome := ""
 	if plan.PelicanConfig.Quality != nil {
 		qualityAction = "inconclusive"
 		freshSignal := true
 		if plan.TriggerSource == quality5xxSource && plan.TriggerObservedAt != nil && s.qualityTrigger != nil {
 			freshSignal = s.qualityTrigger.signalIsCurrent(plan.AccountID, *plan.TriggerObservedAt)
 		}
-		if applyTriggeredQuality && freshSignal && (qualityRoundHasResults(results) || plan.PelicanConfig.Quality.Action == QualityActionOpenAITwoFAAdmission) {
+		if fieldWatch {
+			// 字段看护复核：只有答错才按规则处置（移出 / 移入分组或仅记录）；答对不处置只记警告；
+			// 无法判断不算定论。字段看护不自动恢复，答对也不调用处置。
+			fieldWatchOutcome = qualityRoundOutcome(results)
+			switch fieldWatchOutcome {
+			case "failed":
+				s.releaseRestoredFieldWatchQuarantine(saveCtx, plan)
+				var actionErr error
+				qualityAction, actionErr = s.planRepo.ApplyQualityOutcome(saveCtx, plan, until, fieldWatchOutcome)
+				if actionErr != nil {
+					qualityAction = "action_error"
+					logger.LegacyPrintf("service.scheduled_test_runner", "field watch plan=%d action failed: %v", plan.ID, actionErr)
+				}
+			case "passed":
+				qualityAction = "no_change"
+			}
+		} else if applyTriggeredQuality && freshSignal && (qualityRoundHasResults(results) || plan.PelicanConfig.Quality.Action == QualityActionOpenAITwoFAAdmission) {
 			var actionErr error
-			qualityAction, actionErr = s.planRepo.ApplyQualityOutcome(saveCtx, plan, until, qualityRoundOutcome(results))
+			roundOutcome := qualityRoundOutcome(results)
+			if roundOutcome == "failed" && !plan.PelicanConfig.Quality.AutoRestore {
+				// 不自动恢复的移出分组规则：号被人工放回承载分组后又答错，先丢掉过期的隔离记录，
+				// 否则会按「保持隔离」处理而不再移出分组。
+				s.releaseRestoredFieldWatchQuarantine(saveCtx, plan)
+			}
+			qualityAction, actionErr = s.planRepo.ApplyQualityOutcome(saveCtx, plan, until, roundOutcome)
 			if actionErr != nil {
 				qualityAction = "action_error"
 				logger.LegacyPrintf("service.scheduled_test_runner", "quality plan=%d action failed: %v", plan.ID, actionErr)
@@ -286,6 +334,15 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 				result.PelicanConfig.QualityModelActions = nil
 			}
 		}
+		if fieldWatch && fieldWatchOutcome == "passed" && plan.TriggerSource == qualityFieldWatchSource && result.PelicanConfig != nil {
+			// 字段说降智、糖果题却答对：不处置，只在记录里留警告等人看。
+			result.PelicanConfig.FieldWatchMismatch = true
+			if result.QualityJudgment != nil {
+				judgment := *result.QualityJudgment
+				judgment.Reason = strings.TrimSpace(qualityFieldWatchMismatchReason + "；" + judgment.Reason)
+				result.QualityJudgment = &judgment
+			}
+		}
 		if result.Status == "success" {
 			succeeded = true
 		}
@@ -295,6 +352,9 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	}
 	if succeeded && plan.AutoRecover && plan.PelicanConfig.Quality == nil && !isBuiltinCandyPlan(plan.PelicanConfig) && !isOpenAICodexStateProbePlan(plan.PelicanConfig) {
 		s.tryRecoverAccount(saveCtx, plan.AccountID, plan.ID)
+	}
+	if fieldWatch {
+		plan.FieldWatchOutcome, plan.FieldWatchReason = fieldWatchRoundOutcome(plan.TriggerSource, fieldWatchOutcome, qualityAction)
 	}
 	finished := time.Now()
 	if plan.TriggerSource == quality5xxSource {

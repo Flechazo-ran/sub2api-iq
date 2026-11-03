@@ -26,12 +26,16 @@ type ScheduledTestRunnerService struct {
 	candyMonitor *ChannelMonitorV2CandyService
 
 	qualityTrigger *quality5xxTrigger
-	triggerCancel  context.CancelFunc
-	triggerWG      sync.WaitGroup
-	planSlots      chan struct{}
-	cron           *cron.Cron
-	startOnce      sync.Once
-	stopOnce       sync.Once
+	// fieldWatch 是网关侧的字段看护状态，手动复核的结论也回写到这里。
+	fieldWatch *codexAstraWatcher
+	// fieldWatchSpawn 只用于测试同步执行手动复核；nil 时起 goroutine。
+	fieldWatchSpawn func(func())
+	triggerCancel   context.CancelFunc
+	triggerWG       sync.WaitGroup
+	planSlots       chan struct{}
+	cron            *cron.Cron
+	startOnce       sync.Once
+	stopOnce        sync.Once
 }
 
 // NewScheduledTestRunnerService creates a new runner.
@@ -135,6 +139,7 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] ListDue error: %v", err)
 		return
 	}
+	plans = withoutFieldWatchPlans(plans)
 	if len(plans) == 0 {
 		return
 	}
@@ -224,4 +229,17 @@ func (s *ScheduledTestRunnerService) tryRecoverAccount(ctx context.Context, acco
 	if recovery.ClearedRateLimit {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d auto-recover: account=%d cleared rate-limit/runtime state", planID, accountID)
 	}
+}
+
+// withoutFieldWatchPlans 去掉字段看护规则：它们只由真实请求触发复核，定时轮次一律不跑。
+// 数据库查询已排除它们，这里兜底旧数据和测试替身。
+func withoutFieldWatchPlans(plans []*ScheduledTestPlan) []*ScheduledTestPlan {
+	kept := plans[:0]
+	for _, plan := range plans {
+		if plan != nil && isOpenAICodexFieldWatchPlan(plan.PelicanConfig) {
+			continue
+		}
+		kept = append(kept, plan)
+	}
+	return kept
 }

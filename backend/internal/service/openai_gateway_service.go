@@ -485,43 +485,42 @@ type OpenAIGatewayService struct {
 	harvestIPPoolSyncedAt  time.Time
 	harvestIPPoolCursor    atomic.Uint64
 	codexHarvestRunMu      sync.RWMutex
-	// codexAstraWatcher 按账号记录「连续未出现 safety_buffering」的次数；
-	// 连续 codexAstraDegradedStreakThreshold 次后触发糖果题复核。
-	codexAstraWatcher *codexAstraWatcher
-	// codexAstraConfirm 是糖果题复核的执行器，由装配层注入（测试中可为空）。
-	codexAstraConfirm func(ctx context.Context, accountID int64) (healthy bool, reason string)
-	accountRepo            AccountRepository
-	proxyRepo              ProxyRepository
-	usageLogRepo           UsageLogRepository
-	usageBillingRepo       UsageBillingRepository
-	userRepo               UserRepository
-	userSubRepo            UserSubscriptionRepository
-	cache                  GatewayCache
-	rpmCache               RPMCache
-	cfg                    *config.Config
-	codexDetector          CodexClientRestrictionDetector
-	schedulerSnapshot      *SchedulerSnapshotService
-	concurrencyService     *ConcurrencyService
-	billingService         *BillingService
-	rateLimitService       *RateLimitService
-	billingCacheService    *BillingCacheService
-	userGroupRateResolver  *userGroupRateResolver
-	httpUpstream           HTTPUpstream
-	pluginManager          *PluginManager
-	safetyPromptStore      *SafetyPromptStore
-	deferredService        *DeferredService
-	openAITokenProvider    *OpenAITokenProvider
-	excelOAuthReauth       *OpenAIOAuthReauthService
-	grokTokenProvider      *GrokTokenProvider
-	toolCorrector          *CodexToolCorrector
-	openaiWSResolver       OpenAIWSProtocolResolver
-	resolver               *ModelPricingResolver
-	channelService         *ChannelService
-	balanceNotifyService   *BalanceNotifyService
-	settingService         *SettingService
-	userPlatformQuotaRepo  UserPlatformQuotaRepository
-	liveAttestation        liveattestation.Provider
-	liveAttestationCipher  SecretEncryptor
+	// codexAstraWatcher 是字段看护：按账号记录「连续未出现 safety_buffering」的次数，
+	// 连续 codexAstraDegradedStreakThreshold 次后经质量规则执行器跑糖果题复核。
+	// 由装配层注入（测试中可为空，为空时不看护）。
+	codexAstraWatcher     *codexAstraWatcher
+	accountRepo           AccountRepository
+	proxyRepo             ProxyRepository
+	usageLogRepo          UsageLogRepository
+	usageBillingRepo      UsageBillingRepository
+	userRepo              UserRepository
+	userSubRepo           UserSubscriptionRepository
+	cache                 GatewayCache
+	rpmCache              RPMCache
+	cfg                   *config.Config
+	codexDetector         CodexClientRestrictionDetector
+	schedulerSnapshot     *SchedulerSnapshotService
+	concurrencyService    *ConcurrencyService
+	billingService        *BillingService
+	rateLimitService      *RateLimitService
+	billingCacheService   *BillingCacheService
+	userGroupRateResolver *userGroupRateResolver
+	httpUpstream          HTTPUpstream
+	pluginManager         *PluginManager
+	safetyPromptStore     *SafetyPromptStore
+	deferredService       *DeferredService
+	openAITokenProvider   *OpenAITokenProvider
+	excelOAuthReauth      *OpenAIOAuthReauthService
+	grokTokenProvider     *GrokTokenProvider
+	toolCorrector         *CodexToolCorrector
+	openaiWSResolver      OpenAIWSProtocolResolver
+	resolver              *ModelPricingResolver
+	channelService        *ChannelService
+	balanceNotifyService  *BalanceNotifyService
+	settingService        *SettingService
+	userPlatformQuotaRepo UserPlatformQuotaRepository
+	liveAttestation       liveattestation.Provider
+	liveAttestationCipher SecretEncryptor
 
 	openaiWSPoolOnce               sync.Once
 	openaiWSStateStoreOnce         sync.Once

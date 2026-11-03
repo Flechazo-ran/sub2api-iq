@@ -22,18 +22,30 @@ func TestPelicanClaimUsesDatabaseLeaseAndSavedVersion(t *testing.T) {
 	query := `(?s)UPDATE scheduled_test_plans.*enabled = true.*running_until IS NULL.*updated_at = \$5.*deleted_at IS NULL`
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT pg_try_advisory_xact_lock").WithArgs(plan.AccountID).WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
-	mock.ExpectExec(query).WithArgs(plan.ID, now, until, next, plan.UpdatedAt, nil, false, nil).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(query).WithArgs(plan.ID, now, until, next, plan.UpdatedAt, nil, false, nil, false).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	ok, err := repo.ClaimPelican(context.Background(), plan, now, until, next)
 	require.NoError(t, err)
 	require.True(t, ok)
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT pg_try_advisory_xact_lock").WithArgs(plan.AccountID).WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
-	mock.ExpectExec(query).WithArgs(plan.ID, now, until, next, plan.UpdatedAt, nil, false, nil).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(query).WithArgs(plan.ID, now, until, next, plan.UpdatedAt, nil, false, nil, false).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 	ok, err = repo.ClaimPelican(context.Background(), plan, now, until, next)
 	require.NoError(t, err)
 	require.False(t, ok)
+	// 字段看护复核按触发来源领取（规则的 next_run_at 永远在远期）。
+	for _, source := range []string{"field_watch", "field_watch_manual"} {
+		watched := *plan
+		watched.TriggerSource = source
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT pg_try_advisory_xact_lock").WithArgs(plan.AccountID).WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
+		mock.ExpectExec(`(?s)UPDATE scheduled_test_plans.*\$9 AND \(pelican_config->>'question_kind'='field_watch'`).WithArgs(plan.ID, now, until, next, plan.UpdatedAt, nil, false, nil, true).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+		ok, err = repo.ClaimPelican(context.Background(), &watched, now, until, next)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 func TestPelicanCleanupIncludesPausedPlansAndBoundsBatch(t *testing.T) {

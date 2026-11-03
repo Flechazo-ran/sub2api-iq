@@ -38,6 +38,33 @@ func removeQualityGroups(ctx context.Context, tx *sql.Tx, accountID int64, targe
 	return err
 }
 
+// addQualityGroups inserts only memberships the account did not already hold.
+// Missing or soft-deleted groups are skipped so a stale target cannot fail the
+// quarantine that removed the account from its original groups.
+func addQualityGroups(ctx context.Context, tx *sql.Tx, accountID int64, targets []int64, state *qualityState) error {
+	inserted := false
+	for _, groupID := range targets {
+		var exists, member bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM groups WHERE id=$1 AND deleted_at IS NULL),EXISTS(SELECT 1 FROM account_groups WHERE account_id=$2 AND group_id=$1)`, groupID, accountID).Scan(&exists, &member); err != nil {
+			return err
+		}
+		if !exists || member {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO account_groups(account_id, group_id) VALUES($1,$2)`, accountID, groupID); err != nil {
+			return err
+		}
+		state.Added = append(state.Added, groupID)
+		inserted = true
+	}
+	if inserted {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET updated_at=clock_timestamp() WHERE id=$1`, accountID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func restoreQualityGroups(ctx context.Context, tx *sql.Tx, accountID int64, state *qualityState) (bool, error) {
 	// Validate the entire restore before inserting anything. A manual membership
 	// replacement must never be silently claimed as a successful rule restore.
@@ -77,7 +104,7 @@ func restoreQualityGroups(ctx context.Context, tx *sql.Tx, accountID int64, stat
 	return false, err
 }
 
-func qualityGroupsChanged(ctx context.Context, tx *sql.Tx, accountID int64, before []byte, removed []qualityGroup) error {
+func qualityGroupsChanged(ctx context.Context, tx *sql.Tx, accountID int64, before []byte, removed []qualityGroup, added []int64) error {
 	var groups []qualityGroup
 	if err := json.Unmarshal(before, &groups); err != nil {
 		return err
@@ -89,6 +116,7 @@ func qualityGroupsChanged(ctx context.Context, tx *sql.Tx, accountID int64, befo
 	for _, group := range removed {
 		ids = append(ids, group.GroupID)
 	}
+	ids = append(ids, added...)
 	payload, err := json.Marshal(map[string]any{"group_ids": ids})
 	if err != nil {
 		return err

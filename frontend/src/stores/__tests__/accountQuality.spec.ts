@@ -2,15 +2,31 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { reactive } from 'vue'
 import { useAccountQualityStore } from '../accountQuality'
-import { listQualityPlans, listQualityOperations, listQualityTemplates, listQualityPresets } from '@/api/admin/accountQuality'
+import { listQualityFieldWatch, listQualityPlans, listQualityOperations, listQualityTemplates, listQualityPresets } from '@/api/admin/accountQuality'
 import { getAllIncludingInactive } from '@/api/admin/groups'
 const state = vi.hoisted(() => ({ auth: null as any }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => state.auth }))
-vi.mock('@/api/admin/accountQuality', () => ({ listQualityPlans: vi.fn(), listQualityOperations: vi.fn(), listQualityTemplates: vi.fn(), listQualityPresets: vi.fn() }))
+vi.mock('@/api/admin/accountQuality', () => ({ listQualityPlans: vi.fn(), listQualityOperations: vi.fn(), listQualityTemplates: vi.fn(), listQualityPresets: vi.fn(), listQualityFieldWatch: vi.fn() }))
 vi.mock('@/api/admin/groups', () => ({ getAllIncludingInactive: vi.fn() }))
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes }); return { promise, resolve } }
-beforeEach(() => { setActivePinia(createPinia()); state.auth = reactive({ user: { id: 1, role: 'admin' } }); vi.resetAllMocks(); vi.mocked(listQualityPresets).mockResolvedValue([]); vi.mocked(listQualityPlans).mockResolvedValue([]); vi.mocked(listQualityTemplates).mockResolvedValue([]); vi.mocked(listQualityOperations).mockResolvedValue({ items: [], next_cursor: 0 }); vi.mocked(getAllIncludingInactive).mockResolvedValue([]) })
+beforeEach(() => { setActivePinia(createPinia()); state.auth = reactive({ user: { id: 1, role: 'admin' } }); vi.resetAllMocks(); vi.mocked(listQualityPresets).mockResolvedValue([]); vi.mocked(listQualityPlans).mockResolvedValue([]); vi.mocked(listQualityTemplates).mockResolvedValue([]); vi.mocked(listQualityOperations).mockResolvedValue({ items: [], next_cursor: 0 }); vi.mocked(getAllIncludingInactive).mockResolvedValue([]); vi.mocked(listQualityFieldWatch).mockResolvedValue([]) })
 describe('quality workspace session state', () => {
+  it('loads field watch status only for field watch accounts, keeps it on a failed refresh and clears it on logout', async () => {
+    const watched = (id: number, account_id: number) => ({ id, account_id, pelican_config: { question_kind: 'field_watch' } })
+    vi.mocked(listQualityPlans).mockResolvedValue([watched(1, 57), watched(2, 58), watched(3, 57), { id: 4, account_id: 59, pelican_config: { question_kind: 'candy' } }] as any)
+    vi.mocked(listQualityFieldWatch).mockResolvedValueOnce([{ account_id: 57, observed: 4, streak: 1 }] as any)
+    const store = useAccountQualityStore(); await store.refresh(); await Promise.resolve()
+    expect(listQualityFieldWatch).toHaveBeenCalledWith([57, 58])
+    expect(store.fieldWatchLoaded).toBe(true)
+    expect(store.fieldWatch[57]).toMatchObject({ observed: 4, streak: 1 })
+    vi.mocked(listQualityFieldWatch).mockRejectedValueOnce({ status: 404 })
+    await store.refreshRules(true); await Promise.resolve()
+    expect(store.rulesError).toBe('')
+    expect(store.fieldWatch[57]).toMatchObject({ observed: 4 })
+    state.auth.user = null
+    expect(store.fieldWatch).toEqual({})
+    expect(store.fieldWatchLoaded).toBe(false)
+  })
   it('reloads persisted reusable templates independently of dynamic group rules and clears them on logout', async () => {
     vi.mocked(listQualityPresets).mockResolvedValueOnce([{ id: 17, name: 'Saved check' }] as any)
     const store = useAccountQualityStore(); await store.refresh()
