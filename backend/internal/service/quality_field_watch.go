@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -190,6 +191,29 @@ func QualityGroupsStillQuarantined(current, added, removed []int64) bool {
 		}
 	}
 	return true
+}
+
+// qualityAccountUnavailableReason：账号不存在、凭证失效（状态 error）或被停用（disabled）时返回原因，
+// 质量检测跳过它，不白发请求。只停了调度的号照常检测：「答错停调度」类规则要靠后续检测自动恢复。
+// 查询失败按可用处理，照常检测。
+func qualityAccountUnavailableReason(ctx context.Context, repo AccountRepository, accountID int64) string {
+	account, err := repo.GetByID(ctx, accountID)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return "账号不存在"
+		}
+		return ""
+	}
+	if account == nil {
+		return "账号不存在"
+	}
+	switch account.Status {
+	case StatusError:
+		return "账号凭证失效（状态 error），不检测；重新授权后自动恢复"
+	case StatusDisabled:
+		return "账号已停用，不检测"
+	}
+	return ""
 }
 
 // errQualityQuarantineHeld 是「立即检测」碰到已隔离账号时的提示。

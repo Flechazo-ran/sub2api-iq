@@ -133,6 +133,19 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	if err != nil || !claimed {
 		return false
 	}
+	// 账号凭证失效（error）或被停用（disabled）：不检测、不记结果，只推进周期，
+	// 不白发请求。号重新授权、恢复正常后自动恢复检测。
+	if plan.PelicanConfig.Quality != nil && s.accountTestSvc != nil && s.accountTestSvc.accountRepo != nil {
+		if reason := qualityAccountUnavailableReason(ctx, s.accountTestSvc.accountRepo, plan.AccountID); reason != "" {
+			logger.LegacyPrintf("service.scheduled_test_runner", "quality plan=%d account=%d skipped: %s", plan.ID, plan.AccountID, reason)
+			finishCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stop()
+			if finishErr := s.planRepo.FinishPelican(finishCtx, plan.ID, until, time.Now()); finishErr != nil {
+				logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d finish failed: %v", plan.ID, finishErr)
+			}
+			return false
+		}
+	}
 	// 答错移出分组且不自动恢复的规则：号还在隔离中（被移进降智分组、没被人工放回）就不再检测，
 	// 只推进检测周期；人工把号放回承载分组后自动恢复检测。
 	if !fieldWatch && qualityQuarantineHeld(ctx, s.planRepo, plan) {

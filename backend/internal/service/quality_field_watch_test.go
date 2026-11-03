@@ -992,3 +992,69 @@ func TestCandyRuleStopsTestingQuarantinedAccount(t *testing.T) {
 	repo.mu.Unlock()
 	require.False(t, qualityQuarantineHeld(context.Background(), repo, repo.snapshot()))
 }
+
+type qualityAccountStatusRepo struct {
+	AccountRepository
+	mu      sync.Mutex
+	account Account
+}
+
+func (r *qualityAccountStatusRepo) GetByID(context.Context, int64) (*Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a := r.account
+	return &a, nil
+}
+
+// 账号凭证失效（状态 error）或停用：质量检测不发请求、不记结果，重新授权后自动接着测。
+// 只停了调度的号照常检测（「答错停调度」规则要靠检测自动恢复）。
+func TestQualityRuleSkipsUnavailableAccounts(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	plan := ScheduledTestPlan{ID: 65, AccountID: 58, ModelID: "gpt-6-astra", CronExpression: "@random 10-15", Enabled: true, MaxResults: 100, NextRunAt: &past,
+		PelicanConfig: &PelicanTestConfig{QuestionKind: "candy", Prompt: CandyPrompt, ReasoningEffort: "high", ParallelCount: 1, ModelID: "gpt-6-astra", ModelIDs: []string{"gpt-6-astra"},
+			Quality: &QualityPolicy{ExpectedAnswer: "21", Action: "remove_groups", RemoveGroupIDs: []int64{fieldWatchHostGroup}, AddGroupIDs: []int64{fieldWatchDegradedGroup}}}}
+	repo := &fieldWatchPlanRepo{plan: plan, groups: []int64{fieldWatchHostGroup}}
+	results := &fieldWatchResultRepo{}
+	accounts := &qualityAccountStatusRepo{account: Account{ID: 58, Status: StatusError, Schedulable: false}}
+	accountTests := &AccountTestService{accountRepo: accounts}
+	scheduled := NewScheduledTestService(repo, results)
+	scheduled.accountTests = accountTests
+	runner := &ScheduledTestRunnerService{planRepo: repo, scheduledSvc: scheduled, accountTestSvc: accountTests}
+	asked := 0
+	runner.runPelican = func(context.Context, int64, string, *PelicanTestConfig) (*ScheduledTestResult, error) {
+		asked++
+		return &ScheduledTestResult{Status: "success", ResponseText: `{"answer":21}`, StartedAt: time.Now(), FinishedAt: time.Now()}, nil
+	}
+	due := func() {
+		again := time.Now().Add(-time.Minute)
+		repo.mu.Lock()
+		repo.plan.NextRunAt = &again
+		repo.mu.Unlock()
+	}
+
+	require.False(t, runner.runPelicanPlan(context.Background(), repo.snapshot()))
+	require.Zero(t, asked, "an account with an expired/revoked token is not tested")
+	require.Empty(t, results.results, "no inconclusive record is written")
+	require.Equal(t, 1, repo.finished, "the schedule still advances")
+	err := scheduled.TriggerQuality(context.Background(), 65)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "不检测")
+
+	// 停用的号同样不测。
+	accounts.mu.Lock()
+	accounts.account.Status = StatusDisabled
+	accounts.mu.Unlock()
+	due()
+	runner.runPelicanPlan(context.Background(), repo.snapshot())
+	require.Zero(t, asked, "a disabled account is not tested")
+
+	// 重新授权后状态恢复正常（即使调度还没开）就自动恢复检测。
+	accounts.mu.Lock()
+	accounts.account.Status = StatusActive
+	accounts.mu.Unlock()
+	due()
+	require.NoError(t, scheduled.TriggerQuality(context.Background(), 65))
+	runner.runPelicanPlan(context.Background(), repo.snapshot())
+	require.Equal(t, 1, asked)
+	require.Len(t, results.results, 1)
+}

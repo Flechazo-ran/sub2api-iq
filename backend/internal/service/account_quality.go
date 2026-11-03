@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -243,8 +244,15 @@ func (s *ScheduledTestService) TriggerQuality(ctx context.Context, id int64) err
 			return s.fieldWatchRun(ctx, id)
 		}
 	}
-	if plan, err := s.planRepo.GetByID(ctx, id); err == nil && qualityQuarantineHeld(ctx, s.planRepo, plan) {
-		return errQualityQuarantineHeld
+	if plan, err := s.planRepo.GetByID(ctx, id); err == nil && plan != nil {
+		if s.accountTests != nil && s.accountTests.accountRepo != nil {
+			if reason := qualityAccountUnavailableReason(ctx, s.accountTests.accountRepo, plan.AccountID); reason != "" {
+				return errors.New(reason)
+			}
+		}
+		if qualityQuarantineHeld(ctx, s.planRepo, plan) {
+			return errQualityQuarantineHeld
+		}
 	}
 	return s.planRepo.TriggerQuality(ctx, id)
 }
