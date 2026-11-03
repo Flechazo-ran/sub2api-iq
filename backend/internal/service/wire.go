@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"database/sql"
 	"os"
 	"time"
@@ -317,6 +318,32 @@ func ProvideAccountTestService(
 	service.agentIdentityWS = openAIGatewayService
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
+	// 看护闭环：每次真实请求按 safety_buffering 字段判满血/降智，连续 3 次降智后
+	// 用糖果题复核并以其结果为准。这里把复核执行器注入到网关服务。
+	if openAIGatewayService != nil {
+		openAIGatewayService.codexAstraWatcher = newCodexAstraWatcher()
+		openAIGatewayService.codexAstraConfirm = func(ctx context.Context, accountID int64) (bool, string) {
+			cfg := &PelicanTestConfig{
+				QuestionKind:     "candy",
+				Prompt:           CandyPrompt,
+				TestChannel:      "account",
+				ReasoningEffort:  "high",
+				ParallelCount:    1,
+				ModelID:          codexAstraWatchModel,
+				ModelIDs:         []string{codexAstraWatchModel},
+				Quality:          &QualityPolicy{ExpectedAnswer: "21"},
+			}
+			result, err := service.RunPelicanBackground(ctx, accountID, codexAstraWatchModel, cfg)
+			if err != nil {
+				return false, "糖果题复核失败: " + err.Error()
+			}
+			if result == nil {
+				return false, "糖果题复核无结果"
+			}
+			healthy := strings.EqualFold(strings.TrimSpace(result.Status), "success")
+			return healthy, "糖果题复核: " + strings.TrimSpace(result.Status)
+		}
+	}
 	service.SetPluginManager(pluginManager)
 	if p, ok := httpUpstream.(AstraGatewayRuntimeProvider); ok {
 		p.SetAstraGatewayPreparer(service.prepareAstraGatewaySource)

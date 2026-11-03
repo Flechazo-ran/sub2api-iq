@@ -388,7 +388,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		clientOutputStarted = true
 		lastDownstreamWriteAt = time.Now()
 	}
+	// sawSafetyBuffering 记录本次响应流里是否出现过 safety_buffering 判据字段
+	// （满血 Astra 每个事件都带；被降档到 luna 的账号完全没有）。流收尾据此更新看护状态。
+	sawSafetyBuffering := false
 	finalizeStream := func() (*openaiStreamingResult, error) {
+		// 流收尾时按本次是否出现判据字段更新「连续降智」看护状态；
+		// 连续 codexAstraDegradedStreakThreshold 次未见则异步触发糖果题复核。
+		s.observeCodexAstraStream(ctx, account, sawSafetyBuffering)
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
 			completeGuardedEvent(true)
@@ -502,6 +508,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	processSSELine := func(line string, queueDrained bool) {
 		if streamEarlyErr != nil {
 			return
+		}
+		if !sawSafetyBuffering && strings.Contains(line, codexAstraWatchMarker) {
+			sawSafetyBuffering = true
 		}
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType

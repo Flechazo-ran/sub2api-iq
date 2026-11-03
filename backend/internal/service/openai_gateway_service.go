@@ -485,6 +485,11 @@ type OpenAIGatewayService struct {
 	harvestIPPoolSyncedAt  time.Time
 	harvestIPPoolCursor    atomic.Uint64
 	codexHarvestRunMu      sync.RWMutex
+	// codexAstraWatcher 按账号记录「连续未出现 safety_buffering」的次数；
+	// 连续 codexAstraDegradedStreakThreshold 次后触发糖果题复核。
+	codexAstraWatcher *codexAstraWatcher
+	// codexAstraConfirm 是糖果题复核的执行器，由装配层注入（测试中可为空）。
+	codexAstraConfirm func(ctx context.Context, accountID int64) (healthy bool, reason string)
 	accountRepo            AccountRepository
 	proxyRepo              ProxyRepository
 	usageLogRepo           UsageLogRepository
