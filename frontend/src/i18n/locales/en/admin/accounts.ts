@@ -1102,6 +1102,7 @@ export default {
       addModel: 'Add',
       modelExists: 'Model already exists',
       modelMappingConflict: 'A mapping already exists for {from} → {to}. Modify or remove it under Model Mapping before adding this whitelist model',
+      syncModelsSkippedMappingConflict: 'These models already have a mapping and were not added to the whitelist: {mappings}. Remove the mappings under Model Mapping to use the original models directly',
       modelCount: '{count} models',
       poolMode: 'Pool Mode',
       poolModeHint: 'Enable when upstream is an account pool; errors won\'t mark local account status',
