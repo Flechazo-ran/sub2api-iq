@@ -1,0 +1,204 @@
+//go:build integration
+
+package repository
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+)
+
+func insertProxyAutoSwitchTrace(t *testing.T, startedAt time.Time, accountID int64, attempts []map[string]any) {
+	t.Helper()
+	detail, err := json.Marshal(map[string]any{"version": 1, "attempts": attempts, "events": map[string]any{}, "spans": []any{}})
+	require.NoError(t, err)
+	_, err = integrationDB.Exec(`INSERT INTO request_connection_traces
+		(trace_id, started_at, request_id, client_request_id, user_id, api_key_id, account_id, path, stream, detail)
+		VALUES ($1,$2,$3,'',1,1,$4,'/v1/responses',true,$5::jsonb)`,
+		uuid.NewString(), startedAt, uuid.NewString(), accountID, string(detail))
+	require.NoError(t, err)
+}
+
+func pasAttempt(kind string, accountID, proxyID int64, written, headers float64) map[string]any {
+	events := map[string]any{"request_written": written}
+	if headers > 0 {
+		events["response_headers"] = headers
+	}
+	return map[string]any{"kind": kind, "account_id": accountID, "proxy_id": proxyID, "events": events, "status": 200}
+}
+
+func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewProxyAutoSwitchRepository(integrationDB)
+	suffix := uuid.NewString()[:8]
+
+	group := mustCreateGroup(t, client, &service.Group{Name: "pas-" + suffix, Platform: service.PlatformOpenAI})
+	p1 := mustCreateProxy(t, client, &service.Proxy{Name: "pas-p1-" + suffix})
+	p2 := mustCreateProxy(t, client, &service.Proxy{Name: "pas-p2-" + suffix})
+	acc := mustCreateAccount(t, client, &service.Account{Name: "pas-a-" + suffix, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, ProxyID: &p1.ID})
+	shadow := mustCreateAccount(t, client, &service.Account{Name: "pas-s-" + suffix, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, ProxyID: &p1.ID, ParentAccountID: &acc.ID, QuotaDimension: service.QuotaDimensionSpark})
+	apikey := mustCreateAccount(t, client, &service.Account{Name: "pas-k-" + suffix, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, ProxyID: &p2.ID})
+	for _, id := range []int64{acc.ID, shadow.ID, apikey.ID} {
+		mustBindAccountToGroup(t, client, id, group.ID, 50)
+	}
+	t.Cleanup(func() {
+		_, _ = integrationDB.Exec(`DELETE FROM request_connection_traces WHERE account_id = $1`, acc.ID)
+		_, _ = integrationDB.Exec(`DELETE FROM proxy_autoswitch_events WHERE account_id = $1`, acc.ID)
+		_, _ = integrationDB.Exec(`DELETE FROM proxy_autoswitch_account_states WHERE account_id = $1`, acc.ID)
+	})
+
+	accounts, err := repo.ListGroupAccounts(ctx, []int64{group.ID})
+	require.NoError(t, err)
+	require.Len(t, accounts, 1, "shadow and api-key accounts are not targets")
+	require.Equal(t, acc.ID, accounts[0].ID)
+	require.Equal(t, p1.ID, *accounts[0].ProxyID)
+
+	got, err := repo.GetAccount(ctx, acc.ID)
+	require.NoError(t, err)
+	require.False(t, got.Deleted)
+	missing, err := repo.GetAccount(ctx, -1)
+	require.NoError(t, err)
+	require.Nil(t, missing)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for i, ms := range []float64{1000, 2000, 3000, 4000, 5000} {
+		insertProxyAutoSwitchTrace(t, now.Add(-time.Duration(i+1)*time.Minute), acc.ID, []map[string]any{
+			pasAttempt("egress", acc.ID, p1.ID, 20, 20+ms),
+			pasAttempt("http", acc.ID, p1.ID, 20, 20+ms), // nested child: must not double count
+		})
+	}
+	insertProxyAutoSwitchTrace(t, now.Add(-2*time.Minute), acc.ID, []map[string]any{
+		pasAttempt("egress", acc.ID, p2.ID, 10, 110),    // other proxy (fallback egress)
+		pasAttempt("egress", acc.ID, p1.ID, 10, 0),      // no response headers
+		pasAttempt("egress", acc.ID+999, p1.ID, 10, 99), // failover attempt on another account
+	})
+	insertProxyAutoSwitchTrace(t, now.Add(-30*time.Minute), acc.ID, []map[string]any{pasAttempt("egress", acc.ID, p1.ID, 0, 9000)})
+
+	stats, err := repo.HeaderLatencyStats(ctx, []int64{acc.ID}, now.Add(-10*time.Minute), now.Add(time.Second))
+	require.NoError(t, err)
+	byProxy := map[int64]service.ProxyAutoSwitchLatencyStat{}
+	for _, st := range stats {
+		require.Equal(t, acc.ID, st.AccountID)
+		byProxy[st.ProxyID] = st
+	}
+	require.Equal(t, 5, byProxy[p1.ID].Samples)
+	require.Equal(t, int64(3000), byProxy[p1.ID].P50MS)
+	require.Equal(t, 1, byProxy[p2.ID].Samples)
+	require.Equal(t, int64(100), byProxy[p2.ID].P50MS)
+
+	label := p2.Name
+	region := "JP"
+	switchedAt := now.Add(-20 * time.Minute)
+	observing := &service.ProxyAutoSwitchEvent{CreatedAt: switchedAt, UpdatedAt: switchedAt, AccountID: acc.ID,
+		Status: service.ProxyAutoSwitchStatusObserving, Reason: "慢", FromProxyID: &p1.ID, FromProxyLabel: p1.Name, FromRegion: "JP",
+		ToProxyID: &p2.ID, ToProxyLabel: &label, ToRegion: &region, BeforeP50MS: ptrInt64(3513), BeforeSamples: 42,
+		CurrentProbeMS: ptrInt64(1800), CandidateProbeMS: ptrInt64(1120), SwitchedAt: &switchedAt,
+		Candidates: []service.ProxyAutoSwitchCandidate{{ProxyID: p2.ID, Label: label, Region: "JP", ProbeMS: ptrInt64(1120)}}}
+	require.NoError(t, repo.InsertEvent(ctx, observing))
+	miss := &service.ProxyAutoSwitchEvent{CreatedAt: now.Add(-time.Minute), AccountID: acc.ID, Status: service.ProxyAutoSwitchStatusNoCandidate,
+		FromProxyID: &p1.ID, FromProxyLabel: p1.Name}
+	require.NoError(t, repo.InsertEvent(ctx, miss))
+	require.Greater(t, miss.ID, observing.ID)
+
+	loaded, err := repo.GetEvent(ctx, observing.ID)
+	require.NoError(t, err)
+	require.Equal(t, acc.Name, loaded.AccountName)
+	require.Equal(t, label, *loaded.ToProxyLabel)
+	require.Equal(t, int64(1120), *loaded.Candidates[0].ProbeMS)
+	require.WithinDuration(t, switchedAt, *loaded.SwitchedAt, time.Millisecond)
+	loadedMiss, err := repo.GetEvent(ctx, miss.ID)
+	require.NoError(t, err)
+	require.Nil(t, loadedMiss.ToProxyID)
+	require.Nil(t, loadedMiss.ToProxyLabel)
+	require.Equal(t, []service.ProxyAutoSwitchCandidate{}, loadedMiss.Candidates)
+
+	obs, err := repo.ListObserving(ctx)
+	require.NoError(t, err)
+	found := false
+	for _, e := range obs {
+		found = found || e.ID == observing.ID
+	}
+	require.True(t, found)
+
+	page, err := repo.ListEvents(ctx, service.ProxyAutoSwitchEventFilter{AccountID: acc.ID, Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	require.Equal(t, miss.ID, page[0].ID)
+	page, err = repo.ListEvents(ctx, service.ProxyAutoSwitchEventFilter{AccountID: acc.ID, BeforeID: miss.ID, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	require.Equal(t, observing.ID, page[0].ID)
+
+	history, err := repo.AccountHistory(ctx, []int64{acc.ID}, now.Add(-6*time.Hour),
+		[]string{service.ProxyAutoSwitchStatusObserving, service.ProxyAutoSwitchStatusKept}, []string{service.ProxyAutoSwitchStatusNoCandidate})
+	require.NoError(t, err)
+	require.WithinDuration(t, switchedAt, *history[acc.ID].LastSwitchAt, time.Millisecond)
+	require.WithinDuration(t, now.Add(-time.Minute), *history[acc.ID].LastMissAt, time.Millisecond)
+
+	n, err := repo.CountEventsSince(ctx, now.Add(-time.Hour), []string{service.ProxyAutoSwitchStatusObserving})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, n, 1)
+
+	kept := *loaded
+	kept.Status = service.ProxyAutoSwitchStatusKept
+	kept.AfterP50MS = ptrInt64(1300)
+	kept.AfterSamples = 37
+	kept.UpdatedAt = now
+	ok, err := repo.UpdateEventIfStatus(ctx, &kept, service.ProxyAutoSwitchStatusReverted)
+	require.NoError(t, err)
+	require.False(t, ok, "status guard")
+	ok, err = repo.UpdateEventIfStatus(ctx, &kept, service.ProxyAutoSwitchStatusObserving)
+	require.NoError(t, err)
+	require.True(t, ok)
+	loaded, err = repo.GetEvent(ctx, observing.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.ProxyAutoSwitchStatusKept, loaded.Status)
+	require.Equal(t, int64(1300), *loaded.AfterP50MS)
+
+	latest, err := repo.LatestEventPerAccount(ctx, now.Add(-7*24*time.Hour), []string{service.ProxyAutoSwitchStatusKept})
+	require.NoError(t, err)
+	var mine []service.ProxyAutoSwitchEvent
+	for _, e := range latest {
+		if e.AccountID == acc.ID {
+			mine = append(mine, e)
+		}
+	}
+	require.Len(t, mine, 1)
+	require.Equal(t, observing.ID, mine[0].ID)
+
+	external := now.Add(-time.Hour)
+	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p1.ID, SeenAt: now, ExternalChangeAt: &external}))
+	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p2.ID, SeenAt: now.Add(time.Minute)}))
+	states, err := repo.LoadAccountStates(ctx, []int64{acc.ID})
+	require.NoError(t, err)
+	require.Equal(t, p2.ID, *states[acc.ID].ProxyID)
+	require.WithinDuration(t, external, *states[acc.ID].ExternalChangeAt, time.Millisecond, "a later upsert without a change keeps the hold")
+
+	marker := fmt.Sprintf(`{"name":"pas-%s","proxy_id":%d}`, suffix, p1.ID)
+	_, err = integrationDB.Exec(`INSERT INTO audit_logs (created_at, action, method, path, request_body, status_code, extra)
+		VALUES (NOW(), 'admin.accounts.update', 'PUT', '/api/v1/admin/accounts/:id', $1, 200, jsonb_build_object('params', jsonb_build_object('id', $2::text))),
+		       (NOW(), 'admin.accounts.update', 'PUT', '/api/v1/admin/accounts/:id', $1, 400, '{}'::jsonb),
+		       (NOW() - INTERVAL '7 hours', 'admin.accounts.update', 'PUT', '/api/v1/admin/accounts/:id', $1, 200, '{}'::jsonb)`,
+		marker, fmt.Sprint(acc.ID))
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = integrationDB.Exec(`DELETE FROM audit_logs WHERE request_body = $1`, marker) })
+	writes, err := repo.ListAuditProxyWrites(ctx, time.Now().Add(-6*time.Hour))
+	require.NoError(t, err)
+	hits := 0
+	for _, w := range writes {
+		if w.RequestBody == marker {
+			hits++
+			require.Equal(t, fmt.Sprint(acc.ID), w.ParamID)
+		}
+	}
+	require.Equal(t, 1, hits, "only successful writes inside the window")
+}
+
+func ptrInt64(v int64) *int64 { return &v }

@@ -1,0 +1,812 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/stretchr/testify/require"
+)
+
+func jsonMarshalForTest(v any) (string, error) {
+	raw, err := json.Marshal(v)
+	return string(raw), err
+}
+
+func enabledPASConfig() ProxyAutoSwitchConfig {
+	cfg := DefaultProxyAutoSwitchConfig()
+	cfg.Enabled = true
+	return cfg
+}
+
+// slowWorld: account 65 on JP proxy 91 is slow; proxy 96 (JP) is idle and fast.
+func slowWorld(t *testing.T) *pasWorld {
+	t.Helper()
+	w := newPASWorld()
+	w.addProxy(91, "JP", 30)
+	w.addProxy(96, "JP", 30)
+	w.addAccount(65, 91)
+	w.saveConfig(enabledPASConfig())
+	w.uniform(42, 3513)
+	w.setProbe(91, 1800)
+	w.setProbe(96, 1120)
+	return w
+}
+
+func runChecks(t *testing.T, svc *ProxyAutoSwitchService, w *pasWorld, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		require.NoError(t, svc.RunOnce(context.Background()))
+		w.advance(time.Minute)
+	}
+}
+
+func TestProxyAutoSwitchDefaultConfigMatchesContract(t *testing.T) {
+	raw, err := json.Marshal(DefaultProxyAutoSwitchConfig())
+	require.NoError(t, err)
+	require.JSONEq(t, `{"enabled":false,"window_minutes":10,"min_samples":10,"threshold_ms":2500,
+		"consecutive_checks":2,"min_improvement_pct":30,"account_cooldown_hours":6,
+		"max_switches_per_hour":5,"observe_minutes":15,"min_days_to_expiry":7,
+		"region_policy":"prefer_same","group_ids":[16]}`, string(raw))
+}
+
+func TestProxyAutoSwitchConfigValidation(t *testing.T) {
+	ok := DefaultProxyAutoSwitchConfig()
+	require.NoError(t, ValidateProxyAutoSwitchConfig(ok))
+	cases := map[string]func(*ProxyAutoSwitchConfig){
+		"window low":       func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 4 },
+		"window high":      func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 61 },
+		"samples low":      func(c *ProxyAutoSwitchConfig) { c.MinSamples = 0 },
+		"samples high":     func(c *ProxyAutoSwitchConfig) { c.MinSamples = 1001 },
+		"threshold low":    func(c *ProxyAutoSwitchConfig) { c.ThresholdMS = 199 },
+		"threshold high":   func(c *ProxyAutoSwitchConfig) { c.ThresholdMS = 30001 },
+		"consecutive low":  func(c *ProxyAutoSwitchConfig) { c.ConsecutiveChecks = 0 },
+		"consecutive high": func(c *ProxyAutoSwitchConfig) { c.ConsecutiveChecks = 11 },
+		"improvement low":  func(c *ProxyAutoSwitchConfig) { c.MinImprovementPct = 4 },
+		"improvement high": func(c *ProxyAutoSwitchConfig) { c.MinImprovementPct = 91 },
+		"cooldown low":     func(c *ProxyAutoSwitchConfig) { c.AccountCooldownHours = 0 },
+		"cooldown high":    func(c *ProxyAutoSwitchConfig) { c.AccountCooldownHours = 73 },
+		"per hour low":     func(c *ProxyAutoSwitchConfig) { c.MaxSwitchesPerHour = 0 },
+		"per hour high":    func(c *ProxyAutoSwitchConfig) { c.MaxSwitchesPerHour = 51 },
+		"observe low":      func(c *ProxyAutoSwitchConfig) { c.ObserveMinutes = 4 },
+		"observe high":     func(c *ProxyAutoSwitchConfig) { c.ObserveMinutes = 61 },
+		"expiry low":       func(c *ProxyAutoSwitchConfig) { c.MinDaysToExpiry = -1 },
+		"expiry high":      func(c *ProxyAutoSwitchConfig) { c.MinDaysToExpiry = 91 },
+		"region policy":    func(c *ProxyAutoSwitchConfig) { c.RegionPolicy = "nearest" },
+		"group id not >0":  func(c *ProxyAutoSwitchConfig) { c.GroupIDs = []int64{0} },
+	}
+	for name, mutate := range cases {
+		cfg := DefaultProxyAutoSwitchConfig()
+		mutate(&cfg)
+		require.Error(t, ValidateProxyAutoSwitchConfig(cfg), name)
+	}
+	edges := DefaultProxyAutoSwitchConfig()
+	edges.WindowMinutes, edges.MinSamples, edges.ThresholdMS, edges.ConsecutiveChecks = 60, 1000, 200, 10
+	edges.MinImprovementPct, edges.AccountCooldownHours, edges.MaxSwitchesPerHour = 90, 72, 50
+	edges.ObserveMinutes, edges.MinDaysToExpiry, edges.RegionPolicy = 5, 0, ProxyAutoSwitchRegionAny
+	require.NoError(t, ValidateProxyAutoSwitchConfig(edges))
+}
+
+func TestProxyAutoSwitchSaveConfigChecksGroupsAndRoundTrips(t *testing.T) {
+	w := newPASWorld()
+	svc := w.service()
+	ctx := context.Background()
+
+	cfg := enabledPASConfig()
+	cfg.GroupIDs = []int64{16, 9}
+	_, err := svc.SaveConfig(ctx, cfg)
+	var appErr *infraerrors.ApplicationError
+	require.True(t, errors.As(err, &appErr))
+	require.Equal(t, http.StatusBadRequest, int(appErr.Code))
+	require.Contains(t, appErr.Message, "不是 OpenAI")
+
+	cfg.GroupIDs = []int64{404}
+	_, err = svc.SaveConfig(ctx, cfg)
+	require.ErrorAs(t, err, &appErr)
+	require.Contains(t, appErr.Message, "不存在")
+
+	cfg.GroupIDs = []int64{16, 16}
+	cfg.WindowMinutes = 3
+	_, err = svc.SaveConfig(ctx, cfg)
+	require.ErrorAs(t, err, &appErr)
+	require.Equal(t, http.StatusBadRequest, int(appErr.Code))
+
+	cfg.WindowMinutes = 12
+	saved, err := svc.SaveConfig(ctx, cfg)
+	require.NoError(t, err)
+	require.Equal(t, []int64{16}, saved.GroupIDs)
+	loaded, err := svc.GetConfig(ctx)
+	require.NoError(t, err)
+	require.Equal(t, saved, loaded)
+
+	// An older stored value without newer fields keeps defaults for them.
+	w.settings[proxyAutoSwitchConfigKey] = `{"enabled":true,"threshold_ms":3000}`
+	loaded, err = svc.GetConfig(ctx)
+	require.NoError(t, err)
+	require.True(t, loaded.Enabled)
+	require.Equal(t, 3000, loaded.ThresholdMS)
+	require.Equal(t, 10, loaded.WindowMinutes)
+	require.Equal(t, []int64{16}, loaded.GroupIDs)
+}
+
+func TestProxyAutoSwitchJudge(t *testing.T) {
+	cfg := DefaultProxyAutoSwitchConfig()
+	require.Equal(t, ProxyAutoSwitchStateInsufficient, proxyAutoSwitchJudge(cfg, 9, 9000))
+	require.Equal(t, ProxyAutoSwitchStateSlow, proxyAutoSwitchJudge(cfg, 10, 2501))
+	require.Equal(t, ProxyAutoSwitchStateOK, proxyAutoSwitchJudge(cfg, 10, 2500))
+}
+
+func TestProxyAutoSwitchNeedsTwoConsecutiveSlowChecks(t *testing.T) {
+	w := slowWorld(t)
+	svc := w.service()
+
+	runChecks(t, svc, w, 1)
+	require.Empty(t, w.updates, "one slow check must not switch")
+
+	// A check with too few samples is not judged and breaks the streak.
+	w.uniform(9, 9000)
+	runChecks(t, svc, w, 1)
+	w.uniform(42, 3513)
+	runChecks(t, svc, w, 1)
+	require.Empty(t, w.updates)
+
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	e := w.lastEvent()
+	require.Equal(t, ProxyAutoSwitchStatusObserving, e.Status)
+	require.Equal(t, int64(96), *e.ToProxyID)
+	require.Equal(t, "JP", *e.ToRegion)
+	require.Equal(t, "JP", e.FromRegion)
+	require.Equal(t, int64(3513), *e.BeforeP50MS)
+	require.Equal(t, 42, e.BeforeSamples)
+	require.Equal(t, int64(1800), *e.CurrentProbeMS)
+	require.Equal(t, int64(1120), *e.CandidateProbeMS)
+	require.Len(t, e.Candidates, 1)
+	require.Equal(t, 3, w.probedProxies()[91], "current proxy probed 3 times")
+	require.Equal(t, 3, w.probedProxies()[96], "candidate probed 3 times")
+	require.Equal(t, int64(96), *w.states[65].ProxyID, "own switch updates the seen proxy")
+	require.Nil(t, w.states[65].ExternalChangeAt)
+
+	// A fast account (p50 under threshold) never switches.
+	w2 := slowWorld(t)
+	w2.uniform(42, 2400)
+	runChecks(t, w2.service(), w2, 3)
+	require.Empty(t, w2.updates)
+}
+
+func TestProxyAutoSwitchDisabledDoesNothing(t *testing.T) {
+	w := slowWorld(t)
+	w.saveConfig(DefaultProxyAutoSwitchConfig())
+	runChecks(t, w.service(), w, 3)
+	require.Empty(t, w.updates)
+	require.Empty(t, w.events)
+	require.Empty(t, w.probeLog)
+}
+
+func TestProxyAutoSwitchIdleCandidates(t *testing.T) {
+	w := newPASWorld()
+	cfg := DefaultProxyAutoSwitchConfig()
+	now := w.now
+	exp := func(days int) *time.Time { at := now.Add(time.Duration(days) * 24 * time.Hour); return &at }
+	proxies := []ProxyWithAccountCount{
+		{Proxy: Proxy{ID: 1, Status: StatusActive}},                       // current
+		{Proxy: Proxy{ID: 2, Status: StatusActive}, AccountCount: 1},      // in use
+		{Proxy: Proxy{ID: 3, Status: "expired"}},                          // not active
+		{Proxy: Proxy{ID: 4, Status: StatusActive, ExpiresAt: exp(6)}},    // expires in 6 days
+		{Proxy: Proxy{ID: 5, Status: StatusActive, ExpiresAt: exp(7)}},    // exactly 7 days
+		{Proxy: Proxy{ID: 6, Status: StatusActive}},                       // no expiry
+		{Proxy: Proxy{ID: 7, Status: StatusActive, ExpiresAt: exp(-1)}},   // already expired
+		{Proxy: Proxy{ID: 8, Status: StatusActive, ExpiresAt: exp(20)}},   // fine
+		{Proxy: Proxy{ID: 9, Status: "inactive", ExpiresAt: exp(20)}},     // disabled
+		{Proxy: Proxy{ID: 10, Status: StatusActive, ExpiresAt: exp(3)}},   // too close
+		{Proxy: Proxy{ID: 11, Status: StatusActive}, AccountCount: 3},     // in use
+		{Proxy: Proxy{ID: 12, Status: StatusActive, ExpiresAt: exp(365)}}, // fine
+	}
+	ids := []int64{}
+	for _, p := range proxyAutoSwitchIdleCandidates(cfg, now, 1, proxies) {
+		ids = append(ids, p.ID)
+	}
+	require.Equal(t, []int64{5, 6, 8, 12}, ids)
+
+	cfg.MinDaysToExpiry = 0
+	ids = ids[:0]
+	for _, p := range proxyAutoSwitchIdleCandidates(cfg, now, 1, proxies) {
+		ids = append(ids, p.ID)
+	}
+	require.Equal(t, []int64{4, 5, 6, 8, 10, 12}, ids)
+}
+
+func poolIDs(targets []proxyAutoSwitchProbeTarget) []int64 {
+	out := []int64{}
+	for _, t := range targets {
+		out = append(out, t.proxy.ID)
+	}
+	return out
+}
+
+func TestProxyAutoSwitchBuildPoolRegionPolicies(t *testing.T) {
+	candidates := []ProxyWithAccountCount{}
+	regions := map[int64]string{}
+	hints := map[int64]*int64{}
+	for i, region := range []string{"JP", "SG", "JP", "", "VN", "JP"} {
+		id := int64(i + 1)
+		candidates = append(candidates, ProxyWithAccountCount{Proxy: Proxy{ID: id, Status: StatusActive}})
+		if region != "" {
+			regions[id] = region
+		}
+	}
+	hints[6] = autoSwitchInt64(100) // fastest cached JP is ordered first
+	hints[3] = autoSwitchInt64(200)
+	cfg := DefaultProxyAutoSwitchConfig()
+
+	pool := proxyAutoSwitchBuildPool(cfg, "JP", candidates, regions, hints, 12)
+	require.Equal(t, []int64{6, 3, 1}, poolIDs(pool.first))
+	require.Equal(t, []int64{2, 4, 5}, poolIDs(pool.second))
+
+	pool = proxyAutoSwitchBuildPool(cfg, "JP", candidates, regions, hints, 4)
+	require.Equal(t, []int64{6, 3, 1}, poolIDs(pool.first))
+	require.Equal(t, []int64{2}, poolIDs(pool.second), "at most 4 candidates in total")
+
+	pool = proxyAutoSwitchBuildPool(cfg, "", candidates, regions, hints, 12)
+	require.Empty(t, pool.first, "unknown current region: nothing counts as same region")
+	require.Len(t, pool.second, 6)
+
+	cfg.RegionPolicy = ProxyAutoSwitchRegionSameOnly
+	pool = proxyAutoSwitchBuildPool(cfg, "SG", candidates, regions, hints, 12)
+	require.Equal(t, []int64{2}, poolIDs(pool.first))
+	require.Empty(t, pool.second)
+	pool = proxyAutoSwitchBuildPool(cfg, "US", candidates, regions, hints, 12)
+	require.Empty(t, pool.first)
+	require.Contains(t, pool.emptyReason, "同地区（US）")
+	pool = proxyAutoSwitchBuildPool(cfg, "", candidates, regions, hints, 12)
+	require.Contains(t, pool.emptyReason, "地区未知")
+
+	cfg.RegionPolicy = ProxyAutoSwitchRegionAny
+	pool = proxyAutoSwitchBuildPool(cfg, "JP", candidates, regions, hints, 12)
+	require.Equal(t, []int64{6, 3, 1, 2, 4, 5}, poolIDs(pool.first))
+	require.Empty(t, pool.second)
+}
+
+func TestProxyAutoSwitchPreferSameFallsBackToOtherRegions(t *testing.T) {
+	w := slowWorld(t)
+	w.setProbe(96, 1500) // JP candidate only 17% faster: not enough
+	w.addProxy(70, "SG", 30)
+	w.setProbe(70, 900)
+	runChecks(t, w.service(), w, 2)
+	require.Equal(t, [][2]int64{{65, 70}}, w.updates)
+	e := w.lastEvent()
+	require.Equal(t, "SG", *e.ToRegion)
+	require.Len(t, e.Candidates, 2)
+	require.Equal(t, int64(96), e.Candidates[0].ProxyID, "same-region candidates are probed first")
+}
+
+func TestProxyAutoSwitchPreferSameSkipsOtherRegionsWhenSameQualifies(t *testing.T) {
+	w := slowWorld(t)
+	w.addProxy(70, "SG", 30)
+	w.setProbe(70, 500)
+	runChecks(t, w.service(), w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	require.Zero(t, w.probedProxies()[70], "other regions are not probed when a same-region candidate qualifies")
+}
+
+func TestProxyAutoSwitchSameOnlyAndAny(t *testing.T) {
+	w := slowWorld(t)
+	cfg := enabledPASConfig()
+	cfg.RegionPolicy = ProxyAutoSwitchRegionSameOnly
+	w.saveConfig(cfg)
+	w.setProbe(96, 1500)
+	w.addProxy(70, "SG", 30)
+	w.setProbe(70, 500)
+	runChecks(t, w.service(), w, 2)
+	require.Empty(t, w.updates)
+	require.Equal(t, ProxyAutoSwitchStatusNoCandidate, w.lastEvent().Status)
+	require.Nil(t, w.lastEvent().ToProxyID)
+	require.Zero(t, w.probedProxies()[70])
+
+	w = slowWorld(t)
+	cfg.RegionPolicy = ProxyAutoSwitchRegionAny
+	w.saveConfig(cfg)
+	w.setProbe(96, 1200)
+	w.addProxy(70, "SG", 30)
+	w.setProbe(70, 500)
+	runChecks(t, w.service(), w, 2)
+	require.Equal(t, [][2]int64{{65, 70}}, w.updates, "any: fastest regardless of region")
+}
+
+func TestProxyAutoSwitchRegionFallsBackToExitProbe(t *testing.T) {
+	w := slowWorld(t)
+	delete(w.latency, 96)
+	w.exitCode[96] = "JP"
+	runChecks(t, w.service(), w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	require.Equal(t, "JP", *w.lastEvent().ToRegion)
+	require.Equal(t, []int64{96}, w.exitCalls)
+}
+
+func TestProxyAutoSwitchImprovementThreshold(t *testing.T) {
+	cands := []ProxyAutoSwitchCandidate{
+		{ProxyID: 1, ProbeMS: autoSwitchInt64(700)},
+		{ProxyID: 2, ProbeMS: autoSwitchInt64(701)},
+		{ProxyID: 3, ProbeMS: autoSwitchInt64(500), Error: "3 次里 1 次失败（超时）"},
+		{ProxyID: 4, ProbeMS: autoSwitchInt64(650)},
+	}
+	got := proxyAutoSwitchQualified(1000, 30, cands)
+	ids := []int64{}
+	for _, c := range got {
+		ids = append(ids, c.ProxyID)
+	}
+	require.Equal(t, []int64{4, 1}, ids, "≤ current × 0.7, fastest first, failed candidates excluded")
+
+	w := slowWorld(t)
+	w.setProbe(96, 1261) // 1800 × 0.7 = 1260
+	runChecks(t, w.service(), w, 2)
+	require.Empty(t, w.updates)
+	e := w.lastEvent()
+	require.Equal(t, ProxyAutoSwitchStatusNoCandidate, e.Status)
+	require.Contains(t, e.Reason, "没有快 30% 以上的")
+	require.Nil(t, e.ToProxyID)
+	require.Nil(t, e.ToProxyLabel)
+	require.Nil(t, e.ToRegion)
+	require.Nil(t, e.CandidateProbeMS)
+	require.Equal(t, int64(1261), *e.Candidates[0].ProbeMS)
+}
+
+func TestProxyAutoSwitchProbeMedianAndFailures(t *testing.T) {
+	w := slowWorld(t)
+	w.setProbe(91, 1000, 3000, 2000)             // median 2000
+	w.setProbe(96, 900, errors.New("dial"), 900) // one failure: candidate unusable
+	w.addProxy(97, "JP", 30)
+	w.setProbe(97, 1500, 1300, 1400) // median 1400 ≤ 2000 × 0.7
+	runChecks(t, w.service(), w, 2)
+	require.Equal(t, [][2]int64{{65, 97}}, w.updates)
+	e := w.lastEvent()
+	require.Equal(t, int64(2000), *e.CurrentProbeMS)
+	require.Equal(t, int64(1400), *e.CandidateProbeMS)
+	var failed ProxyAutoSwitchCandidate
+	for _, c := range e.Candidates {
+		if c.ProxyID == 96 {
+			failed = c
+		}
+	}
+	require.Contains(t, failed.Error, "1 次失败")
+	require.Equal(t, int64(900), *failed.ProbeMS)
+
+	// Current proxy failures count as the full timeout.
+	o := proxyAutoSwitchProbeOutcome{values: []int64{1000}, failures: 2}
+	require.Equal(t, ProxyAutoSwitchProbeTimeout.Milliseconds(), o.currentMedian())
+}
+
+func TestProxyAutoSwitchCandidateCap(t *testing.T) {
+	w := slowWorld(t)
+	w.setProbe(96, 1700)
+	for id := int64(100); id < 120; id++ {
+		w.addProxy(id, "JP", 30)
+		w.setProbe(id, 1700)
+	}
+	runChecks(t, w.service(), w, 2)
+	probed := w.probedProxies()
+	delete(probed, 91)
+	require.Len(t, probed, proxyAutoSwitchMaxCandidates)
+}
+
+func TestProxyAutoSwitchAccountCooldown(t *testing.T) {
+	w := slowWorld(t)
+	w.events = append(w.events, ProxyAutoSwitchEvent{ID: 1, AccountID: 65, Status: ProxyAutoSwitchStatusReverted,
+		CreatedAt: w.now.Add(-5 * time.Hour)})
+	w.nextEvent = 1
+	svc := w.service()
+	runChecks(t, svc, w, 3)
+	require.Empty(t, w.updates, "switched (and reverted) 5 hours ago: still cooling down")
+
+	w.advance(61 * time.Minute)
+	runChecks(t, svc, w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+}
+
+func TestProxyAutoSwitchRetryBackoffAfterNoCandidate(t *testing.T) {
+	w := slowWorld(t)
+	w.setProbe(96, 1700)
+	svc := w.service()
+	runChecks(t, svc, w, 10)
+	count := 0
+	for _, e := range w.events {
+		if e.Status == ProxyAutoSwitchStatusNoCandidate {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "no repeated probing within 30 minutes")
+	w.advance(25 * time.Minute)
+	runChecks(t, svc, w, 2)
+	require.Len(t, w.events, 2)
+}
+
+func TestProxyAutoSwitchHourlyCap(t *testing.T) {
+	w := newPASWorld()
+	w.saveConfig(enabledPASConfig())
+	for i := int64(0); i < 7; i++ {
+		w.addProxy(10+i, "JP", 30)
+		w.setProbe(10+i, 2000)
+		w.addAccount(60+i, 10+i)
+		w.addProxy(30+i, "JP", 30)
+		w.setProbe(30+i, 500)
+	}
+	// Old proxies (10..16) are slow, new ones (30..36) are fast.
+	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
+		out := []ProxyAutoSwitchLatencyStat{}
+		for _, id := range ids {
+			p := *w.accounts[id].ProxyID
+			p50 := int64(4000)
+			if p >= 30 {
+				p50 = 1000
+			}
+			out = append(out, ProxyAutoSwitchLatencyStat{AccountID: id, ProxyID: p, Samples: 50, P50MS: p50})
+		}
+		return out
+	}
+	svc := w.service()
+	runChecks(t, svc, w, 2)
+	require.Len(t, w.updates, 5, "at most 5 accounts per hour")
+
+	runChecks(t, svc, w, 5)
+	require.Len(t, w.updates, 5)
+
+	w.advance(time.Hour)
+	runChecks(t, svc, w, 1)
+	require.Len(t, w.updates, 7, "the cap is a sliding hour")
+	for _, e := range w.events {
+		if e.AccountID <= 64 {
+			require.Equal(t, ProxyAutoSwitchStatusKept, e.Status)
+		}
+	}
+}
+
+func TestProxyAutoSwitchManualChangeHold(t *testing.T) {
+	w := slowWorld(t)
+	svc := w.service()
+	runChecks(t, svc, w, 1)
+	// Someone moves the account to another proxy outside this feature.
+	w.addProxy(92, "JP", 30)
+	w.accounts[65].ProxyID = autoSwitchInt64(92)
+	w.setProbe(92, 1800)
+	runChecks(t, svc, w, 4)
+	require.Empty(t, w.updates)
+	require.NotNil(t, w.states[65].ExternalChangeAt)
+
+	w.advance(6 * time.Hour)
+	runChecks(t, svc, w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+}
+
+func TestProxyAutoSwitchManualChangeFromAuditOnFirstSight(t *testing.T) {
+	w := slowWorld(t)
+	w.audit = []ProxyAutoSwitchAuditWrite{
+		{CreatedAt: w.now.Add(-7 * time.Hour), Action: "admin.accounts.update", ParamID: "65", RequestBody: `{"proxy_id":91}`},
+		{CreatedAt: w.now.Add(-2 * time.Hour), Action: "admin.accounts.update", ParamID: "66", RequestBody: `{"proxy_id":91}`},
+	}
+	svc := w.service()
+	runChecks(t, svc, w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates, "older than 6h or other account: not a hold")
+
+	w = slowWorld(t)
+	w.audit = []ProxyAutoSwitchAuditWrite{
+		{CreatedAt: w.now.Add(-2 * time.Hour), Action: "admin.accounts.bulk_update.create", RequestBody: `{"account_ids":[3,65],"proxy_id":91}`},
+	}
+	runChecks(t, w.service(), w, 3)
+	require.Empty(t, w.updates)
+	require.Equal(t, w.now.Add(-2*time.Hour-3*time.Minute), *w.states[65].ExternalChangeAt)
+}
+
+func TestProxyAutoSwitchAuditMatching(t *testing.T) {
+	at := time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)
+	cur := autoSwitchInt64(91)
+	cases := []struct {
+		name  string
+		write ProxyAutoSwitchAuditWrite
+		hit   bool
+	}{
+		{"same proxy", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.update", ParamID: "65", RequestBody: `{"name":"x","proxy_id":91}`}, true},
+		{"other proxy", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.update", ParamID: "65", RequestBody: `{"proxy_id":95}`}, false},
+		{"other account", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.update", ParamID: "650", RequestBody: `{"proxy_id":91}`}, false},
+		{"truncated", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.update", ParamID: "65", RequestBody: `{"credentials":"...<truncated>`}, true},
+		{"bulk hit", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.bulk_update.create", RequestBody: `{"account_ids":[1, 65],"proxy_id":91}`}, true},
+		{"bulk miss", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.bulk_update.create", RequestBody: `{"account_ids":[1,650],"proxy_id":91}`}, false},
+		{"other action", ProxyAutoSwitchAuditWrite{Action: "admin.accounts.test.create", ParamID: "65", RequestBody: `{"proxy_id":91}`}, false},
+	}
+	for _, tc := range cases {
+		tc.write.CreatedAt = at
+		got := proxyAutoSwitchAuditProxyWriteAt([]ProxyAutoSwitchAuditWrite{tc.write}, 65, cur)
+		require.Equal(t, tc.hit, got != nil, tc.name)
+	}
+}
+
+func TestProxyAutoSwitchObservationDecision(t *testing.T) {
+	cfg := DefaultProxyAutoSwitchConfig()
+	before := autoSwitchInt64(3000)
+	m := time.Minute
+	require.Equal(t, proxyAutoSwitchDecisionWait, proxyAutoSwitchObservationDecision(cfg, 14*m, before, 50, 1000))
+	require.Equal(t, proxyAutoSwitchDecisionKeep, proxyAutoSwitchObservationDecision(cfg, 15*m, before, 10, 2400))
+	require.Equal(t, proxyAutoSwitchDecisionRevert, proxyAutoSwitchObservationDecision(cfg, 15*m, before, 10, 2401))
+	require.Equal(t, proxyAutoSwitchDecisionWait, proxyAutoSwitchObservationDecision(cfg, 20*m, before, 9, 1000))
+	require.Equal(t, proxyAutoSwitchDecisionKeep, proxyAutoSwitchObservationDecision(cfg, 22*m, before, 10, 1000))
+	require.Equal(t, proxyAutoSwitchDecisionKeepInsufficient, proxyAutoSwitchObservationDecision(cfg, 30*m, before, 9, 1000))
+}
+
+// switchedWorld returns a world where account 65 was switched 91 → 96 and is
+// now observing, plus the stats knob for samples on the new proxy.
+func switchedWorld(t *testing.T) (*pasWorld, *ProxyAutoSwitchService, *ProxyAutoSwitchEvent) {
+	t.Helper()
+	w := slowWorld(t)
+	svc := w.service()
+	runChecks(t, svc, w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	return w, svc, w.lastEvent()
+}
+
+func observeStats(w *pasWorld, samples int, p50 int64) {
+	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
+		return []ProxyAutoSwitchLatencyStat{{AccountID: 65, ProxyID: 96, Samples: samples, P50MS: p50}}
+	}
+}
+
+func TestProxyAutoSwitchObservationKept(t *testing.T) {
+	w, svc, e := switchedWorld(t)
+	observeStats(w, 37, 1300)
+	w.advance(10 * time.Minute)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, ProxyAutoSwitchStatusObserving, w.event(e.ID).Status, "before 15 minutes nothing is decided")
+	w.advance(4 * time.Minute)
+	runChecks(t, svc, w, 1)
+	got := w.event(e.ID)
+	require.Equal(t, ProxyAutoSwitchStatusKept, got.Status)
+	require.Equal(t, int64(1300), *got.AfterP50MS)
+	require.Equal(t, 37, got.AfterSamples)
+	require.Len(t, w.updates, 1)
+}
+
+func TestProxyAutoSwitchObservationReverted(t *testing.T) {
+	w, svc, e := switchedWorld(t)
+	observeStats(w, 37, 3000) // > 3513 × 0.8
+	w.advance(15 * time.Minute)
+	runChecks(t, svc, w, 1)
+	got := w.event(e.ID)
+	require.Equal(t, ProxyAutoSwitchStatusReverted, got.Status)
+	require.Equal(t, [][2]int64{{65, 96}, {65, 91}}, w.updates)
+	require.Equal(t, int64(91), *w.accounts[65].ProxyID)
+	require.Equal(t, int64(91), *w.states[65].ProxyID, "own revert is not a manual change")
+	require.Nil(t, w.states[65].ExternalChangeAt)
+
+	// The revert counts as the same switch: cooldown still applies.
+	w.uniform(42, 3513)
+	runChecks(t, svc, w, 5)
+	require.Len(t, w.updates, 2)
+}
+
+func TestProxyAutoSwitchObservationRevertSkippedWhenOldProxyTaken(t *testing.T) {
+	w, svc, e := switchedWorld(t)
+	observeStats(w, 37, 3000)
+	w.external[91] = 1
+	w.advance(15 * time.Minute)
+	runChecks(t, svc, w, 1)
+	got := w.event(e.ID)
+	require.Equal(t, ProxyAutoSwitchStatusRevertSkipped, got.Status)
+	require.Contains(t, got.Reason, "旧代理已被别的号占用")
+	require.Equal(t, int64(96), *w.accounts[65].ProxyID)
+}
+
+func TestProxyAutoSwitchObservationExtendsUpTo30Minutes(t *testing.T) {
+	w, svc, e := switchedWorld(t)
+	observeStats(w, 5, 1000)
+	w.advance(15 * time.Minute)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, ProxyAutoSwitchStatusObserving, w.event(e.ID).Status)
+	w.advance(5 * time.Minute)
+	observeStats(w, 12, 1000)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, ProxyAutoSwitchStatusKept, w.event(e.ID).Status, "extended window reached enough samples")
+
+	w, svc, e = switchedWorld(t)
+	observeStats(w, 9, 1000)
+	w.advance(29 * time.Minute)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, ProxyAutoSwitchStatusKeptInsufficient, w.event(e.ID).Status)
+	require.Equal(t, 9, w.event(e.ID).AfterSamples)
+}
+
+func TestProxyAutoSwitchObservationFinishesWhileDisabled(t *testing.T) {
+	w, svc, e := switchedWorld(t)
+	w.saveConfig(DefaultProxyAutoSwitchConfig())
+	observeStats(w, 37, 3000)
+	w.advance(15 * time.Minute)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, ProxyAutoSwitchStatusReverted, w.event(e.ID).Status)
+}
+
+func TestProxyAutoSwitchFailedUpdateRecordsFailed(t *testing.T) {
+	w := slowWorld(t)
+	w.updateErr = errors.New("validation failed")
+	runChecks(t, w.service(), w, 2)
+	e := w.lastEvent()
+	require.Equal(t, ProxyAutoSwitchStatusFailed, e.Status)
+	require.Nil(t, e.ToProxyID)
+	require.Nil(t, e.ToProxyLabel)
+	require.Contains(t, e.Reason, "validation failed")
+	require.Equal(t, int64(91), *w.accounts[65].ProxyID)
+}
+
+func TestProxyAutoSwitchSkipsTargetTakenBeforeSwitch(t *testing.T) {
+	w := slowWorld(t)
+	w.addProxy(97, "JP", 30)
+	w.setProbe(97, 1000) // fastest
+	svc := w.service()
+	runChecks(t, svc, w, 1)
+	// The fastest candidate gets taken between probing and switching.
+	svc.prober = probeHook{w: w, after: func() { w.external[97] = 1 }}
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates, "falls back to the next qualifying idle candidate")
+}
+
+type probeHook struct {
+	w     *pasWorld
+	after func()
+}
+
+func (p probeHook) ProbeChatGPT(ctx context.Context, proxyURL string) (ProxyAutoSwitchProbeResult, error) {
+	res, err := p.w.ProbeChatGPT(ctx, proxyURL)
+	if p.w.proxyIDByURL(proxyURL) == 97 {
+		p.after()
+	}
+	return res, err
+}
+
+func TestProxyAutoSwitchIneligibleAccountsUntouched(t *testing.T) {
+	w := slowWorld(t)
+	w.accounts[65].Schedulable = false
+	shadow := w.addAccount(66, 91)
+	shadow.ParentAccountID = autoSwitchInt64(65)
+	w.addAccount(67, 91)
+	w.groupsOf[67] = []int64{9}
+	apikey := w.addAccount(68, 91)
+	apikey.Type = AccountTypeAPIKey
+	runChecks(t, w.service(), w, 3)
+	require.Empty(t, w.updates)
+}
+
+func TestProxyAutoSwitchManualRevert(t *testing.T) {
+	w, svc, e := switchedWorld(t)
+	ctx := context.Background()
+
+	got, err := svc.ManualRevert(ctx, e.ID)
+	require.NoError(t, err)
+	require.Equal(t, ProxyAutoSwitchStatusManualRevert, got.Status)
+	require.Equal(t, int64(91), *w.accounts[65].ProxyID)
+	require.NotNil(t, w.states[65].ExternalChangeAt, "manual revert starts the 6-hour manual hold")
+
+	_, err = svc.ManualRevert(ctx, e.ID)
+	requireBadRequest(t, err, "只有观察中或已留下")
+
+	_, err = svc.ManualRevert(ctx, 999)
+	var appErr *infraerrors.ApplicationError
+	require.ErrorAs(t, err, &appErr)
+	require.Equal(t, http.StatusNotFound, int(appErr.Code))
+}
+
+func requireBadRequest(t *testing.T, err error, contains string) {
+	t.Helper()
+	var appErr *infraerrors.ApplicationError
+	require.ErrorAs(t, err, &appErr)
+	require.Equal(t, http.StatusBadRequest, int(appErr.Code))
+	require.Contains(t, appErr.Message, contains)
+}
+
+func TestProxyAutoSwitchManualRevertPreconditions(t *testing.T) {
+	ctx := context.Background()
+
+	w, svc, e := switchedWorld(t)
+	w.accounts[65].ProxyID = autoSwitchInt64(97)
+	_, err := svc.ManualRevert(ctx, e.ID)
+	requireBadRequest(t, err, "已经不是这次换上的代理")
+
+	w, svc, e = switchedWorld(t)
+	w.external[91] = 1
+	_, err = svc.ManualRevert(ctx, e.ID)
+	requireBadRequest(t, err, "旧代理已被别的号占用")
+	require.Equal(t, int64(96), *w.accounts[65].ProxyID)
+
+	w, svc, e = switchedWorld(t)
+	w.proxies[91].Status = "expired"
+	_, err = svc.ManualRevert(ctx, e.ID)
+	requireBadRequest(t, err, "旧代理状态")
+
+	w, svc, e = switchedWorld(t)
+	w.event(e.ID).Status = ProxyAutoSwitchStatusKept
+	_, err = svc.ManualRevert(ctx, e.ID)
+	require.NoError(t, err)
+
+	w, svc, e = switchedWorld(t)
+	w.event(e.ID).Status = ProxyAutoSwitchStatusRevertSkipped
+	_, err = svc.ManualRevert(ctx, e.ID)
+	requireBadRequest(t, err, "revert_skipped")
+}
+
+func jsonKeys(t *testing.T, v any) []string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func TestProxyAutoSwitchJSONFieldsMatchContract(t *testing.T) {
+	_, svc, _ := switchedWorld(t)
+	ctx := context.Background()
+	list, err := svc.ListEvents(ctx, ProxyAutoSwitchEventFilter{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.Equal(t, strings.Fields(`account_id account_name after_p50_ms after_samples before_p50_ms before_samples
+		candidate_probe_ms candidates created_at current_probe_ms from_proxy_id from_proxy_label from_region id reason
+		status to_proxy_id to_proxy_label to_region updated_at`), jsonKeys(t, list.Items[0]))
+	require.Equal(t, []string{"error", "label", "probe_ms", "proxy_id", "region"}, jsonKeys(t, list.Items[0].Candidates[0]))
+	require.Equal(t, []string{"items", "next_cursor"}, jsonKeys(t, list))
+
+	recent, err := svc.Recent(ctx, 7)
+	require.NoError(t, err)
+	require.Len(t, recent.Items, 1)
+	require.Equal(t, []string{"account_id", "at", "event_id", "from_proxy_label", "reason", "status", "to_proxy_label"}, jsonKeys(t, recent.Items[0]))
+
+	diag, err := svc.AccountsDiag(ctx)
+	require.NoError(t, err)
+	require.Len(t, diag.Items, 1)
+	require.Equal(t, []string{"account_id", "cooldown_until", "note", "p50_ms", "proxy_id", "region", "samples", "slow_checks", "state"}, jsonKeys(t, diag.Items[0]))
+	require.Equal(t, ProxyAutoSwitchStateObserving, diag.Items[0].State)
+}
+
+func TestProxyAutoSwitchEventsPagination(t *testing.T) {
+	w := newPASWorld()
+	for i := 0; i < 5; i++ {
+		w.events = append(w.events, ProxyAutoSwitchEvent{ID: int64(i + 1), AccountID: 65, Status: ProxyAutoSwitchStatusNoCandidate})
+	}
+	svc := w.service()
+	page, err := svc.ListEvents(context.Background(), ProxyAutoSwitchEventFilter{Limit: 2})
+	require.NoError(t, err)
+	require.Equal(t, []int64{5, 4}, []int64{page.Items[0].ID, page.Items[1].ID})
+	require.Equal(t, int64(4), page.NextCursor)
+	page, err = svc.ListEvents(context.Background(), ProxyAutoSwitchEventFilter{Limit: 2, BeforeID: 2})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Zero(t, page.NextCursor)
+	raw, err := json.Marshal(page.Items[0])
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"to_proxy_id":null`)
+	require.Contains(t, string(raw), `"to_proxy_label":null`)
+	require.Contains(t, string(raw), `"to_region":null`)
+	require.Contains(t, string(raw), `"candidates":[]`)
+}
+
+func TestProxyAutoSwitchRecentOnlyRealSwitches(t *testing.T) {
+	w := newPASWorld()
+	now := w.now
+	label := "P96"
+	w.events = []ProxyAutoSwitchEvent{
+		{ID: 1, AccountID: 65, Status: ProxyAutoSwitchStatusKept, CreatedAt: now.Add(-48 * time.Hour), ToProxyLabel: &label},
+		{ID: 2, AccountID: 65, Status: ProxyAutoSwitchStatusNoCandidate, CreatedAt: now.Add(-time.Hour)},
+		{ID: 3, AccountID: 66, Status: ProxyAutoSwitchStatusFailed, CreatedAt: now.Add(-time.Hour)},
+		{ID: 4, AccountID: 67, Status: ProxyAutoSwitchStatusManualRevert, CreatedAt: now.Add(-8 * 24 * time.Hour)},
+	}
+	recent, err := w.service().Recent(context.Background(), 7)
+	require.NoError(t, err)
+	require.Len(t, recent.Items, 1)
+	require.Equal(t, int64(1), recent.Items[0].EventID)
+	require.Equal(t, "P96", recent.Items[0].ToProxyLabel)
+}

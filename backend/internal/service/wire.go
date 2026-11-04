@@ -1101,6 +1101,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAccountOpsService,
 	ProvideAccountTokenGuardService,
 	ProvideAccountTokenGuardV2Service,
+	ProvideProxyAutoSwitchService,
 	NewEmailService,
 	NewNotificationEmailService,
 	ProvideEmailQueueService,
@@ -1303,6 +1304,16 @@ func ProvideAccountTokenGuardV2Service(repo AccountTokenGuardV2Repository, setti
 	cfg *config.Config,
 ) *AccountTokenGuardV2Service {
 	svc := NewAccountTokenGuardV2Service(repo, settings, admin, openAIGateway, reauth)
+	startBackgroundService(cfg, svc)
+	return svc
+}
+
+// ProvideProxyAutoSwitchService 创建并启动「代理优选」后台检查（每分钟一次，多实例只跑一个）。
+func ProvideProxyAutoSwitchService(repo ProxyAutoSwitchRepository, settings SettingRepository, groups GroupRepository,
+	proxies ProxyRepository, admin AdminService, latency ProxyLatencyCache, exitProber ProxyExitInfoProber,
+	prober ProxyAutoSwitchProber, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config,
+) *ProxyAutoSwitchService {
+	svc := NewProxyAutoSwitchService(repo, settings, groups, proxies, admin, latency, exitProber, prober, lockCache, db)
 	startBackgroundService(cfg, svc)
 	return svc
 }

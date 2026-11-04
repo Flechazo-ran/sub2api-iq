@@ -336,10 +336,18 @@
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
-              <div v-if="row.proxy" class="flex items-center gap-2">
+              <div v-if="row.proxy" class="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span class="text-sm text-gray-700 dark:text-gray-300">{{ row.proxy.name }}</span>
                 <span v-if="row.proxy.country_code" class="text-xs text-gray-500 dark:text-gray-400">
                   ({{ row.proxy.country_code }})
+                </span>
+                <span
+                  v-if="proxyAutoSwitchRecentByAccountId[String(row.id)]"
+                  class="inline-flex cursor-help items-center whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-medium bg-sky-50 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                  :title="proxyAutoSwitchRecentTitle(proxyAutoSwitchRecentByAccountId[String(row.id)])"
+                  data-testid="proxy-autoswitch-tag"
+                >
+                  {{ t('proxyAutoSwitch.recentTag') }}
                 </span>
               </div>
               <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
@@ -511,6 +519,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
 import { listQualityPlans } from '@/api/admin/accountQuality'
+import { listRecent as listProxyAutoSwitchRecent, type ProxyAutoSwitchRecent } from '@/api/admin/proxyAutoSwitch'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
 import { useTableLoader } from '@/composables/useTableLoader'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
@@ -781,6 +790,11 @@ const qualityStripByAccountId = ref<Record<string, QualityStrip | null>>({})
 const qualityStripFetchedAt = ref(0)
 const qualityStripReqSeq = ref(0)
 const QUALITY_STRIP_REFRESH_INTERVAL_MS = 60 * 1000
+// 代理一列的「自动换过」标签：最近 7 天被代理优选换过代理的号。接口失败或后端未上线（404）时静默不显示。
+const proxyAutoSwitchRecentByAccountId = ref<Record<string, ProxyAutoSwitchRecent>>({})
+const PROXY_AUTO_SWITCH_RECENT_REFRESH_INTERVAL_MS = 60 * 1000
+let proxyAutoSwitchRecentFetchedAt = 0
+let proxyAutoSwitchRecentReqSeq = 0
 const usageManualRefreshToken = ref(0)
 
 const desktopViewportQuery = '(min-width: 768px)'
@@ -1044,6 +1058,36 @@ const refreshQualityStrips = async (force = false) => {
   }
 }
 
+const refreshProxyAutoSwitchRecent = async (force = false) => {
+  if (hiddenColumns.has('proxy')) return
+  if (!force && Date.now() - proxyAutoSwitchRecentFetchedAt < PROXY_AUTO_SWITCH_RECENT_REFRESH_INTERVAL_MS) return
+  proxyAutoSwitchRecentFetchedAt = Date.now()
+  const reqSeq = ++proxyAutoSwitchRecentReqSeq
+  try {
+    const items = await listProxyAutoSwitchRecent(7)
+    if (reqSeq !== proxyAutoSwitchRecentReqSeq) return
+    const next: Record<string, ProxyAutoSwitchRecent> = {}
+    for (const item of items) {
+      const key = String(item.account_id)
+      const current = next[key]
+      if (!current || new Date(item.at).getTime() > new Date(current.at).getTime()) next[key] = item
+    }
+    proxyAutoSwitchRecentByAccountId.value = next
+  } catch {
+    if (reqSeq === proxyAutoSwitchRecentReqSeq) proxyAutoSwitchRecentByAccountId.value = {}
+  }
+}
+
+const proxyAutoSwitchRecentTitle = (item: ProxyAutoSwitchRecent): string => {
+  const title = t('proxyAutoSwitch.recentTitle', {
+    time: formatDateTime(item.at),
+    from: item.from_proxy_label || '-',
+    to: item.to_proxy_label || '-',
+    result: t(`proxyAutoSwitch.status.${item.status}`)
+  })
+  return item.reason ? `${title}\n${item.reason}` : title
+}
+
 const autoRefreshIntervalLabel = (sec: number) => {
   if (sec === 5) return t('admin.accounts.refreshInterval5s')
   if (sec === 10) return t('admin.accounts.refreshInterval10s')
@@ -1186,6 +1230,9 @@ const toggleColumn = (key: string) => {
       console.error('Failed to load account today stats after showing column:', error)
     })
   }
+  if (key === 'proxy' && wasHidden) {
+    void refreshProxyAutoSwitchRecent(true)
+  }
   if (key === 'iq_strip' && wasHidden) {
     void refreshQualityStrips(true).catch((error) => {
       console.error('Failed to load account quality strips after showing column:', error)
@@ -1307,6 +1354,7 @@ const load = async (options: AccountLoadOptions = {}) => {
   void refreshQualityStrips(true).catch((error) => {
     console.error('Failed to load account quality strips:', error)
   })
+  void refreshProxyAutoSwitchRecent()
 }
 
 const reload = async () => {
@@ -1319,6 +1367,7 @@ const reload = async () => {
   void refreshQualityStrips(true).catch((error) => {
     console.error('Failed to load account quality strips:', error)
   })
+  void refreshProxyAutoSwitchRecent()
 }
 
 const buildUpstreamBillingRateFilters = () => {
