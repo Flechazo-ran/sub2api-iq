@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,6 +66,17 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 		_, _ = integrationDB.Exec(`DELETE FROM request_connection_traces WHERE account_id = $1`, acc.ID)
 		_, _ = integrationDB.Exec(`DELETE FROM proxy_autoswitch_events WHERE account_id = $1`, acc.ID)
 		_, _ = integrationDB.Exec(`DELETE FROM proxy_autoswitch_account_states WHERE account_id = $1`, acc.ID)
+		// 共用测试库：本测试建的号、代理、分组必须删干净，否则 TestProxyRepoSuite 这类
+		// 统计全表代理的测试会多看到 pas-p1/pas-p2 两条而失败（11-04 CI 实际出现过）。
+		ids := []int64{shadow.ID, apikey.ID, acc.ID}
+		for _, id := range ids {
+			_, _ = integrationDB.Exec(`DELETE FROM account_groups WHERE account_id = $1`, id)
+		}
+		for _, id := range ids {
+			_, _ = integrationDB.Exec(`DELETE FROM accounts WHERE id = $1`, id)
+		}
+		_, _ = integrationDB.Exec(`DELETE FROM proxies WHERE id = ANY($1)`, pq.Array([]int64{p1.ID, p2.ID}))
+		_, _ = integrationDB.Exec(`DELETE FROM groups WHERE id = $1`, group.ID)
 	})
 
 	accounts, err := repo.ListGroupAccounts(ctx, []int64{group.ID})
