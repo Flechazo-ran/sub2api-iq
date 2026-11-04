@@ -18,7 +18,8 @@ type pasWorld struct {
 	groupsOf  map[int64][]int64
 	proxies   map[int64]*Proxy
 	external  map[int64]int64 // proxy id -> accounts outside the test groups using it
-	statsFn   func(accountIDs []int64, from, to time.Time) []ProxyAutoSwitchLatencyStat
+	statsFn   func(metric string, accountIDs []int64, from, to time.Time) []ProxyAutoSwitchLatencyStat
+	statsLog  []string // metric of every LatencyStats call
 	events    []ProxyAutoSwitchEvent
 	nextEvent int64
 	states    map[int64]ProxyAutoSwitchAccountState
@@ -85,7 +86,7 @@ func (w *pasWorld) clock() time.Time { w.mu.Lock(); defer w.mu.Unlock(); return 
 
 // uniform makes every account have the given samples/p50 on whatever proxy it uses now.
 func (w *pasWorld) uniform(samples int, p50 int64) {
-	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
+	w.statsFn = func(_ string, ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
 		out := []ProxyAutoSwitchLatencyStat{}
 		for _, id := range ids {
 			if a := w.accounts[id]; a != nil && a.ProxyID != nil {
@@ -314,11 +315,15 @@ func (w *pasWorld) GetAccount(_ context.Context, id int64) (*ProxyAutoSwitchAcco
 	return nil, nil
 }
 
-func (w *pasWorld) HeaderLatencyStats(_ context.Context, ids []int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error) {
+func (w *pasWorld) LatencyStats(_ context.Context, metric string, ids []int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error) {
+	if !proxyAutoSwitchValidMetric(metric) {
+		return nil, fmt.Errorf("unknown metric %q", metric)
+	}
+	w.statsLog = append(w.statsLog, metric)
 	if w.statsFn == nil {
 		return nil, nil
 	}
-	return w.statsFn(ids, from, to), nil
+	return w.statsFn(metric, ids, from, to), nil
 }
 
 func (w *pasWorld) InsertEvent(_ context.Context, e *ProxyAutoSwitchEvent) error {

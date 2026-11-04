@@ -33,6 +33,19 @@ func pasAttempt(kind string, accountID, proxyID int64, written, headers float64)
 	return map[string]any{"kind": kind, "account_id": accountID, "proxy_id": proxyID, "events": events, "status": 200}
 }
 
+// pasAttemptFirst adds first_semantic (first token) and first_visible offsets; 0 leaves one out.
+func pasAttemptFirst(kind string, accountID, proxyID int64, written, headers, semantic, visible float64) map[string]any {
+	a := pasAttempt(kind, accountID, proxyID, written, headers)
+	events := a["events"].(map[string]any)
+	if semantic > 0 {
+		events["first_semantic"] = semantic
+	}
+	if visible > 0 {
+		events["first_visible"] = visible
+	}
+	return a
+}
+
 func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
@@ -68,36 +81,60 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.Nil(t, missing)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
+	// Headers after 1–5 s; first token (first_semantic) after 3× that;
+	// first_visible later still, which the first-token metric must not use.
 	for i, ms := range []float64{1000, 2000, 3000, 4000, 5000} {
 		insertProxyAutoSwitchTrace(t, now.Add(-time.Duration(i+1)*time.Minute), acc.ID, []map[string]any{
-			pasAttempt("egress", acc.ID, p1.ID, 20, 20+ms),
-			pasAttempt("http", acc.ID, p1.ID, 20, 20+ms), // nested child: must not double count
+			pasAttemptFirst("egress", acc.ID, p1.ID, 20, 20+ms, 20+3*ms, 20+10*ms),
+			pasAttemptFirst("http", acc.ID, p1.ID, 20, 20+ms, 20+3*ms, 20+10*ms), // nested child: must not double count
 		})
 	}
 	insertProxyAutoSwitchTrace(t, now.Add(-2*time.Minute), acc.ID, []map[string]any{
-		pasAttempt("egress", acc.ID, p2.ID, 10, 110),    // other proxy (fallback egress)
-		pasAttempt("egress", acc.ID, p1.ID, 10, 0),      // no response headers
-		pasAttempt("egress", acc.ID+999, p1.ID, 10, 99), // failover attempt on another account
+		pasAttemptFirst("egress", acc.ID, p2.ID, 10, 110, 710, 0), // other proxy (fallback egress)
+		pasAttempt("egress", acc.ID, p1.ID, 10, 0),                // no response headers
+		pasAttempt("egress", acc.ID+999, p1.ID, 10, 99),           // failover attempt on another account
 	})
-	insertProxyAutoSwitchTrace(t, now.Add(-30*time.Minute), acc.ID, []map[string]any{pasAttempt("egress", acc.ID, p1.ID, 0, 9000)})
+	// Headers but no first token (only first_visible): a response-header sample only.
+	insertProxyAutoSwitchTrace(t, now.Add(-3*time.Minute), acc.ID, []map[string]any{
+		pasAttemptFirst("egress", acc.ID, p1.ID, 20, 3020, 0, 520),
+	})
+	// first_semantic before request_written is not a sample.
+	insertProxyAutoSwitchTrace(t, now.Add(-4*time.Minute), acc.ID, []map[string]any{
+		pasAttemptFirst("egress", acc.ID, p1.ID, 100, 0, 50, 0),
+	})
+	insertProxyAutoSwitchTrace(t, now.Add(-30*time.Minute), acc.ID, []map[string]any{pasAttemptFirst("egress", acc.ID, p1.ID, 0, 9000, 90000, 0)})
 
-	stats, err := repo.HeaderLatencyStats(ctx, []int64{acc.ID}, now.Add(-10*time.Minute), now.Add(time.Second))
-	require.NoError(t, err)
-	byProxy := map[int64]service.ProxyAutoSwitchLatencyStat{}
-	for _, st := range stats {
-		require.Equal(t, acc.ID, st.AccountID)
-		byProxy[st.ProxyID] = st
+	latency := func(metric string) map[int64]service.ProxyAutoSwitchLatencyStat {
+		t.Helper()
+		stats, err := repo.LatencyStats(ctx, metric, []int64{acc.ID}, now.Add(-10*time.Minute), now.Add(time.Second))
+		require.NoError(t, err)
+		byProxy := map[int64]service.ProxyAutoSwitchLatencyStat{}
+		for _, st := range stats {
+			require.Equal(t, acc.ID, st.AccountID)
+			byProxy[st.ProxyID] = st
+		}
+		return byProxy
 	}
-	require.Equal(t, 5, byProxy[p1.ID].Samples)
-	require.Equal(t, int64(3000), byProxy[p1.ID].P50MS)
-	require.Equal(t, 1, byProxy[p2.ID].Samples)
-	require.Equal(t, int64(100), byProxy[p2.ID].P50MS)
+	headers := latency(service.ProxyAutoSwitchMetricResponseHeaders)
+	require.Equal(t, 6, headers[p1.ID].Samples)
+	require.Equal(t, int64(3000), headers[p1.ID].P50MS)
+	require.Equal(t, 1, headers[p2.ID].Samples)
+	require.Equal(t, int64(100), headers[p2.ID].P50MS)
+	firstToken := latency(service.ProxyAutoSwitchMetricFirstToken)
+	require.Equal(t, 5, firstToken[p1.ID].Samples, "only attempts with first_semantic")
+	require.Equal(t, int64(9000), firstToken[p1.ID].P50MS, "first_semantic − request_written, not first_visible")
+	require.Equal(t, 1, firstToken[p2.ID].Samples)
+	require.Equal(t, int64(700), firstToken[p2.ID].P50MS)
+	_, err = repo.LatencyStats(ctx, "first_visible", []int64{acc.ID}, now.Add(-10*time.Minute), now)
+	require.Error(t, err, "unknown metric is rejected, never put into SQL")
+	_, err = repo.LatencyStats(ctx, "response_headers' OR 1=1 --", []int64{acc.ID}, now.Add(-10*time.Minute), now)
+	require.Error(t, err)
 
 	label := p2.Name
 	region := "JP"
 	switchedAt := now.Add(-20 * time.Minute)
 	observing := &service.ProxyAutoSwitchEvent{CreatedAt: switchedAt, UpdatedAt: switchedAt, AccountID: acc.ID,
-		Status: service.ProxyAutoSwitchStatusObserving, Reason: "慢", FromProxyID: &p1.ID, FromProxyLabel: p1.Name, FromRegion: "JP",
+		Status: service.ProxyAutoSwitchStatusObserving, Metric: service.ProxyAutoSwitchMetricFirstToken, Reason: "慢", FromProxyID: &p1.ID, FromProxyLabel: p1.Name, FromRegion: "JP",
 		ToProxyID: &p2.ID, ToProxyLabel: &label, ToRegion: &region, BeforeP50MS: ptrInt64(3513), BeforeSamples: 42,
 		CurrentProbeMS: ptrInt64(1800), CandidateProbeMS: ptrInt64(1120), SwitchedAt: &switchedAt,
 		Candidates: []service.ProxyAutoSwitchCandidate{{ProxyID: p2.ID, Label: label, Region: "JP", ProbeMS: ptrInt64(1120)}}}
@@ -110,6 +147,7 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	loaded, err := repo.GetEvent(ctx, observing.ID)
 	require.NoError(t, err)
 	require.Equal(t, acc.Name, loaded.AccountName)
+	require.Equal(t, service.ProxyAutoSwitchMetricFirstToken, loaded.Metric)
 	require.Equal(t, label, *loaded.ToProxyLabel)
 	require.Equal(t, int64(1120), *loaded.Candidates[0].ProbeMS)
 	require.WithinDuration(t, switchedAt, *loaded.SwitchedAt, time.Millisecond)
@@ -118,6 +156,16 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.Nil(t, loadedMiss.ToProxyID)
 	require.Nil(t, loadedMiss.ToProxyLabel)
 	require.Equal(t, []service.ProxyAutoSwitchCandidate{}, loadedMiss.Candidates)
+	require.Equal(t, service.ProxyAutoSwitchMetricResponseHeaders, loadedMiss.Metric, "no metric given: response_headers")
+
+	// Rows written without the column (older code) default to response_headers; other values are rejected.
+	var legacyMetric string
+	require.NoError(t, integrationDB.QueryRow(`INSERT INTO proxy_autoswitch_events (account_id, status) VALUES ($1, 'failed') RETURNING metric`, acc.ID).Scan(&legacyMetric))
+	require.Equal(t, service.ProxyAutoSwitchMetricResponseHeaders, legacyMetric)
+	_, err = integrationDB.Exec(`INSERT INTO proxy_autoswitch_events (account_id, status, metric) VALUES ($1, 'failed', 'first_visible')`, acc.ID)
+	require.Error(t, err, "CHECK allows only response_headers and first_token")
+	_, err = integrationDB.Exec(`DELETE FROM proxy_autoswitch_events WHERE account_id = $1 AND status = 'failed'`, acc.ID)
+	require.NoError(t, err)
 
 	obs, err := repo.ListObserving(ctx)
 	require.NoError(t, err)
@@ -147,6 +195,7 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.GreaterOrEqual(t, n, 1)
 
 	kept := *loaded
+	kept.Metric = service.ProxyAutoSwitchMetricResponseHeaders // the update must not change the judged metric
 	kept.Status = service.ProxyAutoSwitchStatusKept
 	kept.AfterP50MS = ptrInt64(1300)
 	kept.AfterSamples = 37
@@ -161,6 +210,7 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, service.ProxyAutoSwitchStatusKept, loaded.Status)
 	require.Equal(t, int64(1300), *loaded.AfterP50MS)
+	require.Equal(t, service.ProxyAutoSwitchMetricFirstToken, loaded.Metric)
 
 	latest, err := repo.LatestEventPerAccount(ctx, now.Add(-7*24*time.Hour), []string{service.ProxyAutoSwitchStatusKept})
 	require.NoError(t, err)
@@ -172,6 +222,7 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	}
 	require.Len(t, mine, 1)
 	require.Equal(t, observing.ID, mine[0].ID)
+	require.Equal(t, service.ProxyAutoSwitchMetricFirstToken, mine[0].Metric)
 
 	external := now.Add(-time.Hour)
 	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p1.ID, SeenAt: now, ExternalChangeAt: &external}))

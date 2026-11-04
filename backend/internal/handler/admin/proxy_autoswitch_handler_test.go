@@ -90,7 +90,7 @@ func (s *pasHandlerStore) GetAccount(_ context.Context, id int64) (*service.Prox
 	}
 	return nil, nil
 }
-func (s *pasHandlerStore) HeaderLatencyStats(context.Context, []int64, time.Time, time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
+func (s *pasHandlerStore) LatencyStats(context.Context, string, []int64, time.Time, time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
 	return []service.ProxyAutoSwitchLatencyStat{{AccountID: 65, ProxyID: 96, Samples: 40, P50MS: 1300}}, nil
 }
 func (s *pasHandlerStore) InsertEvent(context.Context, *service.ProxyAutoSwitchEvent) error {
@@ -174,7 +174,7 @@ func newPASHandlerRouter(t *testing.T) (*gin.Engine, *pasHandlerStore) {
 				Status: service.ProxyAutoSwitchStatusNoCandidate, Reason: "没有候选", FromProxyID: &from, FromProxyLabel: "越南河内-103.199.9.228",
 				FromRegion: "VN", Candidates: []service.ProxyAutoSwitchCandidate{}},
 			{ID: 12, CreatedAt: now, UpdatedAt: now, AccountID: 65, AccountName: "GPT-速刷号-xxx",
-				Status: service.ProxyAutoSwitchStatusKept, Reason: "留下", FromProxyID: &from, FromProxyLabel: "越南河内-103.199.9.228",
+				Status: service.ProxyAutoSwitchStatusKept, Metric: service.ProxyAutoSwitchMetricFirstToken, Reason: "留下", FromProxyID: &from, FromProxyLabel: "越南河内-103.199.9.228",
 				FromRegion: "VN", ToProxyID: &to, ToProxyLabel: &toLabel, ToRegion: &toRegion,
 				Candidates: []service.ProxyAutoSwitchCandidate{{ProxyID: 96, Label: toLabel, Region: "VN"}}},
 		},
@@ -222,8 +222,9 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	data := body["data"].(map[string]any)
 	require.Equal(t, []string{"account_cooldown_hours", "consecutive_checks", "enabled", "group_ids", "max_switches_per_hour",
-		"min_days_to_expiry", "min_improvement_pct", "min_samples", "observe_minutes", "region_policy", "threshold_ms", "window_minutes"}, sortedKeys(data))
+		"metric", "min_days_to_expiry", "min_improvement_pct", "min_samples", "observe_minutes", "region_policy", "threshold_ms", "window_minutes"}, sortedKeys(data))
 	require.Equal(t, false, data["enabled"])
+	require.Equal(t, "response_headers", data["metric"])
 	require.Equal(t, []any{float64(16)}, data["group_ids"])
 
 	data["enabled"] = true
@@ -232,6 +233,22 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, body)
 	require.Equal(t, true, body["data"].(map[string]any)["enabled"])
 	require.Equal(t, float64(3000), body["data"].(map[string]any)["threshold_ms"])
+
+	data["metric"] = "first_token"
+	data["threshold_ms"] = 10000
+	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
+	require.Equal(t, http.StatusOK, code, body)
+	require.Equal(t, "first_token", body["data"].(map[string]any)["metric"])
+	code, body = doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/config", nil)
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, "first_token", body["data"].(map[string]any)["metric"])
+	require.Equal(t, float64(10000), body["data"].(map[string]any)["threshold_ms"])
+
+	data["metric"] = "first_visible"
+	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
+	require.Equal(t, http.StatusBadRequest, code)
+	require.Contains(t, body["message"], "metric")
+	data["metric"] = "first_token"
 
 	data["window_minutes"] = 61
 	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
@@ -255,7 +272,8 @@ func TestProxyAutoSwitchHandlerEventsRecentAccounts(t *testing.T) {
 	item := data["items"].([]any)[0].(map[string]any)
 	require.Equal(t, []string{"account_id", "account_name", "after_p50_ms", "after_samples", "before_p50_ms", "before_samples",
 		"candidate_probe_ms", "candidates", "created_at", "current_probe_ms", "from_proxy_id", "from_proxy_label", "from_region",
-		"id", "reason", "status", "to_proxy_id", "to_proxy_label", "to_region", "updated_at"}, sortedKeys(item))
+		"id", "metric", "reason", "status", "to_proxy_id", "to_proxy_label", "to_region", "updated_at"}, sortedKeys(item))
+	require.Equal(t, "first_token", item["metric"])
 	_, err := time.Parse(time.RFC3339, item["created_at"].(string))
 	require.NoError(t, err)
 
@@ -268,6 +286,7 @@ func TestProxyAutoSwitchHandlerEventsRecentAccounts(t *testing.T) {
 	require.Nil(t, noCandidate["to_proxy_id"])
 	require.Nil(t, noCandidate["to_proxy_label"])
 	require.Nil(t, noCandidate["to_region"])
+	require.Equal(t, "response_headers", noCandidate["metric"], "rows without a metric were judged by response headers")
 
 	code, _ = doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/events?limit=abc", nil)
 	require.Equal(t, http.StatusBadRequest, code)

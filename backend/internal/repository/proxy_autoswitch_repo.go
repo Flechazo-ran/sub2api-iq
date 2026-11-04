@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -70,11 +71,13 @@ func (r *proxyAutoSwitchRepository) GetAccount(ctx context.Context, id int64) (*
 	return &a, nil
 }
 
-// proxyAutoSwitchLatencySQL counts only "egress" attempts: each egress attempt
+// proxyAutoSwitchLatencySQL* count only "egress" attempts: each egress attempt
 // also has a nested "http" child with the same timings, so counting both would
 // double every sample. Attempts are attributed by their own account_id and
 // proxy_id (failover attempts on other accounts/backup egress are excluded).
-const proxyAutoSwitchLatencySQL = `
+// The two queries differ only in the event subtracted from request_written:
+// response_headers, or first_semantic (first token) of the same attempt.
+const proxyAutoSwitchLatencySQLResponseHeaders = `
 SELECT (a->>'account_id')::bigint AS account_id,
        (a->>'proxy_id')::bigint AS proxy_id,
        COUNT(*) AS samples,
@@ -91,11 +94,38 @@ WHERE t.started_at >= $1 AND t.started_at < $2
   AND (a->'events'->>'response_headers')::float8 >= (a->'events'->>'request_written')::float8
 GROUP BY 1, 2`
 
-func (r *proxyAutoSwitchRepository) HeaderLatencyStats(ctx context.Context, accountIDs []int64, from, to time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
+const proxyAutoSwitchLatencySQLFirstToken = `
+SELECT (a->>'account_id')::bigint AS account_id,
+       (a->>'proxy_id')::bigint AS proxy_id,
+       COUNT(*) AS samples,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY (a->'events'->>'first_semantic')::float8 - (a->'events'->>'request_written')::float8) AS p50
+FROM request_connection_traces t
+CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.detail->'attempts') = 'array' THEN t.detail->'attempts' ELSE '[]'::jsonb END) a
+WHERE t.started_at >= $1 AND t.started_at < $2
+  AND a->>'kind' = 'egress'
+  AND jsonb_typeof(a->'events'->'first_semantic') = 'number'
+  AND jsonb_typeof(a->'events'->'request_written') = 'number'
+  AND jsonb_typeof(a->'account_id') = 'number'
+  AND jsonb_typeof(a->'proxy_id') = 'number'
+  AND (a->>'account_id')::bigint = ANY($3)
+  AND (a->'events'->>'first_semantic')::float8 >= (a->'events'->>'request_written')::float8
+GROUP BY 1, 2`
+
+// The metric only picks one of the fixed queries; it is never put into SQL.
+var proxyAutoSwitchLatencySQLByMetric = map[string]string{
+	service.ProxyAutoSwitchMetricResponseHeaders: proxyAutoSwitchLatencySQLResponseHeaders,
+	service.ProxyAutoSwitchMetricFirstToken:      proxyAutoSwitchLatencySQLFirstToken,
+}
+
+func (r *proxyAutoSwitchRepository) LatencyStats(ctx context.Context, metric string, accountIDs []int64, from, to time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
+	query, ok := proxyAutoSwitchLatencySQLByMetric[metric]
+	if !ok {
+		return nil, fmt.Errorf("unknown proxy autoswitch metric %q", metric)
+	}
 	if len(accountIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := r.db.QueryContext(ctx, proxyAutoSwitchLatencySQL, from, to, pq.Array(accountIDs))
+	rows, err := r.db.QueryContext(ctx, query, from, to, pq.Array(accountIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +146,7 @@ func (r *proxyAutoSwitchRepository) HeaderLatencyStats(ctx context.Context, acco
 }
 
 const proxyAutoSwitchEventSelect = `
-SELECT e.id, e.created_at, e.updated_at, e.account_id, COALESCE(a.name, ''), e.status, e.reason,
+SELECT e.id, e.created_at, e.updated_at, e.account_id, COALESCE(a.name, ''), e.status, e.metric, e.reason,
        e.from_proxy_id, e.from_proxy_label, e.from_region, e.to_proxy_id, e.to_proxy_label, e.to_region,
        e.before_p50_ms, e.before_samples, e.current_probe_ms, e.candidate_probe_ms, e.after_p50_ms, e.after_samples,
        e.candidates, e.switched_at, e.finished_at
@@ -133,7 +163,7 @@ func scanProxyAutoSwitchEvent(row proxyAutoSwitchRowScanner) (*service.ProxyAuto
 	var toLabel, toRegion sql.NullString
 	var switchedAt, finishedAt sql.NullTime
 	var candidates []byte
-	if err := row.Scan(&e.ID, &e.CreatedAt, &e.UpdatedAt, &e.AccountID, &e.AccountName, &e.Status, &e.Reason,
+	if err := row.Scan(&e.ID, &e.CreatedAt, &e.UpdatedAt, &e.AccountID, &e.AccountName, &e.Status, &e.Metric, &e.Reason,
 		&fromID, &e.FromProxyLabel, &e.FromRegion, &toID, &toLabel, &toRegion,
 		&beforeP50, &e.BeforeSamples, &currentProbe, &candidateProbe, &afterP50, &e.AfterSamples,
 		&candidates, &switchedAt, &finishedAt); err != nil {
@@ -187,14 +217,17 @@ func (r *proxyAutoSwitchRepository) InsertEvent(ctx context.Context, e *service.
 	if e.UpdatedAt.IsZero() {
 		e.UpdatedAt = e.CreatedAt
 	}
+	if e.Metric == "" {
+		e.Metric = service.ProxyAutoSwitchMetricResponseHeaders
+	}
 	return r.db.QueryRowContext(ctx, `
 		INSERT INTO proxy_autoswitch_events
-		  (created_at, updated_at, account_id, status, reason, from_proxy_id, from_proxy_label, from_region,
+		  (created_at, updated_at, account_id, status, metric, reason, from_proxy_id, from_proxy_label, from_region,
 		   to_proxy_id, to_proxy_label, to_region, before_p50_ms, before_samples, current_probe_ms,
 		   candidate_probe_ms, after_p50_ms, after_samples, candidates, switched_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21)
 		RETURNING id`,
-		e.CreatedAt, e.UpdatedAt, e.AccountID, e.Status, e.Reason, e.FromProxyID, e.FromProxyLabel, e.FromRegion,
+		e.CreatedAt, e.UpdatedAt, e.AccountID, e.Status, e.Metric, e.Reason, e.FromProxyID, e.FromProxyLabel, e.FromRegion,
 		e.ToProxyID, e.ToProxyLabel, e.ToRegion, e.BeforeP50MS, e.BeforeSamples, e.CurrentProbeMS,
 		e.CandidateProbeMS, e.AfterP50MS, e.AfterSamples, candidates, e.SwitchedAt, e.FinishedAt).Scan(&e.ID)
 }
@@ -293,7 +326,7 @@ func (r *proxyAutoSwitchRepository) CountEventsSince(ctx context.Context, since 
 func (r *proxyAutoSwitchRepository) LatestEventPerAccount(ctx context.Context, since time.Time, statuses []string) ([]service.ProxyAutoSwitchEvent, error) {
 	return r.queryEvents(ctx, `
 		SELECT * FROM (
-		  SELECT DISTINCT ON (e.account_id) e.id, e.created_at, e.updated_at, e.account_id, COALESCE(a.name, ''), e.status, e.reason,
+		  SELECT DISTINCT ON (e.account_id) e.id, e.created_at, e.updated_at, e.account_id, COALESCE(a.name, ''), e.status, e.metric, e.reason,
 		         e.from_proxy_id, e.from_proxy_label, e.from_region, e.to_proxy_id, e.to_proxy_label, e.to_region,
 		         e.before_p50_ms, e.before_samples, e.current_probe_ms, e.candidate_probe_ms, e.after_p50_ms, e.after_samples,
 		         e.candidates, e.switched_at, e.finished_at

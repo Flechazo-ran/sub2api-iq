@@ -1,14 +1,17 @@
 import { apiClient } from '../client'
 
-// 代理优选（响应头慢自动换代理）。字段与后端约定一致，见 proxy-autoswitch-contract.md。
+// 代理优选（首字或响应头慢自动换代理）。字段与后端约定一致，见 proxy-autoswitch-contract.md。
 const base = '/admin/proxy-autoswitch'
 
 export type ProxyAutoSwitchRegionPolicy = 'prefer_same' | 'same_only' | 'any'
+// 判慢指标：first_token = 首字（first_semantic − request_written），response_headers = 响应头。
+export type ProxyAutoSwitchMetric = 'response_headers' | 'first_token'
 
 export interface ProxyAutoSwitchConfig {
   enabled: boolean
   window_minutes: number
   min_samples: number
+  metric: ProxyAutoSwitchMetric
   threshold_ms: number
   consecutive_checks: number
   min_improvement_pct: number
@@ -45,6 +48,8 @@ export interface ProxyAutoSwitchEvent {
   account_id: number
   account_name: string
   status: ProxyAutoSwitchStatus
+  // 这条记录按哪个指标判的慢（换前 p50 和换后 p50 都是这个指标）
+  metric: ProxyAutoSwitchMetric
   reason: string
   from_proxy_id: number
   from_proxy_label: string

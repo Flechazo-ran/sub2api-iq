@@ -211,6 +211,7 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 	event := &ProxyAutoSwitchEvent{
 		AccountID:      account.ID,
 		AccountName:    account.Name,
+		Metric:         cfg.Metric,
 		FromProxyID:    autoSwitchInt64(currentID),
 		FromProxyLabel: proxyAutoSwitchLabel(current),
 		FromRegion:     currentRegion,
@@ -218,8 +219,8 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 		BeforeSamples:  stat.Samples,
 		Candidates:     []ProxyAutoSwitchCandidate{},
 	}
-	base := fmt.Sprintf("最近 %d 分钟响应头 p50 %dms（%d 个样本），连续 %d 次检查超过 %dms",
-		cfg.WindowMinutes, stat.P50MS, stat.Samples, cfg.ConsecutiveChecks, cfg.ThresholdMS)
+	base := fmt.Sprintf("最近 %d 分钟%s p50 %dms（%d 个样本），连续 %d 次检查超过 %dms",
+		cfg.WindowMinutes, proxyAutoSwitchMetricLabel(cfg.Metric), stat.P50MS, stat.Samples, cfg.ConsecutiveChecks, cfg.ThresholdMS)
 	if len(pool.first) == 0 && len(pool.second) == 0 {
 		return false, s.recordMiss(ctx, event, ProxyAutoSwitchStatusNoCandidate, base+"；"+pool.emptyReason)
 	}
@@ -385,10 +386,14 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 	if limit := switchedAt.Add(observe * proxyAutoSwitchObserveExtendFactor); end.After(limit) {
 		end = limit
 	}
-	stats, err := s.repo.HeaderLatencyStats(ctx, []int64{event.AccountID}, switchedAt, end)
+	// Compare with the metric this event was judged by, even if the config
+	// changed meanwhile, so before and after measure the same thing.
+	metric := proxyAutoSwitchEventMetric(event)
+	stats, err := s.repo.LatencyStats(ctx, metric, []int64{event.AccountID}, switchedAt, end)
 	if err != nil {
 		return err
 	}
+	label := proxyAutoSwitchMetricLabel(metric)
 	stat := latencyStatFor(stats, event.AccountID, event.ToProxyID)
 	decision := proxyAutoSwitchObservationDecision(cfg, elapsed, event.BeforeP50MS, stat.Samples, stat.P50MS)
 	if decision == proxyAutoSwitchDecisionWait {
@@ -424,13 +429,13 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 			fresh.Reason += "；观察期间账号代理被改成别的了，不再换回"
 		case decision == proxyAutoSwitchDecisionKeep:
 			fresh.Status = ProxyAutoSwitchStatusKept
-			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理 p50 %dms（%d 个样本），换前 %dms，留下", minutes, stat.P50MS, stat.Samples, before)
+			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），换前 %dms，留下", minutes, label, stat.P50MS, stat.Samples, before)
 		case decision == proxyAutoSwitchDecisionKeepInsufficient:
 			fresh.Status = ProxyAutoSwitchStatusKeptInsufficient
 			fresh.Reason += fmt.Sprintf("；观察 %d 分钟只有 %d 个样本（少于 %d 个），留下", minutes, stat.Samples, cfg.MinSamples)
 		default:
-			note := fmt.Sprintf("；观察 %d 分钟：新代理 p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上",
-				minutes, stat.P50MS, stat.Samples, before, proxyAutoSwitchKeepDropPct)
+			note := fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上",
+				minutes, label, stat.P50MS, stat.Samples, before, proxyAutoSwitchKeepDropPct)
 			if reason := s.revertBlockedReason(ctx, *fresh.FromProxyID); reason != "" {
 				fresh.Status = ProxyAutoSwitchStatusRevertSkipped
 				fresh.Reason += note + "；" + reason + "，不换回"

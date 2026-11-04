@@ -17,12 +17,12 @@ const statuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficie
 const statusText: Record<string, string> = Object.fromEntries(Object.entries(zhProxyAutoSwitch.status).map(([k, v]) => [k, String(v).replace('{pct}', '30')]))
 
 function config(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitchConfig {
-  return { enabled: false, window_minutes: 10, min_samples: 10, threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_hours: 6, max_switches_per_hour: 5, observe_minutes: 15, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [16], ...overrides }
+  return { enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_hours: 6, max_switches_per_hour: 5, observe_minutes: 15, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [16], ...overrides }
 }
 function event(id: number, status: ProxyAutoSwitchStatus, overrides: Partial<ProxyAutoSwitchEvent> = {}): ProxyAutoSwitchEvent {
   const switched = status !== 'no_candidate' && status !== 'failed'
   return {
-    id, created_at: '2026-11-03T12:14:00Z', updated_at: '2026-11-03T12:30:00Z', account_id: 60 + id, account_name: `GPT-速刷号-${id}`, status, reason: `原因-${status}`,
+    id, created_at: '2026-11-03T12:14:00Z', updated_at: '2026-11-03T12:30:00Z', account_id: 60 + id, account_name: `GPT-速刷号-${id}`, status, metric: 'response_headers', reason: `原因-${status}`,
     from_proxy_id: 91, from_proxy_label: '东京-91', from_region: 'JP',
     to_proxy_id: switched ? 96 : null, to_proxy_label: switched ? '东京-96' : null, to_region: switched ? 'JP' : null,
     before_p50_ms: 3513, before_samples: 42, current_probe_ms: 1800, candidate_probe_ms: switched ? 1120 : null,
@@ -57,7 +57,7 @@ beforeEach(() => {
 afterEach(() => wrapper?.unmount())
 
 describe('ProxyAutoSwitchView settings', () => {
-  it('loads the saved config with two modes, a fixed metric and only OpenAI groups', async () => {
+  it('loads the saved config with two modes, the metric choice and only OpenAI groups', async () => {
     wrapper = mountView(); await flushPromises()
     expect(api.getConfig).toHaveBeenCalledTimes(1)
     expect(getAllGroups).toHaveBeenCalledWith('openai')
@@ -65,8 +65,12 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.find('[role="radiogroup"]').findAll('button').map(button => button.text())).toEqual(['关闭', '自动换代理'])
     expect(wrapper.get('[data-testid="pas-mode-off"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.text()).not.toContain('只记录建议')
-    expect(wrapper.get('[data-testid="pas-slow-metric"]').text()).toBe('响应头时间')
-    expect(wrapper.text()).not.toContain('首字时间')
+    const metric = wrapper.get('[data-testid="pas-metric"]')
+    expect(metric.findAll('button').map(button => button.text())).toEqual(['首字时间', '响应头时间'])
+    expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toBe(zhProxyAutoSwitch.metricHint.response_headers)
+    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里响应头时间的中位数')
     expect((wrapper.get('[data-testid="pas-threshold_s"]').element as HTMLInputElement).value).toBe('2.5')
     expect((wrapper.get('[data-testid="pas-window_minutes"]').element as HTMLInputElement).value).toBe('10')
     const chips = wrapper.findAll('[data-testid="pas-groups"] label')
@@ -103,6 +107,54 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-notice"]').text()).toContain('设置已保存')
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('switches the metric to first token with a threshold in seconds and saves both', async () => {
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+    wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="pas-metric-first_token"]').trigger('click')
+    expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('false')
+    const hint = wrapper.get('[data-testid="pas-metric-hint"]').text()
+    expect(hint).toContain('包含模型思考时间')
+    expect(hint).toContain('换代理只能改善网络部分')
+    expect(hint).toContain('「没找到快 30% 的代理」')
+    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里首字时间的中位数')
+    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('首字时间中位数没降到换前的 80% 以下')
+    await wrapper.get('[data-testid="pas-min_improvement_pct"]').setValue('40')
+    expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toContain('「没找到快 40% 的代理」')
+    await wrapper.get('[data-testid="pas-min_improvement_pct"]').setValue('30')
+
+    // Up to 120 s is allowed now; above that is blocked.
+    await wrapper.get('[data-testid="pas-threshold_s"]').setValue('121')
+    expect(wrapper.text()).toContain('要在 0.2–120 之间')
+    expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="pas-threshold_s"]').setValue('10')
+    expect(wrapper.get('[data-testid="pas-dirty"]').text()).toBe('有未保存的修改')
+    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
+    await flushPromises()
+    expect(api.updateConfig).toHaveBeenCalledWith(config({ metric: 'first_token', threshold_ms: 10000 }))
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
+
+    // Discarding goes back to the saved metric.
+    await wrapper.get('[data-testid="pas-metric-response_headers"]').trigger('click')
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="pas-discard"]').trigger('click')
+    expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('true')
+  })
+
+  it('treats a config without metric (older backend) as response headers', async () => {
+    const legacy: Partial<ProxyAutoSwitchConfig> = config()
+    delete legacy.metric
+    api.getConfig.mockResolvedValue(legacy)
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="pas-min_samples"]').setValue('20')
+    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
+    await flushPromises()
+    expect(api.updateConfig).toHaveBeenCalledWith(config({ min_samples: 20 }))
   })
 
   it('shows the backend message when saving fails and keeps the edits', async () => {
@@ -166,6 +218,23 @@ describe('ProxyAutoSwitchView switch log', () => {
     expect(noCandidate.get('[data-testid="pas-proxy"]').text()).toBe('#91 东京-91JP')
     expect(noCandidate.get('[data-testid="pas-latency"]').text()).not.toContain('→')
     expect(wrapper.text()).toContain('没有更多了')
+  })
+
+  it('labels each record with the metric it was judged by', async () => {
+    api.listEvents.mockResolvedValue({ items: [
+      event(1, 'kept', { metric: 'first_token', before_p50_ms: 12000, before_samples: 40 }),
+      event(2, 'no_candidate'),
+      event(3, 'kept', { metric: undefined as unknown as ProxyAutoSwitchEvent['metric'] }),
+    ], next_cursor: 0 })
+    wrapper = mountView(); await flushPromises()
+    expect(rowFor(1).get('[data-testid="pas-metric-tag"]').text()).toBe('首字')
+    expect(rowFor(1).get('[data-testid="pas-latency"]').text()).toContain('首字12.00 s → 1.12 s')
+    expect(rowFor(2).get('[data-testid="pas-metric-tag"]').text()).toBe('响应头')
+    expect(rowFor(3).get('[data-testid="pas-metric-tag"]').text()).toBe('响应头')
+    await rowFor(1).trigger('click')
+    expect(wrapper.get('[data-event-id="1"] [data-testid="pas-detail-metric"]').text()).toBe('按首字时间判慢：换前 p50 12.00 s（40 个样本）')
+    await rowFor(2).trigger('click')
+    expect(wrapper.get('[data-event-id="2"] [data-testid="pas-detail-metric"]').text()).toBe('按响应头时间判慢：换前 p50 3.51 s（42 个样本）')
   })
 
   it('opens a row to show candidate probes, fastest first, with the chosen proxy marked', async () => {
