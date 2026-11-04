@@ -18,7 +18,7 @@ const (
 	proxyAutoSwitchDecisionWait             = "wait"
 	proxyAutoSwitchDecisionKeep             = "keep"
 	proxyAutoSwitchDecisionKeepInsufficient = "keep_insufficient"
-	proxyAutoSwitchDecisionRevert           = "revert"
+	proxyAutoSwitchDecisionNotFaster        = "not_faster"
 )
 
 var (
@@ -118,11 +118,12 @@ func proxyAutoSwitchGate(cfg ProxyAutoSwitchConfig, now time.Time, observing boo
 	if observing {
 		return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateObserving, note: "换代理后观察中"}
 	}
+	cooldown := proxyAutoSwitchCooldown(cfg)
 	if hist.LastSwitchAt != nil {
-		until := hist.LastSwitchAt.Add(time.Duration(cfg.AccountCooldownHours) * time.Hour)
+		until := hist.LastSwitchAt.Add(cooldown)
 		if now.Before(until) {
 			return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateCooldown, until: &until,
-				note: fmt.Sprintf("%d 小时内已经自动换过一次代理", cfg.AccountCooldownHours)}
+				note: fmt.Sprintf("%d 分钟内已经自动换过一次代理", cfg.AccountCooldownMinutes)}
 		}
 	}
 	if state != nil && state.ExternalChangeAt != nil {
@@ -133,10 +134,10 @@ func proxyAutoSwitchGate(cfg ProxyAutoSwitchConfig, now time.Time, observing boo
 		}
 	}
 	if hist.LastMissAt != nil {
-		until := hist.LastMissAt.Add(proxyAutoSwitchRetryBackoff)
+		until := hist.LastMissAt.Add(cooldown)
 		if now.Before(until) {
 			return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateCooldown, until: &until,
-				note: "上次没换成，30 分钟后再试"}
+				note: fmt.Sprintf("上次没换成，%d 分钟后再试", cfg.AccountCooldownMinutes)}
 		}
 	}
 	return nil
@@ -153,18 +154,37 @@ func sameProxyID(a, b *int64) bool {
 // differs from the previous check and was not set by this feature (the feature
 // updates the state itself right after switching) counts as an external change.
 // For an account seen for the first time, audit_logs of the last 6 hours decide.
+// A proxy set during the new-account setup window (created_at + 30 min) is part
+// of creating the account, not a manual change, so it never holds the account:
+// such a change is not recorded, and one already stored (from before this rule,
+// in prev or in the table) is cleared through ClearExternalUpTo.
 func proxyAutoSwitchNextState(prev *ProxyAutoSwitchAccountState, account ProxyAutoSwitchAccount, now time.Time, audit []ProxyAutoSwitchAuditWrite) ProxyAutoSwitchAccountState {
 	next := ProxyAutoSwitchAccountState{AccountID: account.ID, ProxyID: account.ProxyID, SeenAt: now}
+	if !account.CreatedAt.IsZero() {
+		setupEnd := account.CreatedAt.Add(proxyAutoSwitchNewAccountSetup)
+		next.ClearExternalUpTo = &setupEnd
+	}
 	if prev == nil {
 		next.ExternalChangeAt = proxyAutoSwitchAuditProxyWriteAt(audit, account.ID, account.ProxyID)
-		return next
+	} else {
+		next.ExternalChangeAt = prev.ExternalChangeAt
+		if !sameProxyID(prev.ProxyID, account.ProxyID) {
+			changedAt := now
+			next.ExternalChangeAt = &changedAt
+		}
 	}
-	next.ExternalChangeAt = prev.ExternalChangeAt
-	if !sameProxyID(prev.ProxyID, account.ProxyID) {
-		changedAt := now
-		next.ExternalChangeAt = &changedAt
+	if proxyAutoSwitchDuringNewAccountSetup(account, next.ExternalChangeAt) {
+		next.ExternalChangeAt = nil
 	}
 	return next
+}
+
+// proxyAutoSwitchDuringNewAccountSetup：代理改动发生在建号后 30 分钟内，算建号流程。
+func proxyAutoSwitchDuringNewAccountSetup(account ProxyAutoSwitchAccount, changedAt *time.Time) bool {
+	if changedAt == nil || account.CreatedAt.IsZero() {
+		return false
+	}
+	return !changedAt.After(account.CreatedAt.Add(proxyAutoSwitchNewAccountSetup))
 }
 
 // proxyAutoSwitchAuditProxyWriteAt returns the newest successful admin edit of
@@ -357,10 +377,12 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 	return nil
 }
 
+// proxyAutoSwitchHistorySpan is how far back AccountHistory looks: the cooldown
+// (switches and misses both wait that long), and never less than an hour.
 func proxyAutoSwitchHistorySpan(cfg ProxyAutoSwitchConfig) time.Duration {
-	span := time.Duration(cfg.AccountCooldownHours) * time.Hour
-	if span < proxyAutoSwitchRetryBackoff {
-		span = proxyAutoSwitchRetryBackoff
+	span := proxyAutoSwitchCooldown(cfg)
+	if span < proxyAutoSwitchHistoryMinSpan {
+		span = proxyAutoSwitchHistoryMinSpan
 	}
 	return span
 }

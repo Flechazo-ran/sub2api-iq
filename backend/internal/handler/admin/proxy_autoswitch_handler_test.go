@@ -221,9 +221,11 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	code, body := doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/config", nil)
 	require.Equal(t, http.StatusOK, code)
 	data := body["data"].(map[string]any)
-	require.Equal(t, []string{"account_cooldown_hours", "consecutive_checks", "enabled", "group_ids", "max_switches_per_hour",
+	require.Equal(t, []string{"account_cooldown_minutes", "consecutive_checks", "enabled", "group_ids", "max_switches_per_hour",
 		"metric", "min_days_to_expiry", "min_improvement_pct", "min_samples", "observe_minutes", "region_policy", "threshold_ms", "window_minutes"}, sortedKeys(data))
 	require.Equal(t, false, data["enabled"])
+	require.Equal(t, float64(10), data["account_cooldown_minutes"])
+	require.Equal(t, float64(10), data["observe_minutes"])
 	require.Equal(t, "response_headers", data["metric"])
 	require.Equal(t, []any{float64(16)}, data["group_ids"])
 
@@ -254,6 +256,26 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
 	require.Equal(t, http.StatusBadRequest, code)
 	require.Contains(t, body["message"], "window_minutes")
+	data["window_minutes"] = 10
+
+	data["account_cooldown_minutes"] = 4
+	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
+	require.Equal(t, http.StatusBadRequest, code)
+	require.Contains(t, body["message"], "account_cooldown_minutes 必须在 5 到 1440 之间")
+
+	// An older client still sending only hours gets minutes back.
+	legacy := map[string]any{}
+	for k, v := range data {
+		legacy[k] = v
+	}
+	delete(legacy, "account_cooldown_minutes")
+	legacy["account_cooldown_hours"] = 2
+	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", legacy)
+	require.Equal(t, http.StatusOK, code, body)
+	saved := body["data"].(map[string]any)
+	require.Equal(t, float64(120), saved["account_cooldown_minutes"])
+	require.NotContains(t, saved, "account_cooldown_hours")
+	data["account_cooldown_minutes"] = 10
 
 	data["window_minutes"] = 10
 	data["group_ids"] = []int64{9}
@@ -312,7 +334,7 @@ func TestProxyAutoSwitchHandlerRevert(t *testing.T) {
 	r, store := newPASHandlerRouter(t)
 	code, body := doPAS(t, r, http.MethodPost, "/api/v1/admin/proxy-autoswitch/events/11/revert", nil)
 	require.Equal(t, http.StatusBadRequest, code)
-	require.Contains(t, body["message"], "只有观察中或已留下")
+	require.Contains(t, body["message"], "只有观察中、已换上新代理")
 
 	code, body = doPAS(t, r, http.MethodPost, "/api/v1/admin/proxy-autoswitch/events/12/revert", nil)
 	require.Equal(t, http.StatusOK, code, body)
@@ -323,4 +345,20 @@ func TestProxyAutoSwitchHandlerRevert(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, code)
 	code, _ = doPAS(t, r, http.MethodPost, "/api/v1/admin/proxy-autoswitch/events/404/revert", nil)
 	require.Equal(t, http.StatusNotFound, code)
+}
+
+func TestProxyAutoSwitchHandlerNotFaster(t *testing.T) {
+	r, store := newPASHandlerRouter(t)
+	store.events[1].Status = service.ProxyAutoSwitchStatusNotFaster
+
+	code, body := doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/recent?days=7", nil)
+	require.Equal(t, http.StatusOK, code)
+	recent := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, recent, 1, "not_faster counts as auto-switched")
+	require.Equal(t, "not_faster", recent[0].(map[string]any)["status"])
+
+	code, body = doPAS(t, r, http.MethodPost, "/api/v1/admin/proxy-autoswitch/events/12/revert", nil)
+	require.Equal(t, http.StatusOK, code, body)
+	require.Equal(t, "manual_revert", body["data"].(map[string]any)["status"])
+	require.Equal(t, [][2]int64{{65, 91}}, store.updates)
 }

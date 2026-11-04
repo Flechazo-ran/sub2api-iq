@@ -68,8 +68,10 @@ func (w *pasWorld) addProxy(id int64, region string, expiresInDays int) *Proxy {
 }
 
 func (w *pasWorld) addAccount(id, proxyID int64) *ProxyAutoSwitchAccount {
+	// Created long ago by default, so proxy changes in tests count as manual
+	// unless a test makes the account new.
 	a := &ProxyAutoSwitchAccount{ID: id, Name: fmt.Sprintf("acc-%d", id), Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-		Status: StatusActive, Schedulable: true}
+		Status: StatusActive, Schedulable: true, CreatedAt: w.now.Add(-30 * 24 * time.Hour)}
 	if proxyID > 0 {
 		a.ProxyID = autoSwitchInt64(proxyID)
 	}
@@ -453,12 +455,16 @@ func (w *pasWorld) LoadAccountStates(_ context.Context, ids []int64) (map[int64]
 	return out, nil
 }
 
+// UpsertAccountState mirrors the SQL: keep the stored change unless a newer one
+// is given; with no new one, drop a stored change at or before ClearExternalUpTo.
 func (w *pasWorld) UpsertAccountState(_ context.Context, st ProxyAutoSwitchAccountState) error {
 	if prev, ok := w.states[st.AccountID]; ok && prev.ExternalChangeAt != nil {
-		if st.ExternalChangeAt == nil || prev.ExternalChangeAt.After(*st.ExternalChangeAt) {
+		cleared := st.ExternalChangeAt == nil && st.ClearExternalUpTo != nil && !prev.ExternalChangeAt.After(*st.ClearExternalUpTo)
+		if !cleared && (st.ExternalChangeAt == nil || prev.ExternalChangeAt.After(*st.ExternalChangeAt)) {
 			st.ExternalChangeAt = prev.ExternalChangeAt
 		}
 	}
+	st.ClearExternalUpTo = nil // not a stored column
 	w.states[st.AccountID] = st
 	return nil
 }

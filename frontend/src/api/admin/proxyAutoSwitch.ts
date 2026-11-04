@@ -15,7 +15,8 @@ export interface ProxyAutoSwitchConfig {
   threshold_ms: number
   consecutive_checks: number
   min_improvement_pct: number
-  account_cooldown_hours: number
+  // 同一个号两次自动换代理至少隔几分钟（5–1440）；没换成后也隔这么久再试。
+  account_cooldown_minutes: number
   max_switches_per_hour: number
   observe_minutes: number
   min_days_to_expiry: number
@@ -27,6 +28,9 @@ export type ProxyAutoSwitchStatus =
   | 'observing'
   | 'kept'
   | 'kept_insufficient'
+  // 观察下来没变快：不换回，还慢就过了冷却接着换
+  | 'not_faster'
+  // reverted / revert_skipped 只在旧记录里出现，自动流程不再换回
   | 'reverted'
   | 'revert_skipped'
   | 'no_candidate'

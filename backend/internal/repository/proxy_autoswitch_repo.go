@@ -27,7 +27,7 @@ func (r *proxyAutoSwitchRepository) ListGroupAccounts(ctx context.Context, group
 		return nil, nil
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.proxy_id, a.parent_account_id
+		SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.proxy_id, a.parent_account_id, a.created_at
 		FROM accounts a
 		WHERE a.deleted_at IS NULL AND a.parent_account_id IS NULL
 		  AND a.platform = $2 AND a.type = $3
@@ -41,7 +41,7 @@ func (r *proxyAutoSwitchRepository) ListGroupAccounts(ctx context.Context, group
 	for rows.Next() {
 		var a service.ProxyAutoSwitchAccount
 		var proxyID, parentID sql.NullInt64
-		if err := rows.Scan(&a.ID, &a.Name, &a.Platform, &a.Type, &a.Status, &a.Schedulable, &proxyID, &parentID); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Platform, &a.Type, &a.Status, &a.Schedulable, &proxyID, &parentID, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		a.ProxyID = nullableInt64Ptr(proxyID)
@@ -56,9 +56,9 @@ func (r *proxyAutoSwitchRepository) GetAccount(ctx context.Context, id int64) (*
 	var proxyID, parentID sql.NullInt64
 	var deletedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, name, platform, type, status, schedulable, proxy_id, parent_account_id, deleted_at
+		SELECT id, name, platform, type, status, schedulable, proxy_id, parent_account_id, deleted_at, created_at
 		FROM accounts WHERE id = $1`, id).
-		Scan(&a.ID, &a.Name, &a.Platform, &a.Type, &a.Status, &a.Schedulable, &proxyID, &parentID, &deletedAt)
+		Scan(&a.ID, &a.Name, &a.Platform, &a.Type, &a.Status, &a.Schedulable, &proxyID, &parentID, &deletedAt, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -363,7 +363,10 @@ func (r *proxyAutoSwitchRepository) LoadAccountStates(ctx context.Context, accou
 	return out, rows.Err()
 }
 
-// UpsertAccountState keeps an earlier external_change_at unless a newer one is given.
+// UpsertAccountState keeps an earlier external_change_at unless a newer one is
+// given. When ClearExternalUpTo is set and no new value is given, a stored
+// value at or before it (set while the account was being created) is cleared;
+// a later one (e.g. a manual revert written meanwhile) is kept.
 func (r *proxyAutoSwitchRepository) UpsertAccountState(ctx context.Context, st service.ProxyAutoSwitchAccountState) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO proxy_autoswitch_account_states (account_id, proxy_id, seen_at, external_change_at)
@@ -372,10 +375,12 @@ func (r *proxyAutoSwitchRepository) UpsertAccountState(ctx context.Context, st s
 		  proxy_id = EXCLUDED.proxy_id,
 		  seen_at = EXCLUDED.seen_at,
 		  external_change_at = CASE
+		    WHEN EXCLUDED.external_change_at IS NULL AND $5::timestamptz IS NOT NULL
+		         AND proxy_autoswitch_account_states.external_change_at <= $5::timestamptz THEN NULL
 		    WHEN EXCLUDED.external_change_at IS NULL THEN proxy_autoswitch_account_states.external_change_at
 		    WHEN proxy_autoswitch_account_states.external_change_at IS NULL THEN EXCLUDED.external_change_at
 		    ELSE GREATEST(proxy_autoswitch_account_states.external_change_at, EXCLUDED.external_change_at)
-		  END`, st.AccountID, st.ProxyID, st.SeenAt, st.ExternalChangeAt)
+		  END`, st.AccountID, st.ProxyID, st.SeenAt, st.ExternalChangeAt, st.ClearExternalUpTo)
 	return err
 }
 

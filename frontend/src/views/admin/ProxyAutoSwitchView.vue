@@ -147,7 +147,7 @@ const { t, te } = useI18n()
 const PAGE_SIZE = 50
 
 // 表单里阈值按秒填，提交时换回 threshold_ms；其余字段与后端同名。
-type NumericKey = 'window_minutes' | 'min_samples' | 'threshold_s' | 'consecutive_checks' | 'min_improvement_pct' | 'account_cooldown_hours' | 'max_switches_per_hour' | 'observe_minutes' | 'min_days_to_expiry'
+type NumericKey = 'window_minutes' | 'min_samples' | 'threshold_s' | 'consecutive_checks' | 'min_improvement_pct' | 'account_cooldown_minutes' | 'max_switches_per_hour' | 'observe_minutes' | 'min_days_to_expiry'
 type Draft = Record<NumericKey, number | string> & { enabled: boolean; metric: ProxyAutoSwitchMetric; region_policy: ProxyAutoSwitchRegionPolicy; group_ids: number[] }
 interface NumberSpec { key: NumericKey; unit: string; step?: number }
 interface FieldCard { id: string; label: string; prefix?: string; primary: NumberSpec; sub?: NumberSpec & { label: string }; hint?: string }
@@ -159,7 +159,7 @@ const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }>
   threshold_s: { min: 0.2, max: 120, integer: false },
   consecutive_checks: { min: 1, max: 10, integer: true },
   min_improvement_pct: { min: 5, max: 90, integer: true },
-  account_cooldown_hours: { min: 1, max: 72, integer: true },
+  account_cooldown_minutes: { min: 5, max: 1440, integer: true },
   max_switches_per_hour: { min: 1, max: 50, integer: true },
   observe_minutes: { min: 5, max: 60, integer: true },
   min_days_to_expiry: { min: 0, max: 90, integer: true },
@@ -168,7 +168,7 @@ const cards: FieldCard[] = [
   { id: 'window', label: 'proxyAutoSwitch.window', prefix: 'proxyAutoSwitch.windowPrefix', primary: { key: 'window_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'min_samples', label: 'proxyAutoSwitch.minSamples', unit: 'proxyAutoSwitch.unit.requests' } },
   { id: 'threshold', label: 'proxyAutoSwitch.threshold', primary: { key: 'threshold_s', unit: 'proxyAutoSwitch.unit.seconds', step: 0.1 }, sub: { key: 'consecutive_checks', label: 'proxyAutoSwitch.consecutive', unit: 'proxyAutoSwitch.unit.times' }, hint: 'proxyAutoSwitch.thresholdHint' },
   { id: 'improvement', label: 'proxyAutoSwitch.improvement', primary: { key: 'min_improvement_pct', unit: 'proxyAutoSwitch.unit.percent' }, hint: 'proxyAutoSwitch.improvementHint' },
-  { id: 'cooldown', label: 'proxyAutoSwitch.cooldown', primary: { key: 'account_cooldown_hours', unit: 'proxyAutoSwitch.unit.hours' }, sub: { key: 'max_switches_per_hour', label: 'proxyAutoSwitch.maxPerHour', unit: 'proxyAutoSwitch.unit.accounts' } },
+  { id: 'cooldown', label: 'proxyAutoSwitch.cooldown', primary: { key: 'account_cooldown_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'max_switches_per_hour', label: 'proxyAutoSwitch.maxPerHour', unit: 'proxyAutoSwitch.unit.accounts' }, hint: 'proxyAutoSwitch.cooldownHint' },
   { id: 'observe', label: 'proxyAutoSwitch.observe', primary: { key: 'observe_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, hint: 'proxyAutoSwitch.observeHint' },
 ]
 const modes = [{ id: 'off', value: false, label: 'proxyAutoSwitch.modeOff' }, { id: 'auto', value: true, label: 'proxyAutoSwitch.modeAuto' }]
@@ -176,13 +176,14 @@ const regionPolicies: ProxyAutoSwitchRegionPolicy[] = ['prefer_same', 'same_only
 const metrics: ProxyAutoSwitchMetric[] = ['first_token', 'response_headers']
 // 后端没给或给了不认识的值（旧版本），按响应头算。
 function metricOf(value: string | null | undefined): ProxyAutoSwitchMetric { return value === 'first_token' ? 'first_token' : 'response_headers' }
-const revertableStatuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient']
-const tones: Record<ProxyAutoSwitchStatus, string> = { observing: 'tone-info', kept: 'tone-success', kept_insufficient: 'tone-success', reverted: 'tone-warning', revert_skipped: 'tone-warning', no_candidate: 'tone-neutral', failed: 'tone-danger', manual_revert: 'tone-muted' }
+// 换完不再自动换回；账号还在新代理上的记录（含「没变快」）都能手动换回。
+const revertableStatuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'not_faster']
+const tones: Record<ProxyAutoSwitchStatus, string> = { observing: 'tone-info', kept: 'tone-success', kept_insufficient: 'tone-success', not_faster: 'tone-warning', reverted: 'tone-warning', revert_skipped: 'tone-warning', no_candidate: 'tone-neutral', failed: 'tone-danger', manual_revert: 'tone-muted' }
 
 function toDraft(config: ProxyAutoSwitchConfig): Draft {
   return {
     enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, metric: metricOf(config.metric), threshold_s: config.threshold_ms / 1000,
-    consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_hours: config.account_cooldown_hours,
+    consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_minutes: config.account_cooldown_minutes,
     max_switches_per_hour: config.max_switches_per_hour, observe_minutes: config.observe_minutes, min_days_to_expiry: config.min_days_to_expiry,
     region_policy: config.region_policy, group_ids: [...(config.group_ids ?? [])],
   }
@@ -191,7 +192,7 @@ function toDraft(config: ProxyAutoSwitchConfig): Draft {
 function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchConfig {
   return {
     enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, metric: metricOf(config.metric), threshold_ms: config.threshold_ms,
-    consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_hours: config.account_cooldown_hours,
+    consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_minutes: config.account_cooldown_minutes,
     max_switches_per_hour: config.max_switches_per_hour, observe_minutes: config.observe_minutes, min_days_to_expiry: config.min_days_to_expiry,
     region_policy: config.region_policy, group_ids: [...new Set(config.group_ids ?? [])].sort((a, b) => a - b),
   }
@@ -199,7 +200,7 @@ function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchConfig {
 function toPayload(): ProxyAutoSwitchConfig {
   return canonical({
     enabled: draft.enabled, window_minutes: Number(draft.window_minutes), min_samples: Number(draft.min_samples), metric: draft.metric, threshold_ms: Math.round(Number(draft.threshold_s) * 1000),
-    consecutive_checks: Number(draft.consecutive_checks), min_improvement_pct: Number(draft.min_improvement_pct), account_cooldown_hours: Number(draft.account_cooldown_hours),
+    consecutive_checks: Number(draft.consecutive_checks), min_improvement_pct: Number(draft.min_improvement_pct), account_cooldown_minutes: Number(draft.account_cooldown_minutes),
     max_switches_per_hour: Number(draft.max_switches_per_hour), observe_minutes: Number(draft.observe_minutes), min_days_to_expiry: Number(draft.min_days_to_expiry),
     region_policy: draft.region_policy, group_ids: draft.group_ids,
   })
@@ -208,7 +209,7 @@ function toPayload(): ProxyAutoSwitchConfig {
 const saved = ref<ProxyAutoSwitchConfig | null>(null)
 // 「没找到快 N% 的代理」跟着已保存的「至少快」走，没加载到配置时按默认 30。
 const savedImprovementPct = computed(() => saved.value?.min_improvement_pct ?? 30)
-const draft = reactive<Draft>(toDraft({ enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_hours: 6, max_switches_per_hour: 5, observe_minutes: 15, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [] }))
+const draft = reactive<Draft>(toDraft({ enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_minutes: 10, max_switches_per_hour: 5, observe_minutes: 10, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [] }))
 const configLoading = ref(false), configError = ref(''), saving = ref(false), saveError = ref(''), notice = ref('')
 const groups = ref<{ id: number; name: string }[]>([]), groupsLoaded = ref(false), groupsError = ref(false)
 let disposed = false

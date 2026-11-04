@@ -18,16 +18,20 @@ import (
 )
 
 // 代理优选：OpenAI OAuth 号的上游首字或响应头时间（按配置选）持续偏慢时，自动换到
-// 更快的空闲代理，换完观察一段时间，没有明显变快就换回。只在后台页面记录，不推送消息。
+// 更快的空闲代理。换完观察一段时间，只记录有没有变快，不换回；还慢就过了冷却再换。
+// 只在后台页面记录，不推送消息。
 const (
 	ProxyAutoSwitchStatusObserving        = "observing"
 	ProxyAutoSwitchStatusKept             = "kept"
 	ProxyAutoSwitchStatusKeptInsufficient = "kept_insufficient"
-	ProxyAutoSwitchStatusReverted         = "reverted"
-	ProxyAutoSwitchStatusRevertSkipped    = "revert_skipped"
-	ProxyAutoSwitchStatusNoCandidate      = "no_candidate"
-	ProxyAutoSwitchStatusFailed           = "failed"
-	ProxyAutoSwitchStatusManualRevert     = "manual_revert"
+	// not_faster：观察下来没变快。不换回原代理，号还慢就过了冷却按正常流程再换（11-04 起）。
+	ProxyAutoSwitchStatusNotFaster = "not_faster"
+	// reverted / revert_skipped 只出现在 11-04 之前的记录里，自动流程不再产生。
+	ProxyAutoSwitchStatusReverted      = "reverted"
+	ProxyAutoSwitchStatusRevertSkipped = "revert_skipped"
+	ProxyAutoSwitchStatusNoCandidate   = "no_candidate"
+	ProxyAutoSwitchStatusFailed        = "failed"
+	ProxyAutoSwitchStatusManualRevert  = "manual_revert"
 
 	ProxyAutoSwitchRegionPreferSame = "prefer_same"
 	ProxyAutoSwitchRegionSameOnly   = "same_only"
@@ -51,15 +55,24 @@ const (
 	ProxyAutoSwitchProbeTimeout     = 8 * time.Second
 	proxyAutoSwitchMaxCandidates    = 12
 	proxyAutoSwitchProbeConcurrency = 4
-	// 换完观察：新代理 p50 ≤ 换前 p50 × 0.8 才留下。
+	// 换完观察：新代理 p50 ≤ 换前 p50 × 0.8 记「变快了」（kept），否则记「没变快」（not_faster）。
+	// 观察只记录，不换回。
 	proxyAutoSwitchKeepRatio   = 0.8
 	proxyAutoSwitchKeepDropPct = 20
-	// 观察样本不足时最多延长到观察时长的 2 倍（默认 15 → 30 分钟）。
+	// 观察样本不足时最多延长到观察时长的 2 倍（默认 10 → 20 分钟）。
 	proxyAutoSwitchObserveExtendFactor = 2
 	// 不是本功能改的代理（人工改过），6 小时内不自动改。
 	proxyAutoSwitchExternalHold = 6 * time.Hour
-	// 判慢后没找到候选或换失败，30 分钟内不再为这个号测速，避免每分钟重复测速刷记录。
-	proxyAutoSwitchRetryBackoff = 30 * time.Minute
+	// proxyAutoSwitchNewAccountSetup：建号后这段时间内设的代理属于建号流程（导入后再补代理、分组），
+	// 不算人工改过代理，新号首字慢照样可以自动换（老板 11-04 定）。
+	proxyAutoSwitchNewAccountSetup = 30 * time.Minute
+	// 查号的「上次换过 / 上次没换成」记录时至少回看 1 小时（冷却更长就按冷却）。
+	// 判慢后没找到候选或换失败，也等一个冷却时间（account_cooldown_minutes）再试。
+	// 全站每小时上限是另一条查询，固定回看 1 小时。
+	proxyAutoSwitchHistoryMinSpan = time.Hour
+	// account_cooldown_minutes 的范围；旧配置只存了 account_cooldown_hours 时换算后超过上限取上限。
+	proxyAutoSwitchCooldownMinMinutes = 5
+	proxyAutoSwitchCooldownMaxMinutes = 1440
 	// 两次检查之间超过这个时间，说明中间没在看（停机/没开），期间的代理变化按刚发生处理。
 	proxyAutoSwitchStateGap = 10 * time.Minute
 
@@ -78,20 +91,22 @@ const (
 	proxyAutoSwitchEventsDefaultLim = 50
 )
 
-// 真的换过代理的状态（冷却、每小时上限都按这些算；换回也算在同一次里）。
+// 真的换过代理的状态（冷却、每小时上限都按这些算；旧记录里的换回也算在同一次里）。
 var proxyAutoSwitchSwitchedStatuses = []string{
 	ProxyAutoSwitchStatusObserving,
 	ProxyAutoSwitchStatusKept,
 	ProxyAutoSwitchStatusKeptInsufficient,
+	ProxyAutoSwitchStatusNotFaster,
 	ProxyAutoSwitchStatusReverted,
 	ProxyAutoSwitchStatusRevertSkipped,
 	ProxyAutoSwitchStatusManualRevert,
 }
 
-// 「自动换过」标记用的状态（照接口约定，不含 revert_skipped）。
+// 「自动换过」标记用的状态（照接口约定；not_faster 也换过代理）。
 var proxyAutoSwitchRecentStatuses = []string{
 	ProxyAutoSwitchStatusKept,
 	ProxyAutoSwitchStatusKeptInsufficient,
+	ProxyAutoSwitchStatusNotFaster,
 	ProxyAutoSwitchStatusObserving,
 	ProxyAutoSwitchStatusReverted,
 	ProxyAutoSwitchStatusRevertSkipped,
@@ -99,37 +114,79 @@ var proxyAutoSwitchRecentStatuses = []string{
 }
 
 type ProxyAutoSwitchConfig struct {
-	Enabled              bool    `json:"enabled"`
-	WindowMinutes        int     `json:"window_minutes"`
-	MinSamples           int     `json:"min_samples"`
-	Metric               string  `json:"metric"`
-	ThresholdMS          int     `json:"threshold_ms"`
-	ConsecutiveChecks    int     `json:"consecutive_checks"`
-	MinImprovementPct    int     `json:"min_improvement_pct"`
-	AccountCooldownHours int     `json:"account_cooldown_hours"`
-	MaxSwitchesPerHour   int     `json:"max_switches_per_hour"`
-	ObserveMinutes       int     `json:"observe_minutes"`
-	MinDaysToExpiry      int     `json:"min_days_to_expiry"`
-	RegionPolicy         string  `json:"region_policy"`
-	GroupIDs             []int64 `json:"group_ids"`
+	Enabled           bool   `json:"enabled"`
+	WindowMinutes     int    `json:"window_minutes"`
+	MinSamples        int    `json:"min_samples"`
+	Metric            string `json:"metric"`
+	ThresholdMS       int    `json:"threshold_ms"`
+	ConsecutiveChecks int    `json:"consecutive_checks"`
+	MinImprovementPct int    `json:"min_improvement_pct"`
+	// AccountCooldownMinutes：同一个号两次自动换代理至少隔这么久；没换成后也隔这么久再试。
+	// 旧字段 account_cooldown_hours 只在读的时候认（见 UnmarshalJSON），不再输出。
+	AccountCooldownMinutes int     `json:"account_cooldown_minutes"`
+	MaxSwitchesPerHour     int     `json:"max_switches_per_hour"`
+	ObserveMinutes         int     `json:"observe_minutes"`
+	MinDaysToExpiry        int     `json:"min_days_to_expiry"`
+	RegionPolicy           string  `json:"region_policy"`
+	GroupIDs               []int64 `json:"group_ids"`
 }
 
 func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
 	return ProxyAutoSwitchConfig{
-		Enabled:              false,
-		WindowMinutes:        10,
-		MinSamples:           10,
-		Metric:               ProxyAutoSwitchMetricResponseHeaders,
-		ThresholdMS:          2500,
-		ConsecutiveChecks:    2,
-		MinImprovementPct:    30,
-		AccountCooldownHours: 6,
-		MaxSwitchesPerHour:   5,
-		ObserveMinutes:       15,
-		MinDaysToExpiry:      7,
-		RegionPolicy:         ProxyAutoSwitchRegionPreferSame,
-		GroupIDs:             []int64{proxyAutoSwitchDefaultGroupID},
+		Enabled:                false,
+		WindowMinutes:          10,
+		MinSamples:             10,
+		Metric:                 ProxyAutoSwitchMetricResponseHeaders,
+		ThresholdMS:            2500,
+		ConsecutiveChecks:      2,
+		MinImprovementPct:      30,
+		AccountCooldownMinutes: 10,
+		MaxSwitchesPerHour:     5,
+		ObserveMinutes:         10,
+		MinDaysToExpiry:        7,
+		RegionPolicy:           ProxyAutoSwitchRegionPreferSame,
+		GroupIDs:               []int64{proxyAutoSwitchDefaultGroupID},
 	}
+}
+
+// UnmarshalJSON reads account_cooldown_minutes, or for values saved before it
+// existed (and older clients) account_cooldown_hours converted to minutes.
+// Fields missing from data keep what the receiver already holds (defaults).
+func (c *ProxyAutoSwitchConfig) UnmarshalJSON(data []byte) error {
+	type plain ProxyAutoSwitchConfig
+	aux := struct {
+		*plain
+		// Shallower than plain's field with the same name, so this one gets the value.
+		AccountCooldownMinutes *int `json:"account_cooldown_minutes"`
+		AccountCooldownHours   *int `json:"account_cooldown_hours"`
+	}{plain: (*plain)(c)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	switch {
+	case aux.AccountCooldownMinutes != nil:
+		c.AccountCooldownMinutes = *aux.AccountCooldownMinutes
+	case aux.AccountCooldownHours != nil:
+		c.AccountCooldownMinutes = proxyAutoSwitchCooldownMinutesFromHours(*aux.AccountCooldownHours)
+	}
+	return nil
+}
+
+// proxyAutoSwitchCooldownMinutesFromHours converts an old hours value (saved
+// range 1–72) into the minutes range 5–1440; 0 or less stays invalid.
+func proxyAutoSwitchCooldownMinutesFromHours(hours int) int {
+	if hours <= 0 {
+		return hours
+	}
+	minutes := hours * 60
+	if minutes > proxyAutoSwitchCooldownMaxMinutes {
+		minutes = proxyAutoSwitchCooldownMaxMinutes
+	}
+	return minutes
+}
+
+func proxyAutoSwitchCooldown(cfg ProxyAutoSwitchConfig) time.Duration {
+	return time.Duration(cfg.AccountCooldownMinutes) * time.Minute
 }
 
 // normalizeProxyAutoSwitchConfig treats a missing metric (older saved values
@@ -167,7 +224,7 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 		{"threshold_ms", cfg.ThresholdMS, 200, 120000},
 		{"consecutive_checks", cfg.ConsecutiveChecks, 1, 10},
 		{"min_improvement_pct", cfg.MinImprovementPct, 5, 90},
-		{"account_cooldown_hours", cfg.AccountCooldownHours, 1, 72},
+		{"account_cooldown_minutes", cfg.AccountCooldownMinutes, proxyAutoSwitchCooldownMinMinutes, proxyAutoSwitchCooldownMaxMinutes},
 		{"max_switches_per_hour", cfg.MaxSwitchesPerHour, 1, 50},
 		{"observe_minutes", cfg.ObserveMinutes, 5, 60},
 		{"min_days_to_expiry", cfg.MinDaysToExpiry, 0, 90},
@@ -300,6 +357,8 @@ type ProxyAutoSwitchAccount struct {
 	ProxyID         *int64
 	ParentAccountID *int64
 	Deleted         bool
+	// CreatedAt 用来认出「新建号时设的代理」：建号后一段时间内的代理改动不算人工改过。
+	CreatedAt time.Time
 }
 
 // ProxyAutoSwitchLatencyStat is the upstream latency of egress attempts for one
@@ -322,6 +381,10 @@ type ProxyAutoSwitchAccountState struct {
 	ProxyID          *int64
 	SeenAt           time.Time
 	ExternalChangeAt *time.Time
+	// ClearExternalUpTo is only read by UpsertAccountState: a stored
+	// external_change_at at or before this time was set while the account was
+	// being created (created_at + 30 min), so it is dropped instead of kept.
+	ClearExternalUpTo *time.Time
 }
 
 // ProxyAutoSwitchAuditWrite is one successful admin account write that carried
@@ -573,8 +636,8 @@ func (s *ProxyAutoSwitchService) RunOnce(ctx context.Context) error {
 	}
 	defer release()
 
-	// Observations finish even when the feature is turned off, so an
-	// automatic switch that did not help is still undone.
+	// Observations finish even when the feature is turned off, so every
+	// automatic switch still gets its result recorded.
 	if err := s.finishObservations(ctx, cfg); err != nil {
 		slog.Warn("proxy_autoswitch_observe_failed", "error", err)
 	}

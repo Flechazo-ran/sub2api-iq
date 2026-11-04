@@ -141,9 +141,11 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 	return out, nil
 }
 
-// ManualRevert puts the old proxy back for an observing or kept switch, when
+// ManualRevert puts the old proxy back for an observing, kept or not_faster switch, when
 // the account still uses the proxy this event switched to and the old proxy is
-// still idle. A manual revert counts as a manual proxy change (6-hour hold).
+// still idle. A manual revert counts as a manual proxy change (6-hour hold),
+// except within 30 minutes of creating the account, where every proxy change
+// counts as part of the setup.
 func (s *ProxyAutoSwitchService) ManualRevert(ctx context.Context, eventID int64) (*ProxyAutoSwitchEvent, error) {
 	if eventID <= 0 {
 		return nil, infraerrors.BadRequest("PROXY_AUTOSWITCH_EVENT_INVALID", "记录 ID 无效")
@@ -183,10 +185,10 @@ func (s *ProxyAutoSwitchService) ManualRevert(ctx context.Context, eventID int64
 
 func (s *ProxyAutoSwitchService) checkManualRevert(ctx context.Context, event *ProxyAutoSwitchEvent) error {
 	switch event.Status {
-	case ProxyAutoSwitchStatusObserving, ProxyAutoSwitchStatusKept, ProxyAutoSwitchStatusKeptInsufficient:
+	case ProxyAutoSwitchStatusObserving, ProxyAutoSwitchStatusKept, ProxyAutoSwitchStatusKeptInsufficient, ProxyAutoSwitchStatusNotFaster:
 	default:
 		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED",
-			fmt.Sprintf("只有观察中或已留下的记录可以换回，这条是 %s", event.Status))
+			fmt.Sprintf("只有观察中、已换上新代理（变快了、样本不足或没变快）的记录可以换回，这条是 %s", event.Status))
 	}
 	if event.FromProxyID == nil || event.ToProxyID == nil {
 		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED", "这条记录没有换过代理")

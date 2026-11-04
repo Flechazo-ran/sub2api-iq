@@ -72,10 +72,15 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.Len(t, accounts, 1, "shadow and api-key accounts are not targets")
 	require.Equal(t, acc.ID, accounts[0].ID)
 	require.Equal(t, p1.ID, *accounts[0].ProxyID)
+	var createdAt time.Time
+	require.NoError(t, integrationDB.QueryRow(`SELECT created_at FROM accounts WHERE id = $1`, acc.ID).Scan(&createdAt))
+	require.False(t, createdAt.IsZero())
+	require.WithinDuration(t, createdAt, accounts[0].CreatedAt, time.Microsecond, "created_at tells new-account setup apart from manual changes")
 
 	got, err := repo.GetAccount(ctx, acc.ID)
 	require.NoError(t, err)
 	require.False(t, got.Deleted)
+	require.WithinDuration(t, createdAt, got.CreatedAt, time.Microsecond)
 	missing, err := repo.GetAccount(ctx, -1)
 	require.NoError(t, err)
 	require.Nil(t, missing)
@@ -224,6 +229,47 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.Equal(t, observing.ID, mine[0].ID)
 	require.Equal(t, service.ProxyAutoSwitchMetricFirstToken, mine[0].Metric)
 
+	// Migration 309 replaced 307's inline status CHECK (auto-named
+	// proxy_autoswitch_events_status_check) instead of adding a second one.
+	rows, err := integrationDB.Query(`SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+		WHERE conrelid = 'proxy_autoswitch_events'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%status%'`)
+	require.NoError(t, err)
+	statusChecks := map[string]string{}
+	for rows.Next() {
+		var name, def string
+		require.NoError(t, rows.Scan(&name, &def))
+		statusChecks[name] = def
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Len(t, statusChecks, 1, "exactly one status CHECK after 309")
+	require.Contains(t, statusChecks, "proxy_autoswitch_events_status_check")
+	require.Contains(t, statusChecks["proxy_autoswitch_events_status_check"], "not_faster")
+	notFaster := &service.ProxyAutoSwitchEvent{CreatedAt: now.Add(-3 * time.Hour), AccountID: acc.ID, Status: service.ProxyAutoSwitchStatusNotFaster,
+		FromProxyID: &p1.ID, FromProxyLabel: p1.Name, ToProxyID: &p2.ID, ToProxyLabel: &p2.Name, Reason: "没变快"}
+	require.NoError(t, repo.InsertEvent(ctx, notFaster), "309 allows not_faster")
+	loadedNotFaster, err := repo.GetEvent(ctx, notFaster.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.ProxyAutoSwitchStatusNotFaster, loadedNotFaster.Status)
+	for _, old := range []string{service.ProxyAutoSwitchStatusReverted, service.ProxyAutoSwitchStatusRevertSkipped} {
+		_, err = integrationDB.Exec(`INSERT INTO proxy_autoswitch_events (account_id, status) VALUES ($1, $2)`, acc.ID, old)
+		require.NoError(t, err, "older statuses stay allowed: %s", old)
+	}
+	_, err = integrationDB.Exec(`INSERT INTO proxy_autoswitch_events (account_id, status) VALUES ($1, 'switched_back')`, acc.ID)
+	require.Error(t, err, "unknown status is still rejected")
+	_, err = integrationDB.Exec(`DELETE FROM proxy_autoswitch_events WHERE account_id = $1 AND status IN ('reverted', 'revert_skipped')`, acc.ID)
+	require.NoError(t, err)
+	latest, err = repo.LatestEventPerAccount(ctx, now.Add(-7*24*time.Hour), []string{service.ProxyAutoSwitchStatusNotFaster})
+	require.NoError(t, err)
+	mine = mine[:0]
+	for _, e := range latest {
+		if e.AccountID == acc.ID {
+			mine = append(mine, e)
+		}
+	}
+	require.Len(t, mine, 1)
+	require.Equal(t, notFaster.ID, mine[0].ID)
+
 	external := now.Add(-time.Hour)
 	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p1.ID, SeenAt: now, ExternalChangeAt: &external}))
 	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p2.ID, SeenAt: now.Add(time.Minute)}))
@@ -231,6 +277,24 @@ func TestProxyAutoSwitchRepositoryIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, p2.ID, *states[acc.ID].ProxyID)
 	require.WithinDuration(t, external, *states[acc.ID].ExternalChangeAt, time.Millisecond, "a later upsert without a change keeps the hold")
+
+	// A stored change inside the new-account setup window is cleared; a later one is kept.
+	before := external.Add(-time.Minute)
+	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p2.ID, SeenAt: now.Add(2 * time.Minute), ClearExternalUpTo: &before}))
+	states, err = repo.LoadAccountStates(ctx, []int64{acc.ID})
+	require.NoError(t, err)
+	require.WithinDuration(t, external, *states[acc.ID].ExternalChangeAt, time.Millisecond, "change after the setup window stays")
+	setupEnd := external
+	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p2.ID, SeenAt: now.Add(3 * time.Minute), ClearExternalUpTo: &setupEnd}))
+	states, err = repo.LoadAccountStates(ctx, []int64{acc.ID})
+	require.NoError(t, err)
+	require.Nil(t, states[acc.ID].ExternalChangeAt, "change at or before the setup end is cleared")
+	require.Equal(t, p2.ID, *states[acc.ID].ProxyID)
+	later := now.Add(-time.Minute)
+	require.NoError(t, repo.UpsertAccountState(ctx, service.ProxyAutoSwitchAccountState{AccountID: acc.ID, ProxyID: &p1.ID, SeenAt: now.Add(4 * time.Minute), ExternalChangeAt: &later, ClearExternalUpTo: &setupEnd}))
+	states, err = repo.LoadAccountStates(ctx, []int64{acc.ID})
+	require.NoError(t, err)
+	require.WithinDuration(t, later, *states[acc.ID].ExternalChangeAt, time.Millisecond, "a new change is written even with ClearExternalUpTo")
 
 	marker := fmt.Sprintf(`{"name":"pas-%s","proxy_id":%d}`, suffix, p1.ID)
 	_, err = integrationDB.Exec(`INSERT INTO audit_logs (created_at, action, method, path, request_body, status_code, extra)

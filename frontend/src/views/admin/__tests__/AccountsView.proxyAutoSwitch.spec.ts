@@ -155,6 +155,19 @@ describe('admin AccountsView 自动换过 proxy tag', () => {
     expect(wrapper.find('[data-test="proxy-66"] [data-testid="proxy-autoswitch-tag"]').exists()).toBe(false)
   })
 
+  it('tags a not_faster switch too, since the account stayed on the new proxy', async () => {
+    showProxyColumn()
+    listRecent.mockResolvedValue([
+      { account_id: 65, event_id: 13, at: '2026-11-04T12:14:00Z', status: 'not_faster', from_proxy_label: '东京-91', to_proxy_label: '东京-96', reason: '不换回，还慢就接着换' }
+    ])
+    const wrapper = mountView()
+    await flushPromises()
+
+    const tag = wrapper.get('[data-test="proxy-65"] [data-testid="proxy-autoswitch-tag"]')
+    expect(tag.attributes('title')).toContain('"result":"proxyAutoSwitch.status.not_faster"')
+    expect(tag.attributes('title')).toContain('不换回，还慢就接着换')
+  })
+
   it('stays silent when the endpoint is missing or fails', async () => {
     showProxyColumn()
     listRecent.mockRejectedValue({ status: 404, message: 'Not Found' })

@@ -12,12 +12,13 @@ const { api, getAllGroups } = vi.hoisted(() => ({
 vi.mock('@/api/admin/proxyAutoSwitch', () => ({ proxyAutoSwitchAPI: api, default: api }))
 vi.mock('@/api/admin/groups', () => ({ getAll: getAllGroups, default: { getAll: getAllGroups } }))
 
-const statuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'reverted', 'revert_skipped', 'no_candidate', 'failed', 'manual_revert']
+// not_faster 排在最后，前面的行号（rowFor）不变。reverted / revert_skipped 只是旧记录。
+const statuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'reverted', 'revert_skipped', 'no_candidate', 'failed', 'manual_revert', 'not_faster']
 // no_candidate 的文案带「至少快 N%」，按已保存配置（默认 30）填进去。
 const statusText: Record<string, string> = Object.fromEntries(Object.entries(zhProxyAutoSwitch.status).map(([k, v]) => [k, String(v).replace('{pct}', '30')]))
 
 function config(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitchConfig {
-  return { enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_hours: 6, max_switches_per_hour: 5, observe_minutes: 15, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [16], ...overrides }
+  return { enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_minutes: 10, max_switches_per_hour: 5, observe_minutes: 10, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [16], ...overrides }
 }
 function event(id: number, status: ProxyAutoSwitchStatus, overrides: Partial<ProxyAutoSwitchEvent> = {}): ProxyAutoSwitchEvent {
   const switched = status !== 'no_candidate' && status !== 'failed'
@@ -83,6 +84,40 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
   })
 
+  it('edits the per-account interval in minutes and says observing only records the effect', async () => {
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+    wrapper = mountView(); await flushPromises()
+    const cooldown = wrapper.get('[data-testid="pas-account_cooldown_minutes"]')
+    expect((cooldown.element as HTMLInputElement).value).toBe('10')
+    expect(cooldown.element.closest('.field')?.textContent).toContain('同一个号多久最多换一次')
+    expect(cooldown.element.parentElement?.textContent).toContain('分钟')
+    expect(cooldown.element.parentElement?.textContent).not.toContain('小时')
+    expect(wrapper.get('[data-testid="pas-hint-cooldown"]').text()).toBe('没找到更快的代理或换失败，也隔这么久再试')
+    expect((wrapper.get('[data-testid="pas-observe_minutes"]').element as HTMLInputElement).value).toBe('10')
+    const observeHint = wrapper.get('[data-testid="pas-hint-observe"]').text()
+    expect(observeHint).toContain('只记录效果，不换回')
+    expect(observeHint).toContain('号还慢就过了冷却接着换')
+    expect(wrapper.text()).not.toContain('自动换回')
+    expect(wrapper.text()).toContain('只记录有没有变快，不换回')
+
+    await cooldown.setValue('4')
+    expect(cooldown.attributes('aria-invalid')).toBe('true')
+    expect(wrapper.text()).toContain('要填整数，范围 5–1440')
+    expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
+    await cooldown.setValue('1441')
+    expect(cooldown.attributes('aria-invalid')).toBe('true')
+    await cooldown.setValue('15')
+    expect(cooldown.attributes('aria-invalid')).toBeUndefined()
+    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
+    await flushPromises()
+    expect(api.updateConfig).toHaveBeenCalledTimes(1)
+    const payload = api.updateConfig.mock.calls[0][0] as Record<string, unknown>
+    expect(payload).toEqual(config({ account_cooldown_minutes: 15 }))
+    expect(payload).not.toHaveProperty('account_cooldown_hours')
+    expect((wrapper.get('[data-testid="pas-account_cooldown_minutes"]').element as HTMLInputElement).value).toBe('15')
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
+  })
+
   it('keeps configured group ids that are not in the OpenAI list so saving does not drop them', async () => {
     api.getConfig.mockResolvedValue(config({ group_ids: [16, 44] }))
     wrapper = mountView(); await flushPromises()
@@ -120,7 +155,7 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(hint).toContain('换代理只能改善网络部分')
     expect(hint).toContain('「没找到快 30% 的代理」')
     expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里首字时间的中位数')
-    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('首字时间中位数没降到换前的 80% 以下')
+    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('首字时间中位数降到换前的 80% 及以下记「变快了」')
     await wrapper.get('[data-testid="pas-min_improvement_pct"]').setValue('40')
     expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toContain('「没找到快 40% 的代理」')
     await wrapper.get('[data-testid="pas-min_improvement_pct"]').setValue('30')
@@ -205,9 +240,9 @@ describe('ProxyAutoSwitchView switch log', () => {
     statuses.forEach((status, index) => {
       const row = rowFor(index + 1)
       expect(row.get('[data-testid="pas-status"]').text()).toBe(statusText[status])
-      expect(row.find('[data-testid="pas-revert"]').exists()).toBe(['observing', 'kept', 'kept_insufficient'].includes(status))
+      expect(row.find('[data-testid="pas-revert"]').exists()).toBe(['observing', 'kept', 'kept_insufficient', 'not_faster'].includes(status))
     })
-    expect(wrapper.findAll('[data-testid="pas-revert"]')).toHaveLength(3)
+    expect(wrapper.findAll('[data-testid="pas-revert"]')).toHaveLength(4)
     const kept = rowFor(2)
     expect(kept.text()).toContain('GPT-速刷号-2')
     expect(kept.get('[data-testid="pas-proxy"]').text()).toBe('#91 东京-91JP→#96 东京-96JP')
@@ -218,6 +253,29 @@ describe('ProxyAutoSwitchView switch log', () => {
     expect(noCandidate.get('[data-testid="pas-proxy"]').text()).toBe('#91 东京-91JP')
     expect(noCandidate.get('[data-testid="pas-latency"]').text()).not.toContain('→')
     expect(wrapper.text()).toContain('没有更多了')
+  })
+
+  it('shows not_faster as a neutral hint that kept the new proxy and can still be switched back by hand', async () => {
+    api.listEvents.mockResolvedValue({ items: [
+      event(1, 'not_faster', { after_p50_ms: 3000, after_samples: 37, reason: '观察 10 分钟：新代理响应头 p50 3000ms（37 个样本），没有比换前 3513ms 低 20% 以上；不换回，还慢就接着换' }),
+      event(2, 'failed'),
+    ], next_cursor: 0 })
+    api.revertEvent.mockResolvedValue(event(1, 'manual_revert'))
+    wrapper = mountView(); await flushPromises()
+    const badge = rowFor(1).get('[data-testid="pas-status"]')
+    expect(badge.text()).toBe('没变快，不换回；还慢就接着换')
+    expect(badge.attributes('data-status')).toBe('not_faster')
+    expect(badge.classes()).toContain('tone-warning')
+    expect(badge.classes()).not.toContain('tone-danger')
+    expect(rowFor(2).get('[data-testid="pas-status"]').classes()).toContain('tone-danger')
+    expect(rowFor(1).get('[data-testid="pas-proxy"]').text()).toBe('#91 东京-91JP→#96 东京-96JP')
+    expect(rowFor(1).text()).toContain('换后 3.00 s（37 个样本）')
+    expect(rowFor(1).text()).toContain('不换回，还慢就接着换')
+    await rowFor(1).get('[data-testid="pas-revert"]').trigger('click')
+    await wrapper.get('[data-testid="pas-revert-confirm"]').trigger('click')
+    await flushPromises()
+    expect(api.revertEvent).toHaveBeenCalledWith(1)
+    expect(rowFor(1).get('[data-testid="pas-status"]').text()).toBe('已手动换回')
   })
 
   it('labels each record with the metric it was judged by', async () => {

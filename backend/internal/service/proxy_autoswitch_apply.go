@@ -114,8 +114,9 @@ func (s *ProxyAutoSwitchService) resolveRegions(ctx context.Context, proxies []P
 }
 
 // withAssignLock serializes every proxy assignment made by this feature
-// (background switches, reverts and manual reverts) across instances, so the
-// "target proxy is still idle" check and the update cannot interleave. fn gets
+// (background switches and manual reverts) across instances, so the "target
+// proxy is still idle" check and the update cannot interleave. Finishing an
+// observation takes it too, so it cannot race a manual revert. fn gets
 // a context detached from the caller's cancellation (bounded by
 // proxyAutoSwitchAssignTimeout), so a cycle timeout or a closed admin request
 // cannot stop between the account update and its event record.
@@ -332,9 +333,10 @@ func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fro
 	return switched, busy, err
 }
 
-// proxyAutoSwitchObservationDecision: after observe_minutes, keep when the new
-// p50 ≤ before × 0.8, otherwise revert; with too few samples wait up to
-// 2 × observe_minutes and then keep as kept_insufficient.
+// proxyAutoSwitchObservationDecision: after observe_minutes, kept when the new
+// p50 ≤ before × 0.8, otherwise not_faster; with too few samples wait up to
+// 2 × observe_minutes and then kept_insufficient. Only the result is recorded:
+// the account keeps the new proxy either way.
 func proxyAutoSwitchObservationDecision(cfg ProxyAutoSwitchConfig, elapsed time.Duration, beforeP50 *int64, samples int, p50 int64) string {
 	observe := time.Duration(cfg.ObserveMinutes) * time.Minute
 	if elapsed < observe {
@@ -344,7 +346,7 @@ func proxyAutoSwitchObservationDecision(cfg ProxyAutoSwitchConfig, elapsed time.
 		if beforeP50 == nil || float64(p50) <= float64(*beforeP50)*proxyAutoSwitchKeepRatio {
 			return proxyAutoSwitchDecisionKeep
 		}
-		return proxyAutoSwitchDecisionRevert
+		return proxyAutoSwitchDecisionNotFaster
 	}
 	if elapsed >= observe*proxyAutoSwitchObserveExtendFactor {
 		return proxyAutoSwitchDecisionKeepInsufficient
@@ -420,13 +422,17 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 		if err != nil {
 			return err
 		}
+		// Nothing here changes the account's proxy: a switch that did not help
+		// stays, and the account is switched again later if it is still slow.
+		// When the account is gone or someone else moved it, the comparison no
+		// longer means anything; that is recorded as not_faster with the reason.
 		switch {
 		case account == nil || account.Deleted:
-			fresh.Status = ProxyAutoSwitchStatusRevertSkipped
-			fresh.Reason += "；观察期间账号被删除"
+			fresh.Status = ProxyAutoSwitchStatusNotFaster
+			fresh.Reason += "；观察期间账号被删除，没有比较快慢"
 		case account.ProxyID == nil || *account.ProxyID != *fresh.ToProxyID:
-			fresh.Status = ProxyAutoSwitchStatusRevertSkipped
-			fresh.Reason += "；观察期间账号代理被改成别的了，不再换回"
+			fresh.Status = ProxyAutoSwitchStatusNotFaster
+			fresh.Reason += "；观察期间账号代理被改成别的了，没有比较快慢"
 		case decision == proxyAutoSwitchDecisionKeep:
 			fresh.Status = ProxyAutoSwitchStatusKept
 			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），换前 %dms，留下", minutes, label, stat.P50MS, stat.Samples, before)
@@ -434,21 +440,9 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 			fresh.Status = ProxyAutoSwitchStatusKeptInsufficient
 			fresh.Reason += fmt.Sprintf("；观察 %d 分钟只有 %d 个样本（少于 %d 个），留下", minutes, stat.Samples, cfg.MinSamples)
 		default:
-			note := fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上",
+			fresh.Status = ProxyAutoSwitchStatusNotFaster
+			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上；不换回，还慢就接着换",
 				minutes, label, stat.P50MS, stat.Samples, before, proxyAutoSwitchKeepDropPct)
-			if reason := s.revertBlockedReason(ctx, *fresh.FromProxyID); reason != "" {
-				fresh.Status = ProxyAutoSwitchStatusRevertSkipped
-				fresh.Reason += note + "；" + reason + "，不换回"
-				break
-			}
-			if err := s.setAccountProxy(ctx, fresh.AccountID, *fresh.FromProxyID); err != nil {
-				fresh.Status = ProxyAutoSwitchStatusRevertSkipped
-				fresh.Reason += note + "；换回失败：" + err.Error()
-				break
-			}
-			s.saveSeenProxy(ctx, fresh.AccountID, *fresh.FromProxyID, nil)
-			fresh.Status = ProxyAutoSwitchStatusReverted
-			fresh.Reason += note + "，已换回旧代理"
 		}
 		fresh.Reason = truncateReason(fresh.Reason)
 		finished := s.now()
