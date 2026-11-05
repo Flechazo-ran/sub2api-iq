@@ -31,6 +31,10 @@ type ScheduledTestService struct {
 	templateRepo  QualityRuleTemplateRepository
 	accountTests  *AccountTestService
 	qualityModels func(context.Context, int64) ([]string, error)
+	// fieldWatch 是网关侧字段看护的实时状态（只读展示用）。
+	fieldWatch *codexAstraWatcher
+	// fieldWatchRun 处理字段看护规则的「立即检测」：直接跑一次糖果题复核。
+	fieldWatchRun func(context.Context, int64) error
 }
 
 // NewScheduledTestService creates a new ScheduledTestService.
@@ -152,6 +156,15 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 		cfg.QualityModelOutcomes = nil
 		cfg.QualityModelActions = nil
 		cfg.RandomQuestion = nil
+		cfg.FieldWatchMismatch = false
+		fieldWatch := isOpenAICodexFieldWatchPlan(cfg)
+		if fieldWatch {
+			if cfg.Quality == nil {
+				return time.Time{}, fmt.Errorf("field watch requires a quality rule")
+			}
+			// 字段看护不下发题目、不用判题模型：复核时由执行器换成内置糖果题。
+			normalizeQualityFieldWatchPlan(plan)
+		}
 		if cfg.QuestionKind == QualityRandomQuestionKind {
 			if cfg.Quality == nil {
 				return time.Time{}, fmt.Errorf("random questions require a quality rule")
@@ -195,7 +208,7 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 			plan.ModelID = models[0]
 		}
 		// 探针题型不需要题目文本；其余题型题目必填。
-		if isOpenAICodexStateProbePlan(cfg) || isOpenAICodexAstraProbePlan(cfg) || cfg.QuestionKind == QualityRandomQuestionKind {
+		if isOpenAICodexStateProbePlan(cfg) || isOpenAICodexAstraProbePlan(cfg) || isOpenAICodexFieldWatchPlan(cfg) || cfg.QuestionKind == QualityRandomQuestionKind {
 			if len(cfg.Prompt) > 32000 || strings.TrimSpace(plan.ModelID) == "" || len(plan.ModelID) > 100 {
 				return time.Time{}, fmt.Errorf("probe model is required (maximum 32000/100 bytes)")
 			}
@@ -205,7 +218,7 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 		if err := validateQualityPolicy(plan); err != nil {
 			return time.Time{}, err
 		}
-		if cfg.QuestionKind != "" && cfg.QuestionKind != "pelican" && !isQualityAnswerQuestion(cfg.QuestionKind) && cfg.QuestionKind != OpenAICodexStateProbeQuestionKind && cfg.QuestionKind != OpenAICodexAstraProbeQuestionKind {
+		if cfg.QuestionKind != "" && cfg.QuestionKind != "pelican" && !isQualityAnswerQuestion(cfg.QuestionKind) && cfg.QuestionKind != OpenAICodexStateProbeQuestionKind && cfg.QuestionKind != OpenAICodexAstraProbeQuestionKind && cfg.QuestionKind != OpenAICodexFieldWatchQuestionKind {
 			return time.Time{}, fmt.Errorf("invalid question kind")
 		}
 		// 同一账号同一时刻只允许一次探针，并行只会互相挤掉，直接禁止。
@@ -228,6 +241,15 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 			return time.Time{}, fmt.Errorf("history retention must hold every sample in a quality round")
 		}
 		cfg.ModelID = plan.ModelID
+		if fieldWatch {
+			// 没有流量就不跑：定时调度永远领不到字段看护规则。检测周期只做格式校验。
+			if strings.TrimSpace(plan.CronExpression) != "" {
+				if _, err := computeNextRun(plan.CronExpression, now); err != nil {
+					return time.Time{}, err
+				}
+			}
+			return qualityFieldWatchNextRun(now), nil
+		}
 	}
 	return computeNextRun(plan.CronExpression, now)
 }

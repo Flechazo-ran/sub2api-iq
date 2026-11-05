@@ -389,12 +389,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		lastDownstreamWriteAt = time.Now()
 	}
 	// sawSafetyBuffering 记录本次响应流里是否出现过 safety_buffering 判据字段
-	// （满血 Astra 每个事件都带；被降档到 luna 的账号完全没有）。流收尾据此更新看护状态。
+	// （满血 Astra 每个事件都带；被降档到 luna 的账号完全没有）。流正常结束时据此更新看护状态。
 	sawSafetyBuffering := false
+	fieldWatchDiag := newCodexFieldWatchDiag()
 	finalizeStream := func() (*openaiStreamingResult, error) {
-		// 流收尾时按本次是否出现判据字段更新「连续降智」看护状态；
-		// 连续 codexAstraDegradedStreakThreshold 次未见则异步触发糖果题复核。
-		s.observeCodexAstraStream(ctx, account, sawSafetyBuffering)
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
 			completeGuardedEvent(true)
@@ -443,6 +441,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if account != nil {
 				MarkOpsStreamCompleted(c, account.ID)
 			}
+		}
+		// 只有收到成功终态的流才计入字段看护；连续 3 次未见判据字段才异步触发糖果题复核。
+		if terminalSuccessful {
+			s.observeCodexAstraStream(ctx, account, originalModel, mappedModel, reasoningEffort, sawSafetyBuffering, fieldWatchDiag)
 		}
 		return resultWithUsage(), nil
 	}
@@ -538,6 +540,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			fieldWatchDiag.observe(eventType, dataBytes)
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true

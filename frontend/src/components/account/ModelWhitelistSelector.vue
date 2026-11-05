@@ -241,12 +241,25 @@ const removeModel = (model: string) => {
   emit('update:modelValue', props.modelValue.filter(m => m !== model))
 }
 
+// 保存时 buildModelMappingObject('combined') 让模型映射覆盖同名白名单项，
+// 所以已映射到别的目标的模型加进白名单不会生效，必须在这里拦下并提示。
+const findMappingConflict = (model: string) =>
+  props.modelMappings?.find(mapping => mapping.from.trim() === model && mapping.to.trim() && mapping.to.trim() !== model)
+
+const formatMappingConflicts = (conflicts: { from: string; to: string }[]) =>
+  conflicts.map(mapping => `${mapping.from.trim()} → ${mapping.to.trim()}`).join(', ')
+
 const toggleModel = (model: string) => {
   if (props.modelValue.includes(model)) {
     removeModel(model)
-  } else {
-    emit('update:modelValue', [...props.modelValue, model])
+    return
   }
+  const conflict = findMappingConflict(model)
+  if (conflict) {
+    appStore.showInfo(t('admin.accounts.modelMappingConflict', { from: model, to: conflict.to.trim() }))
+    return
+  }
+  emit('update:modelValue', [...props.modelValue, model])
 }
 
 const copyModelId = async (model: string) => {
@@ -260,7 +273,7 @@ const addCustom = () => {
     appStore.showInfo(t('admin.accounts.modelExists'))
     return
   }
-  const conflict = props.modelMappings?.find(mapping => mapping.from.trim() === model && mapping.to.trim() && mapping.to.trim() !== model)
+  const conflict = findMappingConflict(model)
   if (conflict) {
     appStore.showInfo(t('admin.accounts.modelMappingConflict', { from: model, to: conflict.to.trim() }))
     return
@@ -273,16 +286,34 @@ const handleEnter = () => {
   if (!isComposing.value) addCustom()
 }
 
-const fillRelated = () => {
-  const newModels = [...props.modelValue]
-  for (const platform of normalizedPlatforms.value) {
-    for (const model of getModelsByPlatform(platform)) {
-      if (!newModels.includes(model)) {
-        newModels.push(model)
-      }
+// 把候选模型追加进白名单；已映射到别的目标的模型跳过，单独返回给调用方提示。
+const appendModels = (candidates: string[]) => {
+  const models = [...props.modelValue]
+  const conflicts: { from: string; to: string }[] = []
+  let addedCount = 0
+  for (const model of candidates) {
+    if (models.includes(model)) continue
+    const conflict = findMappingConflict(model)
+    if (conflict) {
+      if (!conflicts.includes(conflict)) conflicts.push(conflict)
+      continue
     }
+    models.push(model)
+    addedCount += 1
   }
-  emit('update:modelValue', newModels)
+  return { models, addedCount, conflicts }
+}
+
+const warnMappingConflicts = (conflicts: { from: string; to: string }[]) => {
+  if (conflicts.length === 0) return
+  appStore.showWarning(t('admin.accounts.syncModelsSkippedMappingConflict', { mappings: formatMappingConflicts(conflicts) }))
+}
+
+const fillRelated = () => {
+  const candidates = normalizedPlatforms.value.flatMap(platform => getModelsByPlatform(platform))
+  const { models, conflicts } = appendModels(candidates)
+  emit('update:modelValue', models)
+  warnMappingConflicts(conflicts)
 }
 
 const syncUpstreamModels = async () => {
@@ -309,16 +340,10 @@ const syncUpstreamModels = async () => {
       emit('upstream-synced')
     }
 
-    const newModels = [...props.modelValue]
-    let addedCount = 0
-    for (const model of upstreamModels) {
-      if (!newModels.includes(model)) {
-        newModels.push(model)
-        addedCount += 1
-      }
-    }
+    const { models: newModels, addedCount, conflicts } = appendModels(upstreamModels)
 
     emit('update:modelValue', newModels)
+    warnMappingConflicts(conflicts)
     const warnings = result.warnings ?? []
     const hasPartialMetadata = warnings.some(
       warning => warning.code === 'upstream_model_metadata_partial'
@@ -332,7 +357,7 @@ const syncUpstreamModels = async () => {
     }
     if (addedCount > 0) {
       appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
-    } else {
+    } else if (conflicts.length === 0) {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: upstreamModels.length }))
     }
     if (hasPartialMetadata) {

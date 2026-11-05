@@ -3,6 +3,7 @@ package admin
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -261,6 +262,32 @@ func (h *ScheduledTestHandler) TriggerQuality(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "queued"})
+}
+
+// qualityFieldWatchMaxAccountIDs bounds the account_ids filter of the field-watch status endpoint.
+const qualityFieldWatchMaxAccountIDs = 5000
+
+// FieldWatchStatus handles GET /api/v1/admin/account-quality-field-watch?account_ids=57,58.
+// It returns the in-memory field-watch state; without account_ids every watched account is listed.
+func (h *ScheduledTestHandler) FieldWatchStatus(c *gin.Context) {
+	var accountIDs []int64
+	for _, part := range strings.Split(c.Query("account_ids"), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || id <= 0 {
+			response.BadRequest(c, "invalid account_ids")
+			return
+		}
+		accountIDs = append(accountIDs, id)
+	}
+	if len(accountIDs) > qualityFieldWatchMaxAccountIDs {
+		response.BadRequest(c, "too many account_ids")
+		return
+	}
+	response.Success(c, gin.H{"items": h.scheduledTestSvc.FieldWatchStatus(accountIDs)})
 }
 
 func (h *ScheduledTestHandler) ListQualityHistory(c *gin.Context) {

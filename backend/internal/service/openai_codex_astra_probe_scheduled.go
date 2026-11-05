@@ -47,14 +47,14 @@ func isOpenAICodexAstraProbePlan(cfg *PelicanTestConfig) bool {
 
 // openAICodexAstraProbeResult 是一次 astra 探针的结果。
 type openAICodexAstraProbeResult struct {
-	AccountID  int64
-	Model      string
-	Healthy    bool   // true=Astra 满血；false=luna 降智
+	AccountID    int64
+	Model        string
+	Healthy      bool // true=Astra 满血；false=luna 降智
 	Inconclusive bool // true=未能判断（网络/鉴权/非 200），不算降智证据
-	Reason     string
-	LatencyMs  int64
-	StartedAt  time.Time
-	FinishedAt time.Time
+	Reason       string
+	LatencyMs    int64
+	StartedAt    time.Time
+	FinishedAt   time.Time
 }
 
 // runOpenAICodexAstraProbeScheduled 以定时测试结果的形态跑一次 astra 探针。

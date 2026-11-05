@@ -2726,6 +2726,15 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	if shouldSkipCodexPlanGatedImageModelCooldown(ctx, reason, requestedModel, modelKey) {
 		return true
 	}
+	// 请求的模型名本身不是账号能服务的模型（客户端传了不存在的名字、别名拼错等）
+	// 时，上游必然返回 plan-gated 400。这类错误是客户端传参问题，不是账号能力缺失：
+	// 给它写 per-model 冷却只会让界面上出现一个永远在"限流"的假状态，而且每次
+	// 请求都会重新打一遍冷却。这里直接跳过冷却，让请求按正常错误返回。
+	if reason == upstreamCodexPlanGatedModelReason && !account.IsModelSupported(modelKey) && !account.IsModelSupported(requestedModel) {
+		slog.Info("upstream_model_not_found_skip_unknown_model_cooldown",
+			"account_id", account.ID, "requested_model", requestedModel, "model_key", modelKey)
+		return true
+	}
 	resetAt := time.Now().Add(cooldown)
 	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, modelKey, resetAt, reason); err != nil {
 		slog.Warn("upstream_model_not_found_set_model_rate_limit_failed", "account_id", account.ID, "model", modelKey, "reason", reason, "error", err)

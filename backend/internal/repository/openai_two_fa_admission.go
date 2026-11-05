@@ -68,7 +68,7 @@ func applyOpenAITwoFAAdmissionOutcome(ctx context.Context, tx *sql.Tx, plan *ser
 			if _, err := tx.ExecContext(ctx, `INSERT INTO account_groups(account_id,group_id,priority,created_at) VALUES($1,$2,50,NOW())`, plan.AccountID, state.Policy.IsolationGroupID); err != nil {
 				return "", err
 			}
-			if err := qualityGroupsChanged(ctx, tx, plan.AccountID, before, []qualityGroup{{GroupID: state.Policy.IsolationGroupID}}); err != nil {
+			if err := qualityGroupsChanged(ctx, tx, plan.AccountID, before, []qualityGroup{{GroupID: state.Policy.IsolationGroupID}}, nil); err != nil {
 				return "", err
 			}
 		}

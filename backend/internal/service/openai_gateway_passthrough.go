@@ -2214,6 +2214,21 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	}
 
 	needModelReplace := strings.TrimSpace(originalModel) != "" && strings.TrimSpace(mappedModel) != "" && strings.TrimSpace(originalModel) != strings.TrimSpace(mappedModel)
+	// 真实 Codex 流量走的是这条直通通道（原始 SSE 原样转发），
+	// 因此判据字段必须在这里嗅探一遍：满血 Astra 每个事件都带 safety_buffering，
+	// 被降档到 luna 的账号完全没有。只有收到成功终态的流才计入字段看护
+	// （上游报错、超时、空流、没收到终态就断开的都不算）。
+	sawSafetyBuffering := false
+	fieldWatchDiag := newCodexFieldWatchDiag()
+	fieldWatchEffort := ""
+	if len(reasoningEfforts) > 0 {
+		fieldWatchEffort = reasoningEfforts[0]
+	}
+	observeFieldWatch := func() {
+		if terminalSuccessful && !sawFailedEvent {
+			s.observeCodexAstraStream(ctx, account, originalModel, mappedModel, fieldWatchEffort, sawSafetyBuffering, fieldWatchDiag)
+		}
+	}
 	resultWithUsage := func() *openaiStreamingResultPassthrough {
 		if clientDisconnected {
 			markPriorityDownstreamDisconnect(ctx)
@@ -2237,6 +2252,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	defer releaseUpstreamReadCtx()
 	for documentScanner.Next(upstreamReadCtx, streamInterval, keepaliveCh, heartbeat) {
 		line := documentScanner.Text()
+		if !sawSafetyBuffering && strings.Contains(line, codexAstraWatchMarker) {
+			sawSafetyBuffering = true
+		}
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
@@ -2249,6 +2267,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			observer.ObserveOpenAI(dataBytes, rawEventType)
+			fieldWatchDiag.observe(rawEventType, dataBytes)
 			if needModelReplace {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 				if replacedData, replaced := extractOpenAISSEDataLine(line); replaced {
@@ -2477,6 +2496,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account, resp)
+			observeFieldWatch()
 			return resultWithUsage(), nil
 		}
 		if sawFailedEvent {
@@ -2553,6 +2573,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			MarkOpsStreamCompleted(c, account.ID)
 		}
 	}
+	observeFieldWatch()
 
 	return resultWithUsage(), nil
 }

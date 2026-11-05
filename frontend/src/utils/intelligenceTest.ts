@@ -15,12 +15,15 @@ export function questionContract(kind: IntelligenceQuestion): string {
 export const STATE_PROBE_QUESTION = 'state_probe'
 // astra 探针：只发一次最小请求，按响应流里有没有 safety_buffering 判满血/降智。
 export const ASTRA_PROBE_QUESTION = 'astra_probe'
+// 字段看护：不跑定时题，按真实请求的响应流有没有 safety_buffering 判定；
+// 连续 3 次没有才跑一次内置糖果题复核。它是「检测方式」里的一个选项，后端以 question_kind 为准。
+export const FIELD_WATCH_QUESTION = 'field_watch'
 export const DEFAULT_STATE_PROBE_CRON = '*/2 * * * *'
 export type StateProbeVerdict = 'healthy' | 'degraded' | 'inconclusive'
 
 // 结果是纯文本（不是 HTML 动画）的题型。
 export function isTextAnswerKind(kind?: string): boolean {
-  return kind === 'candy' || kind === 'random_reasoning' || kind === STATE_PROBE_QUESTION || kind === ASTRA_PROBE_QUESTION
+  return kind === 'candy' || kind === 'random_reasoning' || kind === STATE_PROBE_QUESTION || kind === ASTRA_PROBE_QUESTION || kind === FIELD_WATCH_QUESTION
 }
 
 // 与后端约定：满血 = success；降智 = failed + state_degraded；其余失败都是无法判断。

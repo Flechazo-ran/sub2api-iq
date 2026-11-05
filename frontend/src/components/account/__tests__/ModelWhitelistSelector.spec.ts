@@ -32,6 +32,7 @@ vi.mock('vue-i18n', async () => {
       t: (key: string, params?: Record<string, string>) => {
         if (key === 'common.copy') return '复制'
         if (key === 'admin.accounts.modelMappingConflict') return `Model mapping conflict: ${params?.from} → ${params?.to}`
+        if (key === 'admin.accounts.syncModelsSkippedMappingConflict') return `Skipped mapped models: ${params?.mappings}`
         if (key === 'admin.accounts.syncUpstreamModelsError') return `Sync failed: ${params?.message}`
         return key
       }
@@ -62,6 +63,7 @@ vi.mock('@/composables/useClipboard', () => ({
 }))
 
 import ModelWhitelistSelector from '../ModelWhitelistSelector.vue'
+import { buildModelMappingObject, splitModelMappingObject } from '@/composables/useModelWhitelist'
 
 function mountSelector(props: Record<string, unknown> = {}) {
   return mount(ModelWhitelistSelector, {
@@ -362,6 +364,58 @@ describe('ModelWhitelistSelector', () => {
     expect(syncUpstreamModels).not.toHaveBeenCalled()
     expect(wrapper.emitted('update:modelValue')).toEqual([[['draft-model']]])
     expect(wrapper.emitted('upstream-synced')).toEqual([[]])
+  })
+
+  // 复现账号 #57：gpt-5.6-sol/terra 已映射到 new-model（映射在另一个页签看不到），
+  // 同步把它们显示进白名单并提示成功，但保存时映射覆盖白名单项，重新打开就没了。
+  it('does not add upstream models that are already mapped to another target', async () => {
+    const identity = ['codex-auto-review', 'gpt-5.6-luna', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-reserve']
+    const modelMappings = [
+      { from: 'gpt-5.6-sol', to: 'new-model' },
+      { from: 'gpt-5.6-terra', to: 'new-model' }
+    ]
+    syncUpstreamModels.mockResolvedValue({ models: [...identity, 'gpt-5.6-sol', 'gpt-5.6-terra'] })
+    const wrapper = mountSelector({ modelValue: identity, modelMappings, accountId: 57 })
+
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!.trigger('click')
+    await flushPromises()
+
+    const emitted = wrapper.emitted('update:modelValue')!.at(-1)![0] as string[]
+    expect(emitted).toEqual(identity)
+    // 白名单里显示的每个模型都必须能在保存/重新打开后留在白名单里。
+    const reloaded = splitModelMappingObject(buildModelMappingObject('combined', emitted, modelMappings))
+    expect(reloaded.allowedModels).toEqual(expect.arrayContaining(emitted))
+    expect(showWarning).toHaveBeenCalledWith('Skipped mapped models: gpt-5.6-sol → new-model, gpt-5.6-terra → new-model')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showInfo).not.toHaveBeenCalled()
+  })
+
+  it('adds unmapped upstream models and warns about the mapped ones', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['gpt-6-sol', 'gpt-5.6-sol'] })
+    const wrapper = mountSelector({ modelMappings: [{ from: 'gpt-5.6-sol', to: 'new-model' }], accountId: 57 })
+
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gpt-6-sol']]])
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsSuccess')
+    expect(showWarning).toHaveBeenCalledWith('Skipped mapped models: gpt-5.6-sol → new-model')
+  })
+
+  it('skips mapped models when filling related models or picking from the list', async () => {
+    const modelMappings = [{ from: 'gpt-5.6-sol', to: 'new-model' }]
+    const wrapper = mountSelector({ modelMappings })
+
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.fillRelatedModels')!.trigger('click')
+    const filled = wrapper.emitted('update:modelValue')!.at(-1)![0] as string[]
+    expect(filled.length).toBeGreaterThan(0)
+    expect(filled).not.toContain('gpt-5.6-sol')
+    expect(showWarning).toHaveBeenCalledWith('Skipped mapped models: gpt-5.6-sol → new-model')
+
+    await wrapper.get('div.cursor-pointer').trigger('click')
+    await findModelRow(wrapper, 'gpt-5.6-sol').get('[data-testid="select-model"]').trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toHaveLength(1)
+    expect(showInfo).toHaveBeenCalledWith('Model mapping conflict: gpt-5.6-sol → new-model')
   })
 
   it('shows the upstream sync button for OpenCode Go create-account credentials', () => {

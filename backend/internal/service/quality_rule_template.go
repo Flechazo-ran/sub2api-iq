@@ -380,7 +380,8 @@ func (s *ScheduledTestService) syncQualityTemplate(ctx context.Context, t *Quali
 		return 0, err
 	}
 	now := time.Now()
-	scope, probe := qualityRuleScope(t.PelicanConfig), isOpenAICodexStateProbePlan(t.PelicanConfig)
+	// 字段看护只认 Codex 上游下发的 safety_buffering，和探针一样只给 OpenAI OAuth 账号建规则。
+	scope, probe := qualityRuleScope(t.PelicanConfig), isOpenAICodexStateProbePlan(t.PelicanConfig) || isOpenAICodexFieldWatchPlan(t.PelicanConfig)
 	created := 0
 	var firstErr error
 	for _, account := range accounts {

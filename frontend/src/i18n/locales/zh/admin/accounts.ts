@@ -1207,6 +1207,7 @@ export default {
       addModel: '填入',
       modelExists: '该模型已存在',
       modelMappingConflict: '该模型已配置映射 {from} → {to}，请在模型映射中修改或删除后再添加白名单模型',
+      syncModelsSkippedMappingConflict: '以下模型已配置映射，未加入白名单：{mappings}。如要直接使用原模型，请到「模型映射」删除这些映射后再保存',
       modelCount: '{count} 个模型',
       poolMode: '池模式',
       poolModeHint: '上游为账号池时启用，错误不标记本地账号状态',

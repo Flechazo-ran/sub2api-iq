@@ -110,7 +110,7 @@ func restoreQualityAccountActionForIsolation(ctx context.Context, tx *sql.Tx, pl
 	default:
 		return fmt.Errorf("unsupported previous quality action: %s", state.Action)
 	}
-	if err = qualityGroupsChanged(ctx, tx, plan.AccountID, before, state.Removed); err != nil {
+	if err = qualityGroupsChanged(ctx, tx, plan.AccountID, before, state.Removed, nil); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM account_quality_states WHERE plan_id=$1`, plan.ID); err != nil {
@@ -240,7 +240,7 @@ func applyQualityIsolation(ctx context.Context, tx *sql.Tx, plan *service.Schedu
 			if state.Groups != nil {
 				removed = state.Groups.Removed
 			}
-			if err = qualityGroupsChanged(ctx, tx, plan.AccountID, beforeGroups, removed); err != nil {
+			if err = qualityGroupsChanged(ctx, tx, plan.AccountID, beforeGroups, removed, nil); err != nil {
 				return "", err
 			}
 		} else if _, err = tx.ExecContext(ctx, `INSERT INTO scheduler_outbox(event_type,account_id,payload) VALUES('account_changed',$1,'{}')`, plan.AccountID); err != nil {

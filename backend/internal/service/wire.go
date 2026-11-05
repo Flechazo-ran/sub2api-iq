@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strings"
 	"database/sql"
 	"os"
 	"time"
@@ -318,32 +317,6 @@ func ProvideAccountTestService(
 	service.agentIdentityWS = openAIGatewayService
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
-	// 看护闭环：每次真实请求按 safety_buffering 字段判满血/降智，连续 3 次降智后
-	// 用糖果题复核并以其结果为准。这里把复核执行器注入到网关服务。
-	if openAIGatewayService != nil {
-		openAIGatewayService.codexAstraWatcher = newCodexAstraWatcher()
-		openAIGatewayService.codexAstraConfirm = func(ctx context.Context, accountID int64) (bool, string) {
-			cfg := &PelicanTestConfig{
-				QuestionKind:     "candy",
-				Prompt:           CandyPrompt,
-				TestChannel:      "account",
-				ReasoningEffort:  "high",
-				ParallelCount:    1,
-				ModelID:          codexAstraWatchModel,
-				ModelIDs:         []string{codexAstraWatchModel},
-				Quality:          &QualityPolicy{ExpectedAnswer: "21"},
-			}
-			result, err := service.RunPelicanBackground(ctx, accountID, codexAstraWatchModel, cfg)
-			if err != nil {
-				return false, "糖果题复核失败: " + err.Error()
-			}
-			if result == nil {
-				return false, "糖果题复核无结果"
-			}
-			healthy := strings.EqualFold(strings.TrimSpace(result.Status), "success")
-			return healthy, "糖果题复核: " + strings.TrimSpace(result.Status)
-		}
-	}
 	service.SetPluginManager(pluginManager)
 	if p, ok := httpUpstream.(AstraGatewayRuntimeProvider); ok {
 		p.SetAstraGatewayPreparer(service.prepareAstraGatewaySource)
@@ -819,6 +792,18 @@ func ProvideScheduledTestRunnerService(
 	svc.judgeQuality = judge.Judge
 	svc.groupTests = groupTests
 	svc.candyMonitor = monitor.candy
+	// 字段看护：网关在真实请求正常结束时按 safety_buffering 计数（只看字段看护规则覆盖的
+	// 账号和模型，按账号缓存 30 秒），连续 3 次未见才经本执行器跑一次糖果题复核，
+	// 结果存规则检测记录、答错才按规则处置。页面「立即检测」也走同一条复核路径。
+	watcher := newCodexAstraWatcher(svc.fieldWatchCoverage, svc.runFieldWatchAccount)
+	svc.fieldWatch = watcher
+	if scheduledSvc != nil {
+		scheduledSvc.fieldWatch = watcher
+		scheduledSvc.fieldWatchRun = svc.triggerFieldWatchPlan
+	}
+	if accountTestSvc != nil && accountTestSvc.openaiGatewayService != nil {
+		accountTestSvc.openaiGatewayService.codexAstraWatcher = watcher
+	}
 	startBackgroundService(cfg, svc)
 	return svc
 }
