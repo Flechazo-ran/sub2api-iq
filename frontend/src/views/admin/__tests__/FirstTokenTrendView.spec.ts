@@ -12,19 +12,19 @@ vi.mock('vue-chartjs', () => ({
   Bar: { name: 'Bar', props: ['data', 'options', 'plugins'], template: '<div class="bar-chart" />' },
 }))
 
-// 6 小时、5 分钟一格的末尾 4 格；最后一格（16:00 起）还没走完，6 个数应取 15:55 那格。
-// 时间都是北京时间：07:45Z = 15:45。
+// 2 小时、2 分钟一格的末尾 4 格；最后一格（16:00 起）还没走完，6 个数应取 15:58 那格。
+// 时间都是北京时间：07:54Z = 15:54。
 function bucket(ts: string, overrides: Partial<FirstTokenTrendBucket> = {}): FirstTokenTrendBucket {
   return { ts, samples: 400, avg_ms: 20000, p50_ms: 16000, p80_ms: 27000, over10_pct: 70, head_p50_ms: 1300, upload_p50_ms: 8000, after_p50_ms: 6800, inflight_avg: 29.4, concurrency_limit_sum: 30, ...overrides }
 }
 function trend(overrides: Partial<FirstTokenTrendData> = {}): FirstTokenTrendData {
   return {
-    group: { id: 16, name: 'GPT-速刷-AUTO' }, range: '6h', step_seconds: 300, metric: 'usage', dimension: 'account',
-    from: '2026-11-05T02:00:00Z', to: '2026-11-05T08:02:30Z', limit_is_current: false,
+    group: { id: 16, name: 'GPT-速刷-AUTO' }, range: '2h', step_seconds: 120, metric: 'usage', dimension: 'account',
+    from: '2026-11-05T06:02:00Z', to: '2026-11-05T08:01:00Z', limit_is_current: false,
     buckets: [
-      bucket('2026-11-05T07:45:00Z'),
-      bucket('2026-11-05T07:50:00Z', { avg_ms: 22000, p50_ms: 17600, p80_ms: 28000, over10_pct: 75, inflight_avg: 28, samples: 462 }),
-      bucket('2026-11-05T07:55:00Z', { avg_ms: 12600, p50_ms: 9400, p80_ms: 15200, over10_pct: 32, inflight_avg: 18, samples: 527 }),
+      bucket('2026-11-05T07:54:00Z'),
+      bucket('2026-11-05T07:56:00Z', { avg_ms: 22000, p50_ms: 17600, p80_ms: 28000, over10_pct: 75, inflight_avg: 28, samples: 462 }),
+      bucket('2026-11-05T07:58:00Z', { avg_ms: 12600, p50_ms: 9400, p80_ms: 15200, over10_pct: 32, inflight_avg: 18, samples: 527 }),
       bucket('2026-11-05T08:00:00Z', { samples: 0, avg_ms: null, p50_ms: null, p80_ms: null, over10_pct: null, head_p50_ms: null, upload_p50_ms: null, after_p50_ms: null, inflight_avg: null }),
     ],
     rows: [
@@ -33,9 +33,9 @@ function trend(overrides: Partial<FirstTokenTrendData> = {}): FirstTokenTrendDat
       { key: '99', label: '#99 new', sub: null, samples: 0, avg_ms: null, p50_ms: null, p80_ms: null, over10_pct: null, inflight_avg: null, spark: [null, null, null, null] },
     ],
     events: [
-      { at: '2026-11-05T07:53:12Z', account_id: 98, account_name: 'jeremiassmith649', type: 'proxy', from: '77', to: '99', detail: '代理 77 → 99（越南河内）', actor: 'Claude', source: 'audit', p50_before_ms: 18300, p50_after_ms: 9400 },
+      { at: '2026-11-05T07:57:12Z', account_id: 98, account_name: 'jeremiassmith649', type: 'proxy', from: '77', to: '99', detail: '代理 77 → 99（越南河内）', actor: 'Claude', source: 'audit', p50_before_ms: 18300, p50_after_ms: 9400 },
       { at: '2026-11-05T08:00:13Z', account_id: 98, account_name: 'jeremiassmith649', type: 'concurrency', from: '30', to: '100', detail: '并发上限 30 → 100', actor: '1241552681@qq.com', source: 'audit', p50_before_ms: 9400, p50_after_ms: null },
-      { at: '2026-11-05T07:49:10Z', account_id: 97, account_name: 'fingermaikon7', type: 'status', from: 'active', to: 'error', detail: 'token 过期，变成 error', actor: '系统', source: 'system', p50_before_ms: 15800, p50_after_ms: 18500 },
+      { at: '2026-11-05T07:55:10Z', account_id: 97, account_name: 'fingermaikon7', type: 'status', from: 'active', to: 'error', detail: 'token 过期，变成 error', actor: '系统', source: 'system', p50_before_ms: 15800, p50_after_ms: 18500 },
     ],
     ...overrides,
   }
@@ -57,15 +57,15 @@ beforeEach(() => {
 afterEach(() => wrapper?.unmount())
 
 describe('FirstTokenTrendView', () => {
-  it('loads group 16, 6h, usage, by account and renders the latest complete bucket', async () => {
+  it('loads group 16, 2h, usage, by account and renders the latest complete bucket', async () => {
     wrapper = mountView(); await flushPromises()
     expect(api.getTrend).toHaveBeenCalledTimes(1)
-    expect(lastQuery()).toEqual({ group_id: 16, range: '6h', metric: 'usage', dimension: 'account' })
+    expect(lastQuery()).toEqual({ group_id: 16, range: '2h', metric: 'usage', dimension: 'account' })
     expect((wrapper.get('[data-testid="ftt-group"]').element as HTMLSelectElement).value).toBe('16')
-    expect(wrapper.get('[data-testid="ftt-range-6h"]').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('5 分钟一格')
+    expect(wrapper.get('[data-testid="ftt-range-2h"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('2 分钟一格')
     expect(wrapper.get('[data-testid="ftt-auto-refresh"]').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('[data-testid="ftt-kpi-note"]').text()).toContain('15:55–16:00')
+    expect(wrapper.get('[data-testid="ftt-kpi-note"]').text()).toContain('15:58–16:00')
     const p50 = wrapper.get('[data-testid="ftt-kpi-p50"]')
     expect(p50.get('.v').text()).toBe('9.4s')
     expect(p50.get('.d').text()).toBe('↓ 8.2s')
@@ -83,7 +83,9 @@ describe('FirstTokenTrendView', () => {
     expect(trendSets.map((set: { label: string }) => set.label)).toEqual(['平均', 'p50', 'p80', '10 秒判慢线'])
     expect(trendSets[1].data).toEqual([16, 17.6, 9.4, null])
     expect(trendSets[3].data).toEqual([10, 10, 10, 10])
-    expect(trendChart.props('data').labels).toEqual(['15:45', '15:50', '15:55', '16:00'])
+    expect(trendChart.props('data').labels).toEqual(['15:54', '15:56', '15:58', '16:00'])
+    // 2 小时范围约每 10 分钟标一个时间
+    expect([0, 1, 2, 3].map(i => trendChart.props('options').scales.x.ticks.callback(0, i))).toEqual(['', '', '', '16:00'])
     const concSets = concChart.props('data').datasets
     expect(concSets[0].data).toEqual([29.4, 28, 18, null])
     expect(concSets[1].borderDash).toEqual([5, 4])
@@ -140,8 +142,8 @@ describe('FirstTokenTrendView', () => {
     await wrapper.get('[data-testid="ftt-dim-proxy"]').trigger('click'); await flushPromises()
     expect(lastQuery()).toMatchObject({ dimension: 'proxy', metric: 'usage' })
     expect(wrapper.get('[data-testid="ftt-dim-proxy"]').attributes('aria-checked')).toBe('true')
-    await wrapper.get('[data-testid="ftt-range-24h"]').trigger('click'); await flushPromises()
-    expect(lastQuery()).toMatchObject({ range: '24h', dimension: 'proxy' })
+    await wrapper.get('[data-testid="ftt-range-30m"]').trigger('click'); await flushPromises()
+    expect(lastQuery()).toMatchObject({ range: '30m', dimension: 'proxy' })
     expect(api.getTrend).toHaveBeenCalledTimes(3)
   })
 
@@ -164,6 +166,16 @@ describe('FirstTokenTrendView', () => {
     await wrapper.get('[data-testid="ftt-retry"]').trigger('click'); await flushPromises()
     expect(wrapper.find('[data-testid="ftt-error"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="ftt-kpis"]').exists()).toBe(true)
+  })
+
+  it('offers only 30 min / 1 h / 2 h and labels about every 5 minutes on short ranges', async () => {
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.findAll('[data-testid^="ftt-range-"]').map(button => button.text())).toEqual(['30 分钟', '1 小时', '2 小时'])
+    api.getTrend.mockResolvedValue(trend({ range: '1h', step_seconds: 60, buckets: ['07:54', '07:55', '07:56', '07:57'].map(hm => bucket(`2026-11-05T${hm}:00Z`)) }))
+    await wrapper.get('[data-testid="ftt-range-1h"]').trigger('click'); await flushPromises()
+    expect(lastQuery()).toMatchObject({ range: '1h' })
+    expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('1 分钟一格')
+    expect([0, 1, 2, 3].map(i => charts('Line')[0].props('options').scales.x.ticks.callback(0, i))).toEqual(['', '15:55', '', ''])
   })
 
   it('notes when the concurrency limit is only the current value', async () => {

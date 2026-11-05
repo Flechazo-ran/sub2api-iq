@@ -19,10 +19,9 @@ export default {
     groupsLoadFailed: 'Could not load the group list; showing the ID only',
   },
   range: {
+    '30m': '30 min',
     '1h': '1 hour',
-    '6h': '6 hours',
-    '24h': '24 hours',
-    '7d': '7 days',
+    '2h': '2 hours',
   },
   step: {
     minutes: '{n} min per bucket',

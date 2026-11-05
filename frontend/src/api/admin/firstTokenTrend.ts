@@ -3,7 +3,8 @@ import { apiClient } from '../client'
 // 首字趋势看板（只读）。字段与后端约定一致，见 first-token-trend-contract.md。
 const base = '/admin/first-token-trend'
 
-export type FirstTokenTrendRange = '1h' | '6h' | '24h' | '7d'
+// 一个号大概只活 2 小时，只看短范围。粒度由后端定：30m / 1h 每格 1 分钟，2h 每格 2 分钟。
+export type FirstTokenTrendRange = '30m' | '1h' | '2h'
 // usage = 使用记录首字（含上传请求体）；switch = 代理优选首字（first_semantic − request_written）。
 export type FirstTokenTrendMetric = 'usage' | 'switch'
 export type FirstTokenTrendDimension = 'account' | 'proxy' | 'model'

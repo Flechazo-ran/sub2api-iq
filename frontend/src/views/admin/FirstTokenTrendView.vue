@@ -70,7 +70,7 @@
             <div class="chart-box trend-box" data-testid="ftt-trend-chart">
               <Line :data="trendData" :options="trendOptions" :plugins="trendPlugins" />
               <div v-if="hoveredEvent" class="event-tip" :style="{ left: `${hoveredEvent.x}px` }" role="tooltip" data-testid="ftt-event-tip">
-                <strong>{{ eventTime(hoveredEvent.event.at, true) }} · {{ t(`firstTokenTrend.events.type.${hoveredEvent.event.type}`) }}</strong>
+                <strong>{{ clock(hoveredEvent.event.at, true) }} · {{ t(`firstTokenTrend.events.type.${hoveredEvent.event.type}`) }}</strong>
                 <span>#{{ hoveredEvent.event.account_id }} {{ hoveredEvent.event.account_name }}</span>
                 <span>{{ hoveredEvent.event.detail }}</span>
                 <span v-if="hoveredEvent.event.actor">{{ t('firstTokenTrend.events.by', { actor: hoveredEvent.event.actor }) }}</span>
@@ -103,7 +103,7 @@
               <thead><tr><th class="l">{{ t('firstTokenTrend.events.colTime') }}</th><th class="l">{{ t('firstTokenTrend.events.colAccount') }}</th><th class="l">{{ t('firstTokenTrend.events.colType') }}</th><th class="l">{{ t('firstTokenTrend.events.colChange') }}</th><th class="l">{{ t('firstTokenTrend.events.colActor') }}</th><th>{{ t('firstTokenTrend.events.colBefore') }}</th><th>{{ t('firstTokenTrend.events.colAfter') }}</th><th class="l">{{ t('firstTokenTrend.events.colEffect') }}</th></tr></thead>
               <tbody>
                 <tr v-for="(event, index) in sortedEvents" :key="`${event.at}-${event.type}-${event.account_id}-${index}`" data-testid="ftt-event-row">
-                  <td class="l num">{{ eventTime(event.at, range !== '1h' && range !== '6h') }}</td>
+                  <td class="l num">{{ clock(event.at, true) }}</td>
                   <td class="l"><span class="acct">#{{ event.account_id }}</span><small v-if="event.account_name" class="muted">{{ event.account_name }}</small></td>
                   <td class="l"><span class="tag"><i class="dot" :class="eventSwatch[event.type]" />{{ t(`firstTokenTrend.events.type.${event.type}`) }}</span></td>
                   <td class="l wrap">{{ event.detail }}</td>
@@ -173,7 +173,7 @@ const { t, te } = useI18n()
 type SeriesKey = 'avg' | 'p50' | 'p80'
 const DEFAULT_GROUP_ID = 16
 const SLOW_MS = 10000
-const ranges: FirstTokenTrendRange[] = ['1h', '6h', '24h', '7d']
+const ranges: FirstTokenTrendRange[] = ['30m', '1h', '2h']
 const metrics: FirstTokenTrendMetric[] = ['usage', 'switch']
 const dimensions: FirstTokenTrendDimension[] = ['account', 'proxy', 'model']
 const seriesKeys: SeriesKey[] = ['avg', 'p50', 'p80']
@@ -196,7 +196,7 @@ const palette = computed(() => isDark.value
 
 // ---- 筛选 ----
 const groupId = ref(DEFAULT_GROUP_ID)
-const range = ref<FirstTokenTrendRange>('6h')
+const range = ref<FirstTokenTrendRange>('2h')
 const metric = ref<FirstTokenTrendMetric>('usage')
 const dimension = ref<FirstTokenTrendDimension>('account')
 const shown = reactive<Record<SeriesKey, boolean>>({ avg: true, p50: true, p80: true })
@@ -253,7 +253,7 @@ const stepText = computed(() => {
 })
 // ---- 格式 ----
 // 后端按北京时间对齐整格，页面上的时间也按北京时间显示。
-const bjFormatter = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+const bjFormatter = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
 function bjParts(date: Date) {
   const parts: Record<string, string> = {}
   for (const part of bjFormatter.formatToParts(date)) parts[part.type] = part.value
@@ -269,21 +269,18 @@ function clock(value: string | Date, withSeconds = false) {
   const p = bjParts(date)
   return withSeconds ? `${p.hour}:${p.minute}:${p.second}` : `${p.hour}:${p.minute}`
 }
-function dayClock(value: string | Date, withSeconds = false) {
-  const date = toDate(value)
-  if (!date) return '—'
-  const p = bjParts(date)
-  return `${p.month}-${p.day} ${clock(date, withSeconds)}`
+// x 轴大约每 10 分钟标一个（2 小时 60 格），30 分钟 / 1 小时每 5 分钟标一个；只标落在整格上的时间。
+const tickEveryMinutes = computed(() => (range.value === '2h' ? 10 : 5))
+function showTick(ts: string) {
+  const date = toDate(ts)
+  return !!date && Number(bjParts(date).minute) % tickEveryMinutes.value === 0
 }
-function eventTime(value: string, withDate: boolean) { return withDate ? dayClock(value, true) : clock(value, true) }
-const longRange = computed(() => range.value === '24h' || range.value === '7d')
-function bucketLabel(ts: string) { return range.value === '7d' ? dayClock(ts) : clock(ts) }
 function bucketSpan(index: number) {
   const bucket = buckets.value[index]
   const start = toDate(bucket?.ts)
   if (!start) return ''
   const end = new Date(start.getTime() + stepMs.value)
-  return `${longRange.value ? dayClock(start) : clock(start)}–${clock(end)}`
+  return `${clock(start)}–${clock(end)}`
 }
 const isNum = (value: number | null | undefined): value is number => typeof value === 'number' && Number.isFinite(value)
 function sec(ms: number | null | undefined) { return isNum(ms) ? `${(ms / 1000).toFixed(1)}s` : '—' }
@@ -305,7 +302,7 @@ const kpiNote = computed(() => {
   if (index < 0) return t('firstTokenTrend.kpi.noComplete')
   const start = toDate(buckets.value[index].ts)!
   const end = new Date(start.getTime() + stepMs.value)
-  return t('firstTokenTrend.kpi.note', { from: longRange.value ? dayClock(start) : clock(start), to: clock(end) })
+  return t('firstTokenTrend.kpi.note', { from: clock(start), to: clock(end) })
 })
 interface KpiSpec { key: string; label: string; pick: (bucket: FirstTokenTrendBucket) => number | null; format: (value: number) => string; scale: number; digits: number; unit: string; slowerIsWorse: boolean }
 const kpiSpecs = computed<KpiSpec[]>(() => [
@@ -448,7 +445,7 @@ function endLabelPlugin(id: string, format: (value: number) => string): Plugin<'
 const trendPlugins = [eventPlugin('fttTrendEvents', true), endLabelPlugin('fttTrendEnds', value => `${value.toFixed(1)}s`)]
 const concPlugins = [eventPlugin('fttConcEvents', false), endLabelPlugin('fttConcEnds', value => t('firstTokenTrend.kpi.countUnit', { n: value.toFixed(1) }))]
 
-const labels = computed(() => buckets.value.map(bucket => bucketLabel(bucket.ts)))
+const labels = computed(() => buckets.value.map(bucket => clock(bucket.ts)))
 const seriesField: Record<SeriesKey, 'avg_ms' | 'p50_ms' | 'p80_ms'> = { avg: 'avg_ms', p50: 'p50_ms', p80: 'p80_ms' }
 const thresholdLabel = computed(() => t('firstTokenTrend.trend.threshold'))
 
@@ -488,7 +485,7 @@ function baseOptions(yUnit: string, topPadding: number, rightPadding = 8) {
       },
     },
     scales: {
-      x: { type: 'category' as const, offset: true, grid: { display: false }, ticks: { color: c.text, font: { size: 10 }, maxTicksLimit: 8, autoSkip: true, maxRotation: 0 } },
+      x: { type: 'category' as const, offset: true, grid: { display: false }, ticks: { color: c.text, font: { size: 10 }, autoSkip: false, maxRotation: 0, callback: (_value: string | number, index: number) => (showTick(buckets.value[index]?.ts ?? '') ? labels.value[index] : '') } },
       y: { type: 'linear' as const, beginAtZero: true, grid: { color: c.grid }, ticks: { color: c.text, font: { size: 10 }, callback: (value: string | number) => `${value}${yUnit}` } },
     },
   }

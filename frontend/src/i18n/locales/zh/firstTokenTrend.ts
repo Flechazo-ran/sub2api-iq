@@ -19,10 +19,9 @@ export default {
     groupsLoadFailed: '分组列表没拉到，先按编号显示',
   },
   range: {
+    '30m': '30 分钟',
     '1h': '1 小时',
-    '6h': '6 小时',
-    '24h': '24 小时',
-    '7d': '7 天',
+    '2h': '2 小时',
   },
   step: {
     minutes: '{n} 分钟一格',
