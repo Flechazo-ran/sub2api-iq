@@ -12,12 +12,21 @@ func firstTokenTrendStatusText(status string) string {
 		return "正常"
 	case StatusError:
 		return "出错"
-	case "inactive":
+	case "inactive", "disabled":
 		return "停用"
 	case "":
 		return "未知"
 	}
 	return status
+}
+
+// fttStatusEventValue：status 事件的 from/to 只用 active / error / disabled（另有 schedulable / unschedulable）。
+func fttStatusEventValue(status string) string {
+	switch status {
+	case StatusActive, StatusError, "":
+		return status
+	}
+	return "disabled"
 }
 
 func (tl *firstTokenTrendTimeline) proxyIDs() []int64 {
@@ -94,11 +103,11 @@ func fttChangeDetail(c fttChange, proxyNames map[int64]string) (typ, from, to, d
 	if c.estimated {
 		detail += "（没有记录变动时间，按账号最后更新时间估算）"
 	}
-	from = c.from
+	from = fttStatusEventValue(c.from)
 	if !c.fromKnown {
 		from = ""
 	}
-	return FirstTokenTrendEventStatus, from, c.to, detail
+	return FirstTokenTrendEventStatus, from, fttStatusEventValue(c.to), detail
 }
 
 // events 只返回 [from, to] 内的变动，按时间先后排；建号后 5 分钟内的设置（导入流程）不算变动。

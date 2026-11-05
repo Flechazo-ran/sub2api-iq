@@ -30,7 +30,7 @@ const (
 	FirstTokenTrendSourceSystem     = "system"
 
 	firstTokenTrendDefaultGroupID   = int64(16)
-	firstTokenTrendDefaultRange     = "6h"
+	firstTokenTrendDefaultRange     = "2h"
 	firstTokenTrendQueryTimeout     = 10 * time.Second
 	firstTokenTrendSlowMS           = 10000
 	firstTokenTrendEventWindow      = 10 * time.Minute
@@ -48,11 +48,11 @@ type firstTokenTrendRangeSpec struct {
 	step time.Duration
 }
 
+// 一个号大概只活 2 小时，只看最近 2 小时以内（11-05 用户定）。
 var firstTokenTrendRanges = map[string]firstTokenTrendRangeSpec{
+	"30m": {span: 30 * time.Minute, step: time.Minute},
 	"1h":  {span: time.Hour, step: time.Minute},
-	"6h":  {span: 6 * time.Hour, step: 5 * time.Minute},
-	"24h": {span: 24 * time.Hour, step: 10 * time.Minute},
-	"7d":  {span: 7 * 24 * time.Hour, step: time.Hour},
+	"2h":  {span: 2 * time.Hour, step: 2 * time.Minute},
 }
 
 type FirstTokenTrendQuery struct {
@@ -169,6 +169,7 @@ type FirstTokenTrendAuditWrite struct {
 	Action      string
 	ParamID     string
 	ActorEmail  string
+	AuthMethod  string // admin_api_key = 用管理员 API key 调的接口
 	RequestBody string
 }
 
@@ -247,7 +248,7 @@ func NormalizeFirstTokenTrendQuery(q FirstTokenTrendQuery) (FirstTokenTrendQuery
 		q.Range = firstTokenTrendDefaultRange
 	}
 	if _, ok := firstTokenTrendRanges[q.Range]; !ok {
-		return q, infraerrors.BadRequest("FIRST_TOKEN_TREND_INVALID", "range 只能是 1h、6h、24h、7d")
+		return q, infraerrors.BadRequest("FIRST_TOKEN_TREND_INVALID", "range 只能是 30m、1h、2h")
 	}
 	if q.Metric == "" {
 		q.Metric = FirstTokenTrendMetricUsage

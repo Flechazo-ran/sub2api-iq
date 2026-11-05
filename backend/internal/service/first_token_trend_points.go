@@ -89,6 +89,9 @@ func parseFirstTokenTrendAudit(w FirstTokenTrendAuditWrite, order int) []fttPoin
 	if actor == "" {
 		actor = "后台"
 	}
+	if w.AuthMethod == AuditAuthMethodAdminAPIKey {
+		actor += "（API）"
+	}
 	type fv struct{ field, value string }
 	var values []fv
 	switch w.Action {

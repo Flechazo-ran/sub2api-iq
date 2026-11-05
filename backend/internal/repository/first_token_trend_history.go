@@ -15,7 +15,7 @@ import (
 // 首字 = first_semantic − request_written；head / upload 要 headers_written，没有就给 NULL。
 // 事件时间都是相对请求进网关的毫秒偏移，所以 head 直接就是 headers_written。
 // 用 jsonb_path_query 一次取出 egress 尝试，比 jsonb_array_elements + 多次取 detail 少解压几次，
-// 7 天约 11 万条在线上 2.7 秒左右。
+// 线上 7 天约 11 万条 2.7 秒左右（现在最长只查 2 小时）。
 const firstTokenTrendTraceSQL = `
 SELECT t.started_at,
        (a->>'account_id')::bigint,
@@ -76,7 +76,7 @@ func (r *firstTokenTrendRepository) AuditWrites(ctx context.Context, accountIDs 
 		ids = append(ids, strconv.FormatInt(id, 10))
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT created_at, action, COALESCE(extra->'params'->>'id', ''), actor_email, request_body
+		SELECT created_at, action, COALESCE(extra->'params'->>'id', ''), actor_email, auth_method, request_body
 		FROM audit_logs
 		WHERE created_at >= $1 AND created_at <= $2 AND status_code >= 200 AND status_code < 400
 		  AND action = ANY($3)
@@ -90,7 +90,7 @@ func (r *firstTokenTrendRepository) AuditWrites(ctx context.Context, accountIDs 
 	out := []service.FirstTokenTrendAuditWrite{}
 	for rows.Next() {
 		var w service.FirstTokenTrendAuditWrite
-		if err := rows.Scan(&w.CreatedAt, &w.Action, &w.ParamID, &w.ActorEmail, &w.RequestBody); err != nil {
+		if err := rows.Scan(&w.CreatedAt, &w.Action, &w.ParamID, &w.ActorEmail, &w.AuthMethod, &w.RequestBody); err != nil {
 			return nil, err
 		}
 		out = append(out, w)

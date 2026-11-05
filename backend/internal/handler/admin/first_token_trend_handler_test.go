@@ -66,7 +66,7 @@ func fttHandlerRouter(repo *fttHandlerRepo) *gin.Engine {
 func TestFirstTokenTrendHandlerRejectsBadParams(t *testing.T) {
 	repo := &fttHandlerRepo{}
 	router := fttHandlerRouter(repo)
-	for _, q := range []string{"range=2h", "metric=p99", "dimension=user", "group_id=abc", "group_id=0", "group_id=-3"} {
+	for _, q := range []string{"range=6h", "range=24h", "range=7d", "metric=p99", "dimension=user", "group_id=abc", "group_id=0", "group_id=-3"} {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/first-token-trend?"+q, nil))
 		require.Equal(t, http.StatusBadRequest, w.Code, q)
@@ -99,12 +99,12 @@ func TestFirstTokenTrendHandlerDefaultsAndGroups(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, int64(16), resp.Data.Group.ID)
-	require.Equal(t, "6h", resp.Data.Range)
-	require.Equal(t, 300, resp.Data.StepSeconds)
+	require.Equal(t, "2h", resp.Data.Range)
+	require.Equal(t, 120, resp.Data.StepSeconds)
 	require.Equal(t, "usage", resp.Data.Metric)
 	require.Equal(t, "account", resp.Data.Dimension)
 	require.True(t, resp.Data.LimitIsCurrent, "没有审计日志时并发上限只能按现在的值")
-	require.Len(t, resp.Data.Buckets, 72)
+	require.Len(t, resp.Data.Buckets, 60)
 	require.Nil(t, resp.Data.Buckets[0]["p50_ms"])
 	require.NotNil(t, resp.Data.Rows)
 	require.NotNil(t, resp.Data.Events)

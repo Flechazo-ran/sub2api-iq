@@ -13,14 +13,14 @@ import (
 func TestNormalizeFirstTokenTrendQueryDefaultsAndRejects(t *testing.T) {
 	q, err := NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{})
 	require.NoError(t, err)
-	require.Equal(t, FirstTokenTrendQuery{GroupID: 16, Range: "6h", Metric: "usage", Dimension: "account"}, q)
+	require.Equal(t, FirstTokenTrendQuery{GroupID: 16, Range: "2h", Metric: "usage", Dimension: "account"}, q)
 
-	q, err = NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{GroupID: 7, Range: "7d", Metric: "switch", Dimension: "model"})
+	q, err = NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{GroupID: 7, Range: "30m", Metric: "switch", Dimension: "model"})
 	require.NoError(t, err)
 	require.Equal(t, int64(7), q.GroupID)
 
 	for _, bad := range []FirstTokenTrendQuery{
-		{Range: "2h"}, {Range: "1d"}, {Metric: "p50"}, {Metric: "USAGE"}, {Dimension: "user"}, {GroupID: -1},
+		{Range: "6h"}, {Range: "24h"}, {Range: "7d"}, {Range: "1d"}, {Metric: "p50"}, {Metric: "USAGE"}, {Dimension: "user"}, {GroupID: -1},
 	} {
 		_, err := NormalizeFirstTokenTrendQuery(bad)
 		require.Error(t, err, "%+v", bad)
@@ -36,17 +36,16 @@ func TestFirstTokenTrendWindowAlignsToBeijingGrid(t *testing.T) {
 		from      time.Time
 		lastStart time.Time
 	}{
+		{"30m", 30, fttAt(16, 3, 0), fttAt(16, 32, 0)},
 		{"1h", 60, fttAt(15, 33, 0), fttAt(16, 32, 0)},
-		{"6h", 72, fttAt(10, 35, 0), fttAt(16, 30, 0)},
-		{"24h", 144, time.Date(2026, 11, 4, 16, 40, 0, 0, firstTokenTrendLocation), fttAt(16, 30, 0)},
-		{"7d", 168, time.Date(2026, 10, 29, 17, 0, 0, 0, firstTokenTrendLocation), fttAt(16, 0, 0)},
+		{"2h", 60, fttAt(14, 34, 0), fttAt(16, 32, 0)},
 	}
 	for _, c := range cases {
 		w := newFirstTokenTrendWindow(now, firstTokenTrendRanges[c.rng])
 		require.Equal(t, c.n, w.n, c.rng)
 		require.True(t, w.from.Equal(c.from), "%s from %s", c.rng, w.from)
 		require.True(t, w.bucketStart(w.n-1).Equal(c.lastStart), c.rng)
-		require.True(t, w.to.Equal(now), c.rng)
+		require.True(t, w.to.Equal(now), "to 是查询截止时间，不对齐整格 %s", c.rng)
 		require.True(t, w.bucketEnd(w.n-1).Equal(now), "last bucket ends now")
 	}
 	// 整点对齐看的是北京时间：UTC 08:10 = 北京 16:10，1 小时格从北京 16:00 开始。

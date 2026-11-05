@@ -70,7 +70,7 @@ func statusLogPoint(l FirstTokenTrendStatusLog, order int) (fttPoint, bool) {
 		p.field, p.to, p.setsUnsched, p.emitIfUnknown = fttFieldStatus, StatusError, true, true
 		p.note = truncateFirstTokenTrendNote(l.Error)
 	case fttLogTempTransport:
-		p.field, p.to = fttFieldTemp, "temp_unschedulable"
+		p.field, p.to = fttFieldTemp, "unschedulable"
 		if until, err := time.Parse(time.RFC3339Nano, l.Until); err == nil {
 			p.note = "到 " + until.In(firstTokenTrendLocation).Format("15:04")
 		}

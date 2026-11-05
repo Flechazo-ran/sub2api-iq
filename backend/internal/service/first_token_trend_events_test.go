@@ -28,7 +28,7 @@ func TestFirstTokenTrendEventsFromAuditAndAutoSwitchAreDeduped(t *testing.T) {
 			{CreatedAt: fttAt(15, 4, 15), Action: fttActionUpdate, ParamID: "98", ActorEmail: "boss@x",
 				RequestBody: `{"name":"n","proxy_id":77,"concurrency":100,"status":"active","credentials":{"access_token":"***"}}`},
 			{CreatedAt: fttAt(15, 30, 0), Action: fttActionUpdate, ParamID: "98", ActorEmail: "boss@x", RequestBody: `{"proxy_id":77,"concurrency":100}`},
-			{CreatedAt: fttAt(15, 53, 12), Action: fttActionBulkUpdate, ActorEmail: "a@x", RequestBody: `{"account_ids":[98],"proxy_id":99}`},
+			{CreatedAt: fttAt(15, 53, 12), Action: fttActionBulkUpdate, ActorEmail: "a@x", AuthMethod: AuditAuthMethodAdminAPIKey, RequestBody: `{"account_ids":[98],"proxy_id":99}`},
 			{CreatedAt: fttAt(16, 0, 13), Action: fttActionUpdate, ParamID: "98", ActorEmail: "boss@x", RequestBody: `{"proxy_id":121,"concurrency":110,"status":"active"}`},
 			// 别的号、请求体不是 JSON 的都跳过
 			{CreatedAt: fttAt(15, 10, 0), Action: fttActionUpdate, ParamID: "97", RequestBody: `{"proxy_id":5}`},
@@ -38,7 +38,7 @@ func TestFirstTokenTrendEventsFromAuditAndAutoSwitchAreDeduped(t *testing.T) {
 		switches: []FirstTokenTrendAutoSwitch{{ID: 1, AccountID: 98, CreatedAt: fttAt(15, 53, 12), Status: ProxyAutoSwitchStatusKept,
 			FromProxyID: fttI64(77), ToProxyID: fttI64(99), SwitchedAt: ptrTime(fttAt(15, 53, 12))}},
 	}
-	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{Range: "6h"})
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{Range: "2h"})
 	require.NoError(t, err)
 	type got struct{ at, typ, from, to, actor, source string }
 	var evs []got
@@ -47,7 +47,7 @@ func TestFirstTokenTrendEventsFromAuditAndAutoSwitchAreDeduped(t *testing.T) {
 	}
 	require.Equal(t, []got{
 		{"15:04:15", "proxy", "76", "77", "boss@x", "audit"},
-		{"15:53:12", "proxy", "77", "99", "a@x", "audit"},
+		{"15:53:12", "proxy", "77", "99", "a@x（API）", "audit"},
 		{"16:00:13", "proxy", "99", "121", "boss@x", "audit"},
 		{"16:00:13", "concurrency", "100", "110", "boss@x", "audit"},
 	}, evs)
@@ -56,7 +56,7 @@ func TestFirstTokenTrendEventsFromAuditAndAutoSwitchAreDeduped(t *testing.T) {
 
 	// 并发上限合计按审计往回推：16:00:13 之前 100，之后 110。
 	for _, b := range res.Buckets {
-		end := b.TS.Add(5 * time.Minute)
+		end := b.TS.Add(2 * time.Minute)
 		switch {
 		case end.Before(fttAt(14, 11, 51)):
 			require.Zero(t, b.ConcurrencyLimitSum, "建号前不算 %s", b.TS)
@@ -114,21 +114,21 @@ func TestFirstTokenTrendStatusEventsFromLogsAndFallback(t *testing.T) {
 			{CreatedAt: fttAt(16, 10, 0), AccountID: 98, Message: fttLogTempTransport, Until: "2026-11-05T16:20:00+08:00"},
 		},
 	}
-	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{Range: "6h"})
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{Range: "2h"})
 	require.NoError(t, err)
 	require.Len(t, res.Events, 3)
 	// #97 没有日志，按 updated_at 估
 	require.Equal(t, int64(97), res.Events[0].AccountID)
 	require.True(t, res.Events[0].At.Equal(fttAt(14, 49, 10)))
 	require.Contains(t, res.Events[0].Detail, "估算")
-	require.Equal(t, "temp_unschedulable", res.Events[1].To)
+	require.Equal(t, "unschedulable", res.Events[1].To)
 	require.Equal(t, "连接出错，临时停调度到 16:20", res.Events[1].Detail)
 	require.Equal(t, "active", res.Events[2].From)
 	require.Equal(t, "error", res.Events[2].To)
 	require.Equal(t, `状态 正常 → 出错：API returned 401: { "error": "expired" }`, res.Events[2].Detail)
 	require.Equal(t, FirstTokenTrendSourceSystem, res.Events[2].Source)
 	for _, b := range res.Buckets {
-		end := b.TS.Add(5 * time.Minute)
+		end := b.TS.Add(2 * time.Minute)
 		want := int64(200)
 		if !end.Before(fttAt(14, 49, 10)) {
 			want = 100
@@ -138,4 +138,33 @@ func TestFirstTokenTrendStatusEventsFromLogsAndFallback(t *testing.T) {
 		}
 		require.Equal(t, want, b.ConcurrencyLimitSum, b.TS.String())
 	}
+}
+
+// status 事件的 to 只用 error / unschedulable / schedulable / active / disabled。
+func TestFirstTokenTrendStatusEventValues(t *testing.T) {
+	now := fttAt(16, 30, 0)
+	acc := fttAccount98()
+	acc.CreatedAt = fttAt(10, 0, 0)
+	repo := &fttFakeRepo{accounts: []FirstTokenTrendAccount{acc}, audits: []FirstTokenTrendAuditWrite{
+		{CreatedAt: fttAt(15, 0, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"status":"active"}`},
+		{CreatedAt: fttAt(15, 1, 0), Action: fttActionSchedulable, ParamID: "98", RequestBody: `{"schedulable":true}`},
+		{CreatedAt: fttAt(15, 10, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"status":"inactive"}`},
+		{CreatedAt: fttAt(15, 20, 0), Action: fttActionClearError, ParamID: "98"},
+		{CreatedAt: fttAt(15, 30, 0), Action: fttActionSchedulable, ParamID: "98", RequestBody: `{"schedulable":false}`},
+		{CreatedAt: fttAt(15, 40, 0), Action: fttActionSchedulable, ParamID: "98", RequestBody: `{"schedulable":true}`},
+	}, logs: []FirstTokenTrendStatusLog{
+		{CreatedAt: fttAt(15, 50, 0), AccountID: 98, Message: fttLogAuthError},
+		{CreatedAt: fttAt(16, 0, 0), AccountID: 98, Message: fttLogTempTransport},
+	}}
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{})
+	require.NoError(t, err)
+	got := []string{}
+	for _, e := range res.Events {
+		require.Equal(t, FirstTokenTrendEventStatus, e.Type)
+		require.Contains(t, []string{"error", "unschedulable", "schedulable", "active", "disabled"}, e.To)
+		got = append(got, e.From+"→"+e.To)
+	}
+	require.Equal(t, []string{"active→disabled", "disabled→active", "schedulable→unschedulable", "unschedulable→schedulable",
+		"active→error", "→unschedulable"}, got)
+	require.Equal(t, "状态 正常 → 停用", res.Events[0].Detail)
 }
