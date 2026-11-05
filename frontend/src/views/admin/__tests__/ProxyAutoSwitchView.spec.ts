@@ -38,8 +38,8 @@ function event(id: number, status: ProxyAutoSwitchStatus, overrides: Partial<Pro
 }
 
 function mountView() {
-  const i18n = createI18n({ legacy: false, locale: 'zh', missingWarn: false, fallbackWarn: false, messages: { zh: { proxyAutoSwitch: zhProxyAutoSwitch, accountOps: { smartTitle: '智能运维' } } } })
-  return mount(ProxyAutoSwitchView, { global: { plugins: [i18n], stubs: { AppLayout: { template: '<main><slot /></main>' }, SmartOpsNav: true, Teleport: true } } })
+  const i18n = createI18n({ legacy: false, locale: 'zh', missingWarn: false, fallbackWarn: false, messages: { zh: { proxyAutoSwitch: zhProxyAutoSwitch, nav: { routing: '线路优化' } } } })
+  return mount(ProxyAutoSwitchView, { global: { plugins: [i18n], stubs: { AppLayout: { template: '<main><slot /></main>' }, RoutingNav: true, Teleport: true } } })
 }
 let wrapper: ReturnType<typeof mountView>
 const rowFor = (id: number) => wrapper.get(`[data-event-id="${id}"] [data-testid="pas-event-row"]`)

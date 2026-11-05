@@ -567,6 +567,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/admin/token-guard-v2', name: 'AdminTokenGuardV2', component: () => import('@/views/admin/ops/TokenGuardV2View.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Credential Operations', titleKey: 'tokenGuardV2.title', descriptionKey: 'tokenGuardV2.description' } },
   { path: '/admin/account-ops', name: 'AdminAccountOps', component: () => import('@/views/admin/AccountOpsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Account operations', titleKey: 'accountOps.title', descriptionKey: 'accountOps.description' } },
   { path: '/admin/proxy-autoswitch', name: 'AdminProxyAutoSwitch', component: () => import('@/views/admin/ProxyAutoSwitchView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Proxy optimizer', titleKey: 'proxyAutoSwitch.title', descriptionKey: 'proxyAutoSwitch.description' } },
+  { path: '/admin/routing', redirect: '/admin/first-token-trend', meta: { requiresAuth: true, requiresAdmin: true } },
+  { path: '/admin/first-token-trend', name: 'AdminFirstTokenTrend', component: () => import('@/views/admin/FirstTokenTrendView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'First-token trend', titleKey: 'firstTokenTrend.title', descriptionKey: 'firstTokenTrend.description' } },
   {
     path: '/admin/account-quality',
     name: 'AdminAccountQuality',

@@ -94,16 +94,38 @@ describe('AppSidebar smart operations group', () => {
     expect(componentSource.match(/path: '\/admin\/harvest-flow'/g)).toHaveLength(1)
   })
 
-  it('nests 代理优选 under 智能运维 right after account operations', () => {
-    expect(smartOpsBlock).toMatch(/path: '\/admin\/proxy-autoswitch'[^\n]*label: t\('proxyAutoSwitch\.title'\)/)
-    const paths = pathsIn(smartOpsBlock)
-    expect(paths.indexOf('/admin/proxy-autoswitch')).toBe(paths.indexOf('/admin/account-ops') + 1)
-    expect(componentSource.match(/path: '\/admin\/proxy-autoswitch'/g)).toHaveLength(1)
+  it('no longer lists 代理优选 under 智能运维', () => {
+    expect(pathsIn(smartOpsBlock)).not.toContain('/admin/proxy-autoswitch')
   })
 
   it('keeps the group in the same order as the 智能运维 tab bar', () => {
     const navSource = readFileSync(resolve(dirname(componentPath), '../admin/operations/SmartOpsNav.vue'), 'utf8')
     expect(pathsIn(smartOpsBlock).slice(1)).toEqual(pathsIn(navSource))
+  })
+})
+
+describe('AppSidebar routing group', () => {
+  const routingBlock = componentSource.match(/path: '\/admin\/routing'[\s\S]*?\n {4}\] \},/)?.[0] ?? ''
+  const pathsIn = (source: string) => [...source.matchAll(/path: '([^']+)'/g)].map(match => match[1])
+
+  it('adds 线路优化 as an expand-only group right below account management', () => {
+    expect(routingBlock).not.toBe('')
+    expect(routingBlock).toMatch(/path: '\/admin\/routing', label: t\('nav\.routing'\)[^\n]*expandOnly: true/)
+    const adminPaths = pathsIn(componentSource.slice(componentSource.indexOf('const adminNavItems')))
+    expect(adminPaths.indexOf('/admin/routing')).toBe(adminPaths.indexOf('/admin/accounts') + 1)
+  })
+
+  it('lists 首字趋势 then 代理优选, each declared once', () => {
+    expect(pathsIn(routingBlock).slice(1)).toEqual(['/admin/first-token-trend', '/admin/proxy-autoswitch'])
+    expect(routingBlock).toMatch(/path: '\/admin\/first-token-trend'[^\n]*label: t\('firstTokenTrend\.title'\)/)
+    expect(routingBlock).toMatch(/path: '\/admin\/proxy-autoswitch'[^\n]*label: t\('proxyAutoSwitch\.title'\)/)
+    expect(componentSource.match(/path: '\/admin\/proxy-autoswitch'/g)).toHaveLength(1)
+    expect(componentSource.match(/path: '\/admin\/first-token-trend'/g)).toHaveLength(1)
+  })
+
+  it('keeps the group in the same order as the 线路优化 tab bar', () => {
+    const navSource = readFileSync(resolve(dirname(componentPath), '../admin/operations/RoutingNav.vue'), 'utf8')
+    expect(pathsIn(routingBlock).slice(1)).toEqual(pathsIn(navSource))
   })
 })
 

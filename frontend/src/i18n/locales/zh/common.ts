@@ -192,6 +192,7 @@ export default {
     modelPlaza: '模型广场',
     subscriptions: '订阅管理',
     accounts: '账号管理',
+    routing: '线路优化',
     harvestFlow: '打票流程',
     plugins: '插件管理',
     proxies: 'IP管理',
