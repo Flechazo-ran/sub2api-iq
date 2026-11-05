@@ -47,7 +47,8 @@ func TestReleaseRestoredQualityGroupsOnlyAfterManualPutBack(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
-	repo := NewScheduledTestPlanRepository(db).(*scheduledTestPlanRepository)
+	repo, ok := NewScheduledTestPlanRepository(db).(*scheduledTestPlanRepository)
+	require.True(t, ok)
 
 	// 号还在 #9：隔离记录保留。
 	expectFieldWatchRelease(mock, 9)
@@ -73,7 +74,9 @@ func TestQualityGroupMembershipReadsStateAndCurrentGroups(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT state FROM account_quality_states WHERE plan_id=$1`)).WithArgs(int64(9)).
 		WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow([]byte(`{"action":"remove_groups","removed":[{"account_id":57,"group_id":16}],"added":[9]}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT group_id FROM account_groups WHERE account_id=$1`)).WithArgs(int64(57)).WillReturnRows(sqlmock.NewRows([]string{"group_id"}).AddRow(int64(9)))
-	membership, err := NewScheduledTestPlanRepository(db).(*scheduledTestPlanRepository).QualityGroupMembership(context.Background(), 9, 57)
+	repo, ok := NewScheduledTestPlanRepository(db).(*scheduledTestPlanRepository)
+	require.True(t, ok)
+	membership, err := repo.QualityGroupMembership(context.Background(), 9, 57)
 	require.NoError(t, err)
 	require.Equal(t, service.QualityGroupMembership{StateAction: "remove_groups", Added: []int64{9}, Removed: []int64{16}, Current: []int64{9}}, membership)
 	require.NoError(t, mock.ExpectationsWereMet())
