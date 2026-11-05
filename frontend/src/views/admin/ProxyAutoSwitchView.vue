@@ -1,9 +1,9 @@
 <template>
   <AppLayout>
     <div class="proxy-workspace">
-      <SmartOpsNav />
+      <RoutingNav />
       <div class="workspace-heading">
-        <div><p class="workspace-eyebrow">{{ t('accountOps.smartTitle') }}</p><h2>{{ t('proxyAutoSwitch.title') }}</h2><p class="workspace-subtitle">{{ t('proxyAutoSwitch.intro') }}</p></div>
+        <div><p class="workspace-eyebrow">{{ t('nav.routing') }}</p><h2>{{ t('proxyAutoSwitch.title') }}</h2><p class="workspace-subtitle">{{ t('proxyAutoSwitch.intro') }}</p></div>
         <span v-if="saved" class="state-badge" :class="saved.enabled ? 'state-on' : 'state-off'" data-testid="pas-state"><span />{{ saved.enabled ? t('proxyAutoSwitch.stateOn') : t('proxyAutoSwitch.stateOff') }}</span>
       </div>
       <div v-if="notice" class="workspace-message message-success" role="status" data-testid="pas-notice">{{ notice }}<button :aria-label="t('proxyAutoSwitch.dismiss')" @click="notice = ''"><Icon name="x" size="sm" /></button></div>
@@ -136,7 +136,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import SmartOpsNav from '@/components/admin/operations/SmartOpsNav.vue'
+import RoutingNav from '@/components/admin/operations/RoutingNav.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { getAll as getAllGroups } from '@/api/admin/groups'
