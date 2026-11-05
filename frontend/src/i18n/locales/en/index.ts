@@ -6,6 +6,7 @@ import priorityScheduling from './priorityScheduling'
 import qualityOps from './qualityOps'
 import controlledExperiments from './controlledExperiments'
 import proxyAutoSwitch from './proxyAutoSwitch'
+import firstTokenTrend from './firstTokenTrend'
 import accountOps from './accountOps'
 import tokenGuard from './tokenGuard'
 import pelicanTests from './pelicanTests'
@@ -35,6 +36,7 @@ export default {
   qualityOps,
   controlledExperiments,
   proxyAutoSwitch,
+  firstTokenTrend,
   accountOps,
   tokenGuard,
   pelicanTests,

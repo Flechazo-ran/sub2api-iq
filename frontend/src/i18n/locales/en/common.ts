@@ -192,6 +192,7 @@ export default {
     modelPlaza: 'Model Plaza',
     subscriptions: 'Subscriptions',
     accounts: 'Accounts',
+    routing: 'Routing',
     harvestFlow: 'Ticket Flow',
     plugins: 'Plugins',
     proxies: 'Proxies',
