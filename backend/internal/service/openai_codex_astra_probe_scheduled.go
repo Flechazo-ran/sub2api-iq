@@ -189,7 +189,7 @@ func (s *OpenAIGatewayService) probeOpenAICodexAstra(ctx context.Context, accoun
 		result.Reason = "上游请求失败"
 		return result
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		result.Reason = "上游返回非 200"
 		return result
