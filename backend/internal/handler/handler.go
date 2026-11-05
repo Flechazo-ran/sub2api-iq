@@ -11,6 +11,7 @@ type AdminHandlers struct {
 	AccountOps             *admin.AccountOpsHandler
 	AccountTokenGuard      *admin.AccountTokenGuardHandler
 	AccountTokenGuardV2    *admin.AccountTokenGuardV2Handler
+	ProxyAutoSwitch        *admin.ProxyAutoSwitchHandler
 	Dashboard              *admin.DashboardHandler
 	User                   *admin.UserHandler
 	Group                  *admin.GroupHandler

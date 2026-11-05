@@ -84,6 +84,7 @@ var ProviderSet = wire.NewSet(
 	NewOpenAIOAuthReauthRepository,
 	NewOpenAISessionExportRepository,
 	NewAccountTokenGuardV2Repository,
+	NewProxyAutoSwitchRepository,
 	NewScheduledTestPlanRepository,   // 定时测试计划仓储
 	NewScheduledTestResultRepository, // 定时测试结果仓储
 	NewQualityRuleTemplateRepository, // 质量运维分组规则仓储
@@ -181,6 +182,7 @@ var ProviderSet = wire.NewSet(
 	ProvidePricingRemoteClient,
 	ProvideGitHubReleaseClient,
 	NewProxyExitInfoProber,
+	NewProxyAutoSwitchProber,
 	NewClaudeUsageFetcher,
 	NewClaudeOAuthClient,
 	NewHTTPUpstream,

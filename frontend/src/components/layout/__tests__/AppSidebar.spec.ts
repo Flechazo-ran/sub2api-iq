@@ -94,6 +94,13 @@ describe('AppSidebar smart operations group', () => {
     expect(componentSource.match(/path: '\/admin\/harvest-flow'/g)).toHaveLength(1)
   })
 
+  it('nests 代理优选 under 智能运维 right after account operations', () => {
+    expect(smartOpsBlock).toMatch(/path: '\/admin\/proxy-autoswitch'[^\n]*label: t\('proxyAutoSwitch\.title'\)/)
+    const paths = pathsIn(smartOpsBlock)
+    expect(paths.indexOf('/admin/proxy-autoswitch')).toBe(paths.indexOf('/admin/account-ops') + 1)
+    expect(componentSource.match(/path: '\/admin\/proxy-autoswitch'/g)).toHaveLength(1)
+  })
+
   it('keeps the group in the same order as the 智能运维 tab bar', () => {
     const navSource = readFileSync(resolve(dirname(componentPath), '../admin/operations/SmartOpsNav.vue'), 'utf8')
     expect(pathsIn(smartOpsBlock).slice(1)).toEqual(pathsIn(navSource))

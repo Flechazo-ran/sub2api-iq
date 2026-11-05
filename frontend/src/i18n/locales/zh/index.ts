@@ -5,6 +5,7 @@ import siwc from './siwc'
 import priorityScheduling from './priorityScheduling'
 import qualityOps from './qualityOps'
 import controlledExperiments from './controlledExperiments'
+import proxyAutoSwitch from './proxyAutoSwitch'
 import accountOps from './accountOps'
 import tokenGuard from './tokenGuard'
 import pelicanTests from './pelicanTests'
@@ -33,6 +34,7 @@ export default {
   priorityScheduling,
   qualityOps,
   controlledExperiments,
+  proxyAutoSwitch,
   accountOps,
   tokenGuard,
   pelicanTests,

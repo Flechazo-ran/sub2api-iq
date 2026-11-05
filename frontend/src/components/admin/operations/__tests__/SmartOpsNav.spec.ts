@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import SmartOpsNav from '../SmartOpsNav.vue'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
 
-const smartOpsPaths = ['/admin/auto-config', '/admin/priority-scheduling', '/admin/account-quality', '/admin/controlled-experiments', '/admin/account-ops', '/admin/token-guard', '/admin/token-guard-v2', '/admin/pelican-tests', '/admin/group-cache-tests']
+const smartOpsPaths = ['/admin/auto-config', '/admin/priority-scheduling', '/admin/account-quality', '/admin/controlled-experiments', '/admin/account-ops', '/admin/proxy-autoswitch', '/admin/token-guard', '/admin/token-guard-v2', '/admin/pelican-tests', '/admin/group-cache-tests']
 
 async function mountAt(path: string) {
   const router = createRouter({
@@ -36,6 +36,13 @@ describe('SmartOpsNav', () => {
     const wrapper = await mountAt('/admin/request-captures')
     expect(hrefs(wrapper)).toEqual([...smartOpsPaths, '/admin/request-captures', '/admin/harvest-flow'])
     expect(wrapper.find('[aria-current="page"]').text()).toBe('admin.requestCapture.title')
+  })
+
+  it('lists 代理优选 right after account operations and marks it active on its page', async () => {
+    const wrapper = await mountAt('/admin/proxy-autoswitch')
+    const paths = hrefs(wrapper)
+    expect(paths.indexOf('/admin/proxy-autoswitch')).toBe(paths.indexOf('/admin/account-ops') + 1)
+    expect(wrapper.find('[aria-current="page"]').text()).toBe('proxyAutoSwitch.title')
   })
 
   it('follows the feature switch without remounting', async () => {
