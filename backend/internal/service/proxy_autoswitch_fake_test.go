@@ -12,14 +12,16 @@ import (
 // pasWorld is an in-memory stand-in for the database, proxies, admin edit path
 // and probes used by ProxyAutoSwitchService tests.
 type pasWorld struct {
-	mu        sync.Mutex
-	now       time.Time
-	accounts  map[int64]*ProxyAutoSwitchAccount
-	groupsOf  map[int64][]int64
-	proxies   map[int64]*Proxy
-	external  map[int64]int64 // proxy id -> accounts outside the test groups using it
-	statsFn   func(metric string, accountIDs []int64, from, to time.Time) []ProxyAutoSwitchLatencyStat
-	statsLog  []string // metric of every LatencyStats call
+	mu       sync.Mutex
+	now      time.Time
+	accounts map[int64]*ProxyAutoSwitchAccount
+	groupsOf map[int64][]int64
+	proxies  map[int64]*Proxy
+	external map[int64]int64 // proxy id -> accounts outside the test groups using it
+	// statsFn, when set, adds usage rows (and matching traces) to every
+	// FirstTokenUsage call: stat.Samples rows of stat.P50MS each on stat.ProxyID,
+	// so the switcher sees exactly these samples and p50.
+	statsFn   func(accountIDs []int64, from, to time.Time) []ProxyAutoSwitchLatencyStat
 	usage     []FirstTokenTrendUsageSample
 	traces    []FirstTokenTrendTraceSample
 	usageLog  []string // "groups from to traceFrom" of every FirstTokenUsage call
@@ -91,7 +93,7 @@ func (w *pasWorld) clock() time.Time { w.mu.Lock(); defer w.mu.Unlock(); return 
 
 // uniform makes every account have the given samples/p50 on whatever proxy it uses now.
 func (w *pasWorld) uniform(samples int, p50 int64) {
-	w.statsFn = func(_ string, ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
+	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
 		out := []ProxyAutoSwitchLatencyStat{}
 		for _, id := range ids {
 			if a := w.accounts[id]; a != nil && a.ProxyID != nil {
@@ -320,17 +322,6 @@ func (w *pasWorld) GetAccount(_ context.Context, id int64) (*ProxyAutoSwitchAcco
 	return nil, nil
 }
 
-func (w *pasWorld) LatencyStats(_ context.Context, metric string, ids []int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error) {
-	if !proxyAutoSwitchValidMetric(metric) {
-		return nil, fmt.Errorf("unknown metric %q", metric)
-	}
-	w.statsLog = append(w.statsLog, metric)
-	if w.statsFn == nil {
-		return nil, nil
-	}
-	return w.statsFn(metric, ids, from, to), nil
-}
-
 // FirstTokenUsage filters like the real queries: usage of the groups that
 // overlaps [from, to), traces of the groups started in [traceFrom, to).
 // usageGroup / traceGroup default to 16.
@@ -356,7 +347,42 @@ func (w *pasWorld) FirstTokenUsage(_ context.Context, groupIDs []int64, from, to
 			traces = append(traces, t)
 		}
 	}
+	if w.statsFn != nil {
+		u, t := w.statsUsage(groupIDs, from, to)
+		usage, traces = append(usage, u...), append(traces, t...)
+	}
 	return usage, traces, nil
+}
+
+// statsUsage turns statsFn's stats for the accounts of groupIDs into usage rows
+// that started at from, plus traces that put each row on stat.ProxyID.
+func (w *pasWorld) statsUsage(groupIDs []int64, from, to time.Time) ([]FirstTokenTrendUsageSample, []FirstTokenTrendTraceSample) {
+	want := map[int64]bool{}
+	for _, g := range groupIDs {
+		want[g] = true
+	}
+	ids := []int64{}
+	for id := range w.accounts {
+		for _, g := range w.groupsOf[id] {
+			if want[g] {
+				ids = append(ids, id)
+				break
+			}
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var usage []FirstTokenTrendUsageSample
+	var traces []FirstTokenTrendTraceSample
+	for _, st := range w.statsFn(ids, from, to) {
+		for i := 0; i < st.Samples; i++ {
+			id := fmt.Sprintf("stat-%d-%d-%d", st.AccountID, st.ProxyID, i)
+			v := st.P50MS
+			usage = append(usage, FirstTokenTrendUsageSample{StartedAt: from, EndedAt: from.Add(time.Duration(v+1000) * time.Millisecond),
+				FirstTokenMS: &v, Stream: true, AccountID: st.AccountID, Model: "gpt-5", RequestID: id})
+			traces = append(traces, FirstTokenTrendTraceSample{StartedAt: from, AccountID: st.AccountID, ProxyID: st.ProxyID, Model: "gpt-5", RequestID: id})
+		}
+	}
+	return usage, traces
 }
 
 // addUsage adds one streaming usage_logs row that started at start and got

@@ -21,7 +21,7 @@ func liveRules1106Config() ProxyAutoSwitchConfig {
 	}
 }
 
-// rulesWorld：号 65 在代理 91（JP）上；空闲代理 96（JP）。没有 statsFn：判慢只看 usage。
+// rulesWorld：号 65 在代理 91（JP）上；空闲代理 96（JP）。没有 statsFn：判慢只看 addUsage 加的记录。
 func rulesWorld(t *testing.T) *pasWorld {
 	t.Helper()
 	w := newPASWorld()
@@ -40,7 +40,6 @@ func TestProxyAutoSwitchRules1106ConfigValid(t *testing.T) {
 	saved, err := w.service().SaveConfig(context.Background(), liveRules1106Config())
 	require.NoError(t, err)
 	require.Equal(t, liveRules1106Config(), saved)
-	require.Equal(t, "使用记录首字", proxyAutoSwitchMetricLabel(ProxyAutoSwitchMetricUsageFirstToken))
 }
 
 func TestProxyAutoSwitchRules1106OneSampleIsJudged(t *testing.T) {
@@ -52,7 +51,6 @@ func TestProxyAutoSwitchRules1106OneSampleIsJudged(t *testing.T) {
 	require.Equal(t, ProxyAutoSwitchStateSlow, diag.Items[0].State)
 	require.Equal(t, 1, diag.Items[0].Samples)
 	require.Equal(t, int64(12000), *diag.Items[0].P50MS)
-	require.Empty(t, w.statsLog, "usage_first_token never reads the trace latency query")
 	require.Equal(t, []string{"[16] 2026-11-04T11:55:00Z 2026-11-04T12:00:00Z 2026-11-04T11:54:00Z"}, w.usageLog,
 		"configured groups, the 5-minute window, traces from one minute earlier")
 

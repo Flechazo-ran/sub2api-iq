@@ -3,17 +3,21 @@ import { apiClient } from '../client'
 // 首字趋势看板（只读）。字段与后端约定一致，见 first-token-trend-contract.md。
 const base = '/admin/first-token-trend'
 
-// 一个号大概只活 2 小时，只看短范围。粒度由后端定：30m / 1h 每格 1 分钟，2h 每格 2 分钟。
-export type FirstTokenTrendRange = '30m' | '1h' | '2h'
-// usage = 使用记录首字（含上传请求体）；switch = 代理优选首字（first_semantic − request_written）。
+// 粒度由后端定：30m / 1h 每格 1 分钟，2h 每格 2 分钟，6h / 12h 每格 5 分钟。
+export type FirstTokenTrendRange = '30m' | '1h' | '2h' | '6h' | '12h'
+// 带 from/to 查询时后端返回 custom，粒度按时间长度定。
+export type FirstTokenTrendResponseRange = FirstTokenTrendRange | 'custom'
+// 首字口径只剩使用记录首字（含上传请求体）；字段只为兼容旧响应保留，前端不再传。
 export type FirstTokenTrendMetric = 'usage' | 'switch'
 export type FirstTokenTrendDimension = 'account' | 'proxy' | 'model'
 export type FirstTokenTrendEventType = 'proxy' | 'concurrency' | 'status'
 
 export interface FirstTokenTrendQuery {
   group_id: number
-  range: FirstTokenTrendRange
-  metric: FirstTokenTrendMetric
+  // range 和 from/to 二选一：给 from/to 时不要传 range。
+  range?: FirstTokenTrendRange
+  from?: string
+  to?: string
   dimension: FirstTokenTrendDimension
 }
 
@@ -63,9 +67,9 @@ export interface FirstTokenTrendEvent {
 
 export interface FirstTokenTrendData {
   group: { id: number; name: string }
-  range: FirstTokenTrendRange
+  range: FirstTokenTrendResponseRange
   step_seconds: number
-  metric: FirstTokenTrendMetric
+  metric?: FirstTokenTrendMetric
   dimension: FirstTokenTrendDimension
   from: string
   to: string

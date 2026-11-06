@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -90,11 +91,19 @@ func (s *pasHandlerStore) GetAccount(_ context.Context, id int64) (*service.Prox
 	}
 	return nil, nil
 }
-func (s *pasHandlerStore) LatencyStats(context.Context, string, []int64, time.Time, time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
-	return []service.ProxyAutoSwitchLatencyStat{{AccountID: 65, ProxyID: 96, Samples: 40, P50MS: 1300}}, nil
-}
-func (s *pasHandlerStore) FirstTokenUsage(context.Context, []int64, time.Time, time.Time, time.Time) ([]service.FirstTokenTrendUsageSample, []service.FirstTokenTrendTraceSample, error) {
-	return nil, nil, nil
+
+// FirstTokenUsage: account 65 has 40 streaming requests on proxy 96, first token 1300ms each.
+func (s *pasHandlerStore) FirstTokenUsage(_ context.Context, _ []int64, from, _, _ time.Time) ([]service.FirstTokenTrendUsageSample, []service.FirstTokenTrendTraceSample, error) {
+	usage := make([]service.FirstTokenTrendUsageSample, 0, 40)
+	traces := make([]service.FirstTokenTrendTraceSample, 0, 40)
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("req-%d", i)
+		ms := int64(1300)
+		usage = append(usage, service.FirstTokenTrendUsageSample{StartedAt: from, EndedAt: from.Add(2 * time.Second), FirstTokenMS: &ms,
+			Stream: true, AccountID: 65, Model: "gpt-5", RequestID: id})
+		traces = append(traces, service.FirstTokenTrendTraceSample{StartedAt: from, AccountID: 65, ProxyID: 96, Model: "gpt-5", RequestID: id})
+	}
+	return usage, traces, nil
 }
 func (s *pasHandlerStore) InsertEvent(context.Context, *service.ProxyAutoSwitchEvent) error {
 	return errors.New("not used")
@@ -177,7 +186,7 @@ func newPASHandlerRouter(t *testing.T) (*gin.Engine, *pasHandlerStore) {
 				Status: service.ProxyAutoSwitchStatusNoCandidate, Reason: "没有候选", FromProxyID: &from, FromProxyLabel: "越南河内-103.199.9.228",
 				FromRegion: "VN", Candidates: []service.ProxyAutoSwitchCandidate{}},
 			{ID: 12, CreatedAt: now, UpdatedAt: now, AccountID: 65, AccountName: "GPT-速刷号-xxx",
-				Status: service.ProxyAutoSwitchStatusKept, Metric: service.ProxyAutoSwitchMetricFirstToken, Reason: "留下", FromProxyID: &from, FromProxyLabel: "越南河内-103.199.9.228",
+				Status: service.ProxyAutoSwitchStatusKept, Metric: "first_token", Reason: "留下", FromProxyID: &from, FromProxyLabel: "越南河内-103.199.9.228",
 				FromRegion: "VN", ToProxyID: &to, ToProxyLabel: &toLabel, ToRegion: &toRegion,
 				Candidates: []service.ProxyAutoSwitchCandidate{{ProxyID: 96, Label: toLabel, Region: "VN"}}},
 		},
@@ -234,9 +243,9 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Equal(t, []string{"account_cooldown_minutes", "consecutive_checks", "enabled", "group_ids", "max_switches_per_hour",
 		"metric", "min_days_to_expiry", "min_improvement_pct", "min_samples", "observe_minutes", "region_policy", "threshold_ms", "window_minutes"}, sortedKeys(data))
 	require.Equal(t, false, data["enabled"])
+	require.Equal(t, "usage_first_token", data["metric"], "only the usage-log first token is judged")
 	require.Equal(t, float64(10), data["account_cooldown_minutes"])
 	require.Equal(t, float64(10), data["observe_minutes"])
-	require.Equal(t, "response_headers", data["metric"])
 	require.Equal(t, []any{float64(16)}, data["group_ids"])
 
 	data["enabled"] = true
@@ -246,21 +255,19 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Equal(t, true, pasAs[map[string]any](t, body["data"])["enabled"])
 	require.Equal(t, float64(3000), pasAs[map[string]any](t, body["data"])["threshold_ms"])
 
+	// 老页面还会带 metric（任何值，甚至类型不对）：不报错、忽略，返回和存进去的都固定是 usage_first_token。
+	for _, metric := range []any{"first_token", "response_headers", "usage_first_token", "first_visible", 123, nil} {
+		data["metric"] = metric
+		data["threshold_ms"] = 10000
+		code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
+		require.Equal(t, http.StatusOK, code, body)
+		require.Equal(t, "usage_first_token", pasAs[map[string]any](t, body["data"])["metric"], metric)
+	}
 	data["metric"] = "first_token"
-	data["threshold_ms"] = 10000
-	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
-	require.Equal(t, http.StatusOK, code, body)
-	require.Equal(t, "first_token", pasAs[map[string]any](t, body["data"])["metric"])
 	code, body = doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/config", nil)
 	require.Equal(t, http.StatusOK, code)
-	require.Equal(t, "first_token", pasAs[map[string]any](t, body["data"])["metric"])
+	require.Equal(t, "usage_first_token", pasAs[map[string]any](t, body["data"])["metric"])
 	require.Equal(t, float64(10000), pasAs[map[string]any](t, body["data"])["threshold_ms"])
-
-	data["metric"] = "first_visible"
-	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
-	require.Equal(t, http.StatusBadRequest, code)
-	require.Contains(t, body["message"], "metric")
-	data["metric"] = "first_token"
 
 	data["window_minutes"] = 61
 	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
@@ -279,7 +286,7 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	for k, v := range data {
 		live[k] = v
 	}
-	for k, v := range map[string]any{"metric": "usage_first_token", "window_minutes": 5, "min_samples": 1, "threshold_ms": 10000,
+	for k, v := range map[string]any{"window_minutes": 5, "min_samples": 1, "threshold_ms": 10000,
 		"observe_minutes": 0, "account_cooldown_minutes": 0, "max_switches_per_hour": 0, "min_days_to_expiry": 0,
 		"region_policy": "any", "min_improvement_pct": 0} {
 		live[k] = v
@@ -290,7 +297,6 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	for _, k := range []string{"observe_minutes", "account_cooldown_minutes", "max_switches_per_hour", "min_days_to_expiry", "min_improvement_pct"} {
 		require.Equal(t, float64(0), got[k], k)
 	}
-	require.Equal(t, "usage_first_token", got["metric"])
 	require.Equal(t, "any", got["region_policy"])
 	require.Equal(t, float64(1), got["min_samples"])
 
@@ -326,7 +332,7 @@ func TestProxyAutoSwitchHandlerEventsRecentAccounts(t *testing.T) {
 	require.Equal(t, []string{"account_id", "account_name", "after_p50_ms", "after_samples", "before_p50_ms", "before_samples",
 		"candidate_probe_ms", "candidates", "created_at", "current_probe_ms", "from_proxy_id", "from_proxy_label", "from_region",
 		"id", "metric", "reason", "status", "to_proxy_id", "to_proxy_label", "to_region", "updated_at"}, sortedKeys(item))
-	require.Equal(t, "first_token", item["metric"])
+	require.Equal(t, "first_token", item["metric"], "historical metric values are returned as stored")
 	_, err := time.Parse(time.RFC3339, pasAs[string](t, item["created_at"]))
 	require.NoError(t, err)
 
@@ -339,7 +345,6 @@ func TestProxyAutoSwitchHandlerEventsRecentAccounts(t *testing.T) {
 	require.Nil(t, noCandidate["to_proxy_id"])
 	require.Nil(t, noCandidate["to_proxy_label"])
 	require.Nil(t, noCandidate["to_region"])
-	require.Equal(t, "response_headers", noCandidate["metric"], "rows without a metric were judged by response headers")
 
 	code, _ = doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/events?limit=abc", nil)
 	require.Equal(t, http.StatusBadRequest, code)

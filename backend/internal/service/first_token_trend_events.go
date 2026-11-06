@@ -111,7 +111,8 @@ func fttChangeDetail(c fttChange, proxyNames map[int64]string) (typ, from, to, d
 }
 
 // events 只返回 [from, to] 内的变动，按时间先后排；建号后 5 分钟内的设置（导入流程）不算变动。
-// p50_before_ms / p50_after_ms 是该号所选口径在变动前后各 10 分钟的 p50，后 10 分钟还没过完给 null。
+// p50_before_ms / p50_after_ms 是该号在变动前后各 10 分钟的 p50，后 10 分钟还没过完给 null。
+// 自定义时间段只算 [from, to] 内的样本，变动前窗口不早于 from。
 func (tl *firstTokenTrendTimeline) events(w firstTokenTrendWindow, accounts []FirstTokenTrendAccount,
 	proxyNames map[int64]string, series map[int64]*firstTokenTrendSeries) []FirstTokenTrendEvent {
 	byID := map[int64]FirstTokenTrendAccount{}
@@ -120,7 +121,7 @@ func (tl *firstTokenTrendTimeline) events(w firstTokenTrendWindow, accounts []Fi
 	}
 	out := []FirstTokenTrendEvent{}
 	for _, c := range tl.changes {
-		if c.at.Before(w.from) || c.at.After(w.to) {
+		if c.at.Before(w.dataFrom) || c.at.After(w.to) {
 			continue
 		}
 		acc := byID[c.accountID]
@@ -131,7 +132,11 @@ func (tl *firstTokenTrendTimeline) events(w firstTokenTrendWindow, accounts []Fi
 		ev := FirstTokenTrendEvent{At: c.at.In(firstTokenTrendLocation), AccountID: c.accountID, AccountName: acc.Name,
 			Type: typ, From: from, To: to, Detail: detail, Actor: c.actor, Source: c.source}
 		s := series[c.accountID]
-		ev.P50BeforeMS = s.p50Between(c.at.Add(-firstTokenTrendEventWindow), c.at)
+		beforeFrom := c.at.Add(-firstTokenTrendEventWindow)
+		if w.custom && beforeFrom.Before(w.dataFrom) {
+			beforeFrom = w.dataFrom
+		}
+		ev.P50BeforeMS = s.p50Between(beforeFrom, c.at)
 		if end := c.at.Add(firstTokenTrendEventWindow); !end.After(w.to) {
 			ev.P50AfterMS = s.p50Between(c.at, end)
 		}

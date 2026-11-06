@@ -33,7 +33,6 @@ func (s *ProxyAutoSwitchService) ListEvents(ctx context.Context, filter ProxyAut
 		if item.Candidates == nil {
 			item.Candidates = []ProxyAutoSwitchCandidate{}
 		}
-		item.Metric = proxyAutoSwitchEventMetric(&item)
 		out.Items = append(out.Items, item)
 	}
 	return out, nil
@@ -89,7 +88,7 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 			proxyIDs = append(proxyIDs, *a.ProxyID)
 		}
 	}
-	stats, err := s.latencyStats(ctx, cfg.Metric, cfg.GroupIDs, currentProxies(accounts), now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
+	stats, err := s.latencyStats(ctx, cfg.GroupIDs, currentProxies(accounts), now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +104,7 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 	for _, a := range accounts {
 		st := latencyStatFor(stats, a.ID, a.ProxyID)
 		item := ProxyAutoSwitchAccountDiag{AccountID: a.ID, ProxyID: a.ProxyID, Samples: st.Samples,
-			SlowChecks: s.slowChecks(a.ID, a.ProxyID, cfg.Metric)}
+			SlowChecks: s.slowChecks(a.ID, a.ProxyID)}
 		if a.ProxyID != nil {
 			item.Region = regions[*a.ProxyID]
 		}

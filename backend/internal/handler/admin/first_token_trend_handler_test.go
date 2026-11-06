@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -66,7 +67,21 @@ func fttHandlerRouter(repo *fttHandlerRepo) *gin.Engine {
 func TestFirstTokenTrendHandlerRejectsBadParams(t *testing.T) {
 	repo := &fttHandlerRepo{}
 	router := fttHandlerRouter(repo)
-	for _, q := range []string{"range=6h", "range=24h", "range=7d", "metric=p99", "dimension=user", "group_id=abc", "group_id=0", "group_id=-3"} {
+	now := time.Now().Truncate(time.Second)
+	ts := func(d time.Duration) string { return url.QueryEscape(now.Add(d).Format(time.RFC3339)) }
+	queries := []string{
+		"range=13h", "range=24h", "range=7d",
+		"metric=switch", "metric=p99", "dimension=user", "group_id=abc", "group_id=0", "group_id=-3",
+		"from=" + ts(-time.Hour),
+		"to=" + ts(-time.Minute),
+		"from=2026-11-05+15%3A00&to=" + ts(0),
+		"from=" + ts(0) + "&to=" + ts(-time.Hour),
+		"from=" + ts(-9*time.Minute) + "&to=" + ts(0),
+		"from=" + ts(-13*time.Hour) + "&to=" + ts(0),
+		"from=" + ts(-12*time.Hour-2*time.Minute) + "&to=" + ts(-time.Hour),
+		"from=" + ts(-time.Hour) + "&to=" + ts(2*time.Minute),
+	}
+	for _, q := range queries {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/first-token-trend?"+q, nil))
 		require.Equal(t, http.StatusBadRequest, w.Code, q)
@@ -76,6 +91,63 @@ func TestFirstTokenTrendHandlerRejectsBadParams(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/first-token-trend?group_id=5", nil))
 	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+type fttHandlerResponse struct {
+	Code int `json:"code"`
+	Data struct {
+		Group          service.FirstTokenTrendGroup `json:"group"`
+		Range          string                       `json:"range"`
+		StepSeconds    int                          `json:"step_seconds"`
+		Metric         string                       `json:"metric"`
+		Dimension      string                       `json:"dimension"`
+		From           time.Time                    `json:"from"`
+		To             time.Time                    `json:"to"`
+		LimitIsCurrent bool                         `json:"limit_is_current"`
+		Buckets        []map[string]any             `json:"buckets"`
+		Rows           []any                        `json:"rows"`
+		Events         []any                        `json:"events"`
+	} `json:"data"`
+}
+
+func getFTTHandler(t *testing.T, router *gin.Engine, query string) fttHandlerResponse {
+	t.Helper()
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/first-token-trend?"+query, nil))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var resp fttHandlerResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	return resp
+}
+
+func TestFirstTokenTrendHandlerRangesAndCustom(t *testing.T) {
+	router := fttHandlerRouter(&fttHandlerRepo{})
+	for _, tc := range []struct {
+		rng    string
+		step   int
+		bucket int
+	}{
+		{"30m", 60, 30}, {"1h", 60, 60}, {"2h", 120, 60}, {"6h", 300, 72}, {"12h", 300, 144},
+	} {
+		resp := getFTTHandler(t, router, "range="+tc.rng)
+		require.Equal(t, tc.rng, resp.Data.Range, tc.rng)
+		require.Equal(t, tc.step, resp.Data.StepSeconds, tc.rng)
+		require.Len(t, resp.Data.Buckets, tc.bucket, tc.rng)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	from, to := now.Add(-30*time.Minute), now
+	values := url.Values{}
+	values.Set("from", from.Format(time.RFC3339))
+	values.Set("to", to.Format(time.RFC3339))
+	resp := getFTTHandler(t, router, values.Encode())
+	require.Equal(t, "custom", resp.Data.Range)
+	require.Equal(t, 60, resp.Data.StepSeconds)
+	require.Equal(t, "usage", resp.Data.Metric)
+	require.True(t, resp.Data.From.Equal(from), resp.Data.From.String())
+	require.True(t, resp.Data.To.Equal(to), resp.Data.To.String())
+	require.GreaterOrEqual(t, len(resp.Data.Buckets), 30)
+	require.LessOrEqual(t, len(resp.Data.Buckets), 31)
 }
 
 func TestFirstTokenTrendHandlerDefaultsAndGroups(t *testing.T) {

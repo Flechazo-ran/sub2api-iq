@@ -98,6 +98,58 @@ func TestFirstTokenTrendEventP50WindowsNullUntilTenMinutesPass(t *testing.T) {
 	require.True(t, res.Events[0].At.Equal(fttAt(16, 0, 0)))
 }
 
+// 自定义时间段只返回 [from, to] 内的变动；p50_before 不早于 from，from 之前的样本不算。
+func TestFirstTokenTrendCustomRangeEventsAndP50Before(t *testing.T) {
+	now := fttAt(16, 30, 0)
+	acc := fttAccount98()
+	acc.CreatedAt = fttAt(10, 0, 0)
+	// 开始于 from 之前、结束在 from 之后：仓储会按重叠取到，但不算首字样本，也不进 p50_before。
+	before := fttUsage(fttAt(14, 58, 0), 98, 20000, "m")
+	before.EndedAt = fttAt(15, 10, 0)
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{acc},
+		audits: []FirstTokenTrendAuditWrite{
+			// 14:50 是起点（只用来定初始值 75），这样 14:55 才是一次真的 75 → 76 变动。
+			{CreatedAt: fttAt(14, 50, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":75}`},
+			{CreatedAt: fttAt(14, 55, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":76}`},
+			{CreatedAt: fttAt(15, 3, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":77}`},
+			{CreatedAt: fttAt(15, 55, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":99}`},
+		},
+		usage: []FirstTokenTrendUsageSample{
+			before,
+			fttUsage(fttAt(15, 1, 0), 98, 3000, "m"),
+			fttUsage(fttAt(15, 5, 0), 98, 4000, "m"),
+			fttUsage(fttAt(15, 6, 0), 98, 4000, "m"),
+			fttUsage(fttAt(15, 57, 0), 98, 6000, "m"),
+		},
+	}
+	from, to := fttAt(15, 0, 0), fttAt(16, 0, 0)
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{
+		From: from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 2, "14:55 那条在 from 之前，不返回")
+	require.True(t, res.Events[0].At.Equal(fttAt(15, 3, 0)))
+	require.Equal(t, int64(3000), *res.Events[0].P50BeforeMS, "只看 15:01 那条，不用 14:58 的 20000")
+	require.Equal(t, int64(4000), *res.Events[0].P50AfterMS)
+	require.True(t, res.Events[1].At.Equal(fttAt(15, 55, 0)))
+	require.Nil(t, res.Events[1].P50AfterMS, "后 10 分钟到 16:05，超过 to 16:00，15:57 的样本也不算")
+
+	// 对照：range 2h 从 14:30 起，14:55 的 75 → 76 是真实变动，应该返回。
+	rangeRepo := *repo
+	rangeRes, err := newFttService(&rangeRepo, now).Query(context.Background(), FirstTokenTrendQuery{Range: "2h"})
+	require.NoError(t, err)
+	found1455 := false
+	for _, ev := range rangeRes.Events {
+		if ev.At.Equal(fttAt(14, 55, 0)) {
+			found1455 = true
+			require.Equal(t, "75", ev.From)
+			require.Equal(t, "76", ev.To)
+		}
+	}
+	require.True(t, found1455, "range 2h 覆盖 14:30 起，14:55 的 75 → 76 变动要返回")
+}
+
 // 认证失败日志会反复打，只算一次；SetError 同时停调度，号不再计入并发上限合计。
 func TestFirstTokenTrendStatusEventsFromLogsAndFallback(t *testing.T) {
 	now := fttAt(16, 30, 0)

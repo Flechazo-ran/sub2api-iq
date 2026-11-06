@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -71,83 +70,9 @@ func (r *proxyAutoSwitchRepository) GetAccount(ctx context.Context, id int64) (*
 	return &a, nil
 }
 
-// proxyAutoSwitchLatencySQL* count only "egress" attempts: each egress attempt
-// also has a nested "http" child with the same timings, so counting both would
-// double every sample. Attempts are attributed by their own account_id and
-// proxy_id (failover attempts on other accounts/backup egress are excluded).
-// The two queries differ only in the event subtracted from request_written:
-// response_headers, or first_semantic (first token) of the same attempt.
-const proxyAutoSwitchLatencySQLResponseHeaders = `
-SELECT (a->>'account_id')::bigint AS account_id,
-       (a->>'proxy_id')::bigint AS proxy_id,
-       COUNT(*) AS samples,
-       percentile_cont(0.5) WITHIN GROUP (ORDER BY (a->'events'->>'response_headers')::float8 - (a->'events'->>'request_written')::float8) AS p50
-FROM request_connection_traces t
-CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.detail->'attempts') = 'array' THEN t.detail->'attempts' ELSE '[]'::jsonb END) a
-WHERE t.started_at >= $1 AND t.started_at < $2
-  AND a->>'kind' = 'egress'
-  AND jsonb_typeof(a->'events'->'response_headers') = 'number'
-  AND jsonb_typeof(a->'events'->'request_written') = 'number'
-  AND jsonb_typeof(a->'account_id') = 'number'
-  AND jsonb_typeof(a->'proxy_id') = 'number'
-  AND (a->>'account_id')::bigint = ANY($3)
-  AND (a->'events'->>'response_headers')::float8 >= (a->'events'->>'request_written')::float8
-GROUP BY 1, 2`
-
-const proxyAutoSwitchLatencySQLFirstToken = `
-SELECT (a->>'account_id')::bigint AS account_id,
-       (a->>'proxy_id')::bigint AS proxy_id,
-       COUNT(*) AS samples,
-       percentile_cont(0.5) WITHIN GROUP (ORDER BY (a->'events'->>'first_semantic')::float8 - (a->'events'->>'request_written')::float8) AS p50
-FROM request_connection_traces t
-CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.detail->'attempts') = 'array' THEN t.detail->'attempts' ELSE '[]'::jsonb END) a
-WHERE t.started_at >= $1 AND t.started_at < $2
-  AND a->>'kind' = 'egress'
-  AND jsonb_typeof(a->'events'->'first_semantic') = 'number'
-  AND jsonb_typeof(a->'events'->'request_written') = 'number'
-  AND jsonb_typeof(a->'account_id') = 'number'
-  AND jsonb_typeof(a->'proxy_id') = 'number'
-  AND (a->>'account_id')::bigint = ANY($3)
-  AND (a->'events'->>'first_semantic')::float8 >= (a->'events'->>'request_written')::float8
-GROUP BY 1, 2`
-
-// The metric only picks one of the fixed queries; it is never put into SQL.
-var proxyAutoSwitchLatencySQLByMetric = map[string]string{
-	service.ProxyAutoSwitchMetricResponseHeaders: proxyAutoSwitchLatencySQLResponseHeaders,
-	service.ProxyAutoSwitchMetricFirstToken:      proxyAutoSwitchLatencySQLFirstToken,
-}
-
-func (r *proxyAutoSwitchRepository) LatencyStats(ctx context.Context, metric string, accountIDs []int64, from, to time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
-	query, ok := proxyAutoSwitchLatencySQLByMetric[metric]
-	if !ok {
-		return nil, fmt.Errorf("unknown proxy autoswitch metric %q", metric)
-	}
-	if len(accountIDs) == 0 {
-		return nil, nil
-	}
-	rows, err := r.db.QueryContext(ctx, query, from, to, pq.Array(accountIDs))
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	out := make([]service.ProxyAutoSwitchLatencyStat, 0)
-	for rows.Next() {
-		var st service.ProxyAutoSwitchLatencyStat
-		var p50 sql.NullFloat64
-		if err := rows.Scan(&st.AccountID, &st.ProxyID, &st.Samples, &p50); err != nil {
-			return nil, err
-		}
-		if p50.Valid {
-			st.P50MS = int64(math.Round(p50.Float64))
-		}
-		out = append(out, st)
-	}
-	return out, rows.Err()
-}
-
 // FirstTokenUsage reuses the first-token-trend queries unchanged (same SQL,
-// same group filter), so usage_first_token judges on the samples the trend
-// board and the usage page show.
+// same group filter), so the switcher judges on the samples the trend board
+// and the usage page show.
 func (r *proxyAutoSwitchRepository) FirstTokenUsage(ctx context.Context, groupIDs []int64, from, to, traceFrom time.Time) ([]service.FirstTokenTrendUsageSample, []service.FirstTokenTrendTraceSample, error) {
 	trend := &firstTokenTrendRepository{db: r.db}
 	var usage []service.FirstTokenTrendUsageSample
@@ -240,7 +165,7 @@ func (r *proxyAutoSwitchRepository) InsertEvent(ctx context.Context, e *service.
 		e.UpdatedAt = e.CreatedAt
 	}
 	if e.Metric == "" {
-		e.Metric = service.ProxyAutoSwitchMetricResponseHeaders
+		e.Metric = service.ProxyAutoSwitchMetricUsageFirstToken
 	}
 	return r.db.QueryRowContext(ctx, `
 		INSERT INTO proxy_autoswitch_events
