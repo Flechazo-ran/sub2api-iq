@@ -21,9 +21,16 @@
         <div class="fgroup">
           <span id="ftt-range-label" class="flabel">{{ t('firstTokenTrend.filters.range') }}</span>
           <div class="seg" role="radiogroup" aria-labelledby="ftt-range-label">
-            <button v-for="option in ranges" :key="option" type="button" role="radio" :aria-checked="range === option" :class="{ on: range === option }" :data-testid="`ftt-range-${option}`" @click="range = option">{{ t(`firstTokenTrend.range.${option}`) }}</button>
+            <button v-for="option in ranges" :key="option" type="button" role="radio" :aria-checked="!selection && range === option" :class="{ on: !selection && range === option }" :data-testid="`ftt-range-${option}`" @click="setRange(option)">{{ t(`firstTokenTrend.range.${option}`) }}</button>
           </div>
           <span v-if="stepText" class="flabel" data-testid="ftt-step">{{ stepText }}</span>
+          <template v-if="selection">
+            <span class="selection-label" data-testid="ftt-selection-label">{{ t('firstTokenTrend.selection.label', { from: selectionFrom, to: selectionTo }) }}</span>
+            <button type="button" class="clear-selection" data-testid="ftt-clear-selection" @click="cancelSelection">{{ t('firstTokenTrend.selection.clear') }}</button>
+          </template>
+        </div>
+        <div class="fgroup">
+          <button type="button" role="switch" class="refresh-toggle" :aria-checked="capSpikes" data-testid="ftt-cap-spikes" @click="setCapSpikes(!capSpikes)"><span class="toggle-track"><span class="toggle-thumb" /></span>{{ t('firstTokenTrend.capSpikes') }}</button>
         </div>
         <div class="fgroup">
           <span class="flabel">{{ t('firstTokenTrend.filters.series') }}</span>
@@ -60,8 +67,9 @@
             <div class="legend">
               <span v-for="type in eventTypes" :key="type"><i class="dot" :class="eventSwatch[type]" />{{ t(`firstTokenTrend.trend.${type}`) }}</span>
               <span><i class="dash border-red-600 dark:border-red-400" />{{ t('firstTokenTrend.trend.threshold') }}</span>
+              <span v-if="trendSpikes.length" data-testid="ftt-trend-spike">▲ {{ t('firstTokenTrend.trend.spike', { count: trendSpikes.length }) }}</span>
             </div>
-            <div class="chart-box trend-box" data-testid="ftt-trend-chart">
+            <div ref="trendBoxEl" class="chart-box trend-box" data-testid="ftt-trend-chart">
               <Line :data="trendData" :options="trendOptions" :plugins="trendPlugins" />
               <div v-if="hoveredEvent" class="event-tip" :style="{ left: `${hoveredEvent.x}px` }" role="tooltip" data-testid="ftt-event-tip">
                 <strong>{{ clock(hoveredEvent.event.at, true) }} · {{ t(`firstTokenTrend.events.type.${hoveredEvent.event.type}`) }}</strong>
@@ -70,6 +78,14 @@
                 <span v-if="hoveredEvent.event.actor">{{ t('firstTokenTrend.events.by', { actor: hoveredEvent.event.actor }) }}</span>
               </div>
             </div>
+            <div class="overview-head"><span class="sub">{{ t('firstTokenTrend.overview.title') }}</span><span class="sub">{{ t('firstTokenTrend.overview.hint') }}</span></div>
+            <div ref="overviewEl" class="overview" data-testid="ftt-overview" role="img" :aria-label="t('firstTokenTrend.overview.title')" @pointerdown="onOverviewPointerDown" @pointermove="onOverviewPointerMove" @pointerup="onOverviewPointerUp" @pointercancel="onOverviewPointerCancel">
+              <svg class="overview-svg" viewBox="0 0 1000 70" preserveAspectRatio="none" aria-hidden="true">
+                <rect v-if="overviewSelection" :x="overviewSelection.x" y="0" :width="overviewSelection.width" height="70" class="overview-brush" data-testid="ftt-overview-selection" />
+                <polyline v-for="(segment, index) in overviewSegments" :key="index" :points="segment" class="overview-line" :style="{ stroke: palette.p50 }" data-testid="ftt-overview-line" vector-effect="non-scaling-stroke" />
+              </svg>
+            </div>
+            <div class="overview-axis" aria-hidden="true"><span v-for="tick in overviewTicks" :key="tick.ms" :style="{ left: `${tick.pct}%`, transform: tick.pct < 4 ? 'none' : tick.pct > 96 ? 'translateX(-100%)' : 'translateX(-50%)' }">{{ tick.label }}</span></div>
           </section>
 
           <section class="workspace-panel card" aria-labelledby="ftt-conc-heading">
@@ -77,6 +93,7 @@
             <div class="legend">
               <span><i class="line bg-sky-500 dark:bg-sky-400" />{{ t('firstTokenTrend.concurrency.inflight') }}</span>
               <span><i class="dash border-violet-500 dark:border-violet-400" />{{ t('firstTokenTrend.concurrency.limit') }}</span>
+              <span v-if="concSpikes.length" data-testid="ftt-conc-spike">▲ {{ t('firstTokenTrend.trend.spike', { count: concSpikes.length }) }}</span>
               <span v-if="data.limit_is_current" class="limit-note" data-testid="ftt-limit-current">{{ t('firstTokenTrend.concurrency.limitIsCurrent') }}</span>
             </div>
             <div class="chart-box conc-box" data-testid="ftt-conc-chart"><Line :data="concData" :options="concOptions" :plugins="concPlugins" /></div>
@@ -86,8 +103,9 @@
             <header class="card-h"><h3 id="ftt-split-heading">{{ t('firstTokenTrend.split.title') }}</h3><span class="sub">{{ t('firstTokenTrend.split.sub') }}</span></header>
             <div class="legend">
               <span v-for="seg in splitSegments" :key="seg.key"><i :class="seg.swatch" />{{ t(`firstTokenTrend.split.${seg.key}`) }}</span>
+              <span v-if="splitSpikes.length" data-testid="ftt-split-spike">▲ {{ t('firstTokenTrend.trend.spike', { count: splitSpikes.length }) }}</span>
             </div>
-            <div class="chart-box split-box" data-testid="ftt-split-chart"><Bar :data="splitData" :options="splitOptions" /></div>
+            <div class="chart-box split-box" data-testid="ftt-split-chart"><Bar :data="splitData" :options="splitOptions" :plugins="splitPlugins" /></div>
           </section>
         </template>
         <section v-if="!isEmpty || sortedEvents.length" class="workspace-panel card" aria-labelledby="ftt-events-heading">
@@ -157,7 +175,9 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import RoutingNav from '@/components/admin/operations/RoutingNav.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAutoRefresh } from '@/composables/useAutoRefresh'
-import { firstTokenTrendAPI, type FirstTokenTrendBucket, type FirstTokenTrendData, type FirstTokenTrendDimension, type FirstTokenTrendEvent, type FirstTokenTrendEventType, type FirstTokenTrendGroup, type FirstTokenTrendMetric, type FirstTokenTrendRange, type FirstTokenTrendRow } from '@/api/admin/firstTokenTrend'
+import { tickEveryMinutes } from '@/components/admin/firstTokenTrend/axis'
+import { computeAxisCap, pointsAbove } from '@/components/admin/firstTokenTrend/spike'
+import { firstTokenTrendAPI, type FirstTokenTrendBucket, type FirstTokenTrendData, type FirstTokenTrendDimension, type FirstTokenTrendEvent, type FirstTokenTrendEventType, type FirstTokenTrendGroup, type FirstTokenTrendQuery, type FirstTokenTrendRange, type FirstTokenTrendRow } from '@/api/admin/firstTokenTrend'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, BarElement, Tooltip, Filler)
@@ -167,7 +187,7 @@ const { t, te } = useI18n()
 type SeriesKey = 'avg' | 'p50' | 'p80'
 const DEFAULT_GROUP_ID = 16
 const SLOW_MS = 10000
-const ranges: FirstTokenTrendRange[] = ['30m', '1h', '2h']
+const ranges: FirstTokenTrendRange[] = ['30m', '1h', '2h', '6h', '12h']
 const dimensions: FirstTokenTrendDimension[] = ['account', 'proxy', 'model']
 const seriesKeys: SeriesKey[] = ['avg', 'p50', 'p80']
 const eventTypes: FirstTokenTrendEventType[] = ['proxy', 'concurrency', 'status']
@@ -190,8 +210,6 @@ const palette = computed(() => isDark.value
 // ---- 筛选 ----
 const groupId = ref(DEFAULT_GROUP_ID)
 const range = ref<FirstTokenTrendRange>('2h')
-// 只看使用记录首字（和使用记录页、代理优选判慢同一个口径），11-06 去掉了口径切换。
-const metric: FirstTokenTrendMetric = 'usage'
 const dimension = ref<FirstTokenTrendDimension>('account')
 const shown = reactive<Record<SeriesKey, boolean>>({ avg: true, p50: true, p80: true })
 function toggleSeries(key: SeriesKey) {
@@ -215,14 +233,69 @@ async function loadGroups() {
 // ---- 数据 ----
 const data = ref<FirstTokenTrendData | null>(null)
 const loading = ref(false), error = ref(''), loadedAt = ref('')
+// 总览条保留框选前那次整段请求的 buckets，框选后不覆盖。
+const overviewBuckets = ref<FirstTokenTrendBucket[]>([])
+const overviewFrom = ref(0), overviewTo = ref(0), overviewStepMs = ref(60000)
+const overviewEl = ref<HTMLElement | null>(null)
+const trendBoxEl = ref<HTMLElement | null>(null)
+let resizeObserver: ResizeObserver | null = null
+const MIN_SELECTION_MS = 10 * 60 * 1000
+interface TimeSelection { from: number; to: number }
+const selection = ref<TimeSelection | null>(null)
+const previewSelection = ref<TimeSelection | null>(null)
+let dragStart: number | null = null
+const capSpikes = ref(readCapSpikes())
+
+function readCapSpikes() {
+  try { return localStorage.getItem('ftt.capSpikes') !== 'false' } catch { return true }
+}
+function setCapSpikes(value: boolean) {
+  capSpikes.value = value
+  try { localStorage.setItem('ftt.capSpikes', String(value)) } catch { /* ignore */ }
+}
+function clearSelectionState() {
+  selection.value = null
+  previewSelection.value = null
+  dragStart = null
+}
+function setRange(next: FirstTokenTrendRange) {
+  const same = range.value === next
+  const hadSelection = !!selection.value
+  clearSelectionState()
+  range.value = next
+  if (same && !hadSelection) return
+  manualRefresh()
+}
+function cancelSelection() {
+  if (!selection.value && !previewSelection.value) return
+  clearSelectionState()
+  autoRefresh.resetCountdown()
+  void load()
+}
+
 let seq = 0, disposed = false
 async function load() {
   const current = ++seq
+  const selected = selection.value ? { ...selection.value } : null
+  const query: FirstTokenTrendQuery = { group_id: groupId.value, dimension: dimension.value }
+  if (selected) {
+    query.from = new Date(selected.from).toISOString()
+    query.to = new Date(selected.to).toISOString()
+  } else {
+    query.range = range.value
+  }
   loading.value = true; error.value = ''
   try {
-    const result = await firstTokenTrendAPI.getTrend({ group_id: groupId.value, range: range.value, metric, dimension: dimension.value })
+    const result = await firstTokenTrendAPI.getTrend(query)
     if (current !== seq || disposed) return
     data.value = result
+    // 只有整段范围的请求才更新总览；框选后仍显示框选前的整段。
+    if (!selected && !selection.value) {
+      overviewBuckets.value = result.buckets
+      overviewFrom.value = toDate(result.from)?.getTime() ?? 0
+      overviewTo.value = toDate(result.to)?.getTime() ?? 0
+      overviewStepMs.value = (result.step_seconds || 60) * 1000
+    }
     loadedAt.value = clock(new Date(), true)
     hoveredEvent.value = null
   } catch (err) {
@@ -231,13 +304,14 @@ async function load() {
     if (current === seq) loading.value = false
   }
 }
-const autoRefresh = useAutoRefresh({ storageKey: 'admin.firstTokenTrend.autoRefresh', intervals: [60], defaultInterval: 60, defaultEnabled: true, onRefresh: load, shouldPause: () => document.hidden || loading.value })
+const autoRefresh = useAutoRefresh({ storageKey: 'admin.firstTokenTrend.autoRefresh', intervals: [60], defaultInterval: 60, defaultEnabled: true, onRefresh: load, shouldPause: () => document.hidden || loading.value || !!selection.value })
 function manualRefresh() { autoRefresh.resetCountdown(); void load() }
-watch([groupId, range, dimension], manualRefresh)
+watch(groupId, () => { clearSelectionState(); manualRefresh() })
+watch(dimension, manualRefresh)
 
 const buckets = computed<FirstTokenTrendBucket[]>(() => data.value?.buckets ?? [])
 const stepMs = computed(() => (data.value?.step_seconds ?? 300) * 1000)
-const isEmpty = computed(() => !!data.value && !buckets.value.some(bucket => bucket.samples > 0) && !(data.value.rows ?? []).some(row => row.samples > 0))
+const isEmpty = computed(() => !selection.value && !!data.value && !buckets.value.some(bucket => bucket.samples > 0) && !(data.value.rows ?? []).some(row => row.samples > 0))
 const stepText = computed(() => {
   const seconds = data.value?.step_seconds
   if (!seconds) return ''
@@ -263,11 +337,22 @@ function clock(value: string | Date, withSeconds = false) {
   const p = bjParts(date)
   return withSeconds ? `${p.hour}:${p.minute}:${p.second}` : `${p.hour}:${p.minute}`
 }
-// x 轴大约每 10 分钟标一个（2 小时 60 格），30 分钟 / 1 小时每 5 分钟标一个；只标落在整格上的时间。
-const tickEveryMinutes = computed(() => (range.value === '2h' ? 10 : 5))
-function showTick(ts: string) {
+// x 轴：12 小时每小时标一个，6 小时每 30 分钟，2 小时每 10 分钟，更短每 5 分钟。
+// 框选后按实际时间跨度套同样的规则；窄屏按图表宽度把间隔加大，避免标签叠在一起。
+const chartWidth = ref(0)
+const tickSpanMinutes = computed(() => {
+  const from = toDate(data.value?.from)?.getTime()
+  const to = toDate(data.value?.to)?.getTime()
+  const fallback = range.value === '30m' ? 30 : range.value === '1h' ? 60 : range.value === '2h' ? 120 : range.value === '6h' ? 360 : 720
+  return from != null && to != null && to > from ? (to - from) / 60000 : fallback
+})
+const tickStep = computed(() => tickEveryMinutes(tickSpanMinutes.value, chartWidth.value))
+function showTick(ts: string, every = tickStep.value) {
   const date = toDate(ts)
-  return !!date && Number(bjParts(date).minute) % tickEveryMinutes.value === 0
+  if (!date) return false
+  // 用北京时间当天的分钟数判断，间隔为 120 分钟时不会变成每小时都标。
+  const parts = bjParts(date)
+  return (Number(parts.hour) * 60 + Number(parts.minute)) % every === 0
 }
 function bucketSpan(index: number) {
   const bucket = buckets.value[index]
@@ -276,6 +361,117 @@ function bucketSpan(index: number) {
   const end = new Date(start.getTime() + stepMs.value)
   return `${clock(start)}–${clock(end)}`
 }
+
+// ---- 总览条框选 ----
+const selectionFrom = computed(() => (selection.value ? clock(new Date(selection.value.from)) : ''))
+const selectionTo = computed(() => (selection.value ? clock(new Date(selection.value.to)) : ''))
+function clampOverviewTime(ms: number) {
+  const from = overviewFrom.value, to = overviewTo.value
+  if (!from || !to || to <= from) return null
+  return Math.min(to, Math.max(from, ms))
+}
+function timeAtClientX(clientX: number) {
+  const el = overviewEl.value
+  const from = overviewFrom.value, to = overviewTo.value
+  if (!el || !from || !to || to <= from) return null
+  const rect = el.getBoundingClientRect()
+  if (!rect.width) return null
+  const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+  return from + fraction * (to - from)
+}
+function snapOverviewTime(ms: number) {
+  const step = overviewStepMs.value || 60000
+  return overviewFrom.value + Math.round((ms - overviewFrom.value) / step) * step
+}
+function makeSelection(a: number, b: number): TimeSelection | null {
+  const rawFrom = Math.round(Math.min(a, b) / 1000) * 1000
+  const rawTo = Math.round(Math.max(a, b) / 1000) * 1000
+  if (rawTo - rawFrom < MIN_SELECTION_MS) return null
+  let from = clampOverviewTime(snapOverviewTime(rawFrom))
+  let to = clampOverviewTime(snapOverviewTime(rawTo))
+  // 按桶取整可能把刚好 10 分钟削短，这时保留用户实际框到的边界。
+  if (from == null || to == null || to - from < MIN_SELECTION_MS) {
+    from = clampOverviewTime(rawFrom)
+    to = clampOverviewTime(rawTo)
+  }
+  if (from == null || to == null || to - from < MIN_SELECTION_MS) return null
+  return { from, to }
+}
+function onOverviewPointerDown(event: PointerEvent) {
+  if (event.button != null && event.button !== 0) return
+  const time = timeAtClientX(event.clientX)
+  if (time == null) return
+  dragStart = time
+  previewSelection.value = null
+  try { (event.currentTarget as Element | null)?.setPointerCapture?.(event.pointerId) } catch { /* ignore */ }
+  event.preventDefault()
+}
+function onOverviewPointerMove(event: PointerEvent) {
+  if (dragStart == null) return
+  const time = clampOverviewTime(timeAtClientX(event.clientX) ?? dragStart)
+  if (time == null) return
+  previewSelection.value = makeSelection(dragStart, time)
+}
+function onOverviewPointerUp(event: PointerEvent) {
+  if (dragStart == null) return
+  const start = dragStart
+  const end = clampOverviewTime(timeAtClientX(event.clientX) ?? start) ?? start
+  dragStart = null
+  try { (event.currentTarget as Element | null)?.releasePointerCapture?.(event.pointerId) } catch { /* ignore */ }
+  const next = makeSelection(start, end)
+  previewSelection.value = null
+  if (!next) return
+  selection.value = next
+  autoRefresh.resetCountdown()
+  void load()
+}
+function onOverviewPointerCancel() {
+  dragStart = null
+  previewSelection.value = null
+}
+const overviewSelection = computed(() => {
+  const selected = previewSelection.value ?? selection.value
+  const from = overviewFrom.value, to = overviewTo.value
+  if (!selected || !from || !to || to <= from) return null
+  const x1 = Math.min(1000, Math.max(0, ((selected.from - from) / (to - from)) * 1000))
+  const x2 = Math.min(1000, Math.max(0, ((selected.to - from) / (to - from)) * 1000))
+  return { x: Math.min(x1, x2), width: Math.abs(x2 - x1) }
+})
+const overviewSegments = computed(() => {
+  const from = overviewFrom.value, to = overviewTo.value
+  if (!overviewBuckets.value.length || !from || !to || to <= from) return []
+  const values = overviewBuckets.value.map(bucket => toSeconds(bucket.p50_ms)).filter(isNum)
+  if (!values.length) return []
+  // 和设计稿一样压到 40 秒，免得一根尖峰把总览条压平。
+  const scaleMax = Math.max(10, ...values.map(value => Math.min(value, 40)))
+  const x = (ts: number) => Math.min(1000, Math.max(0, ((ts - from) / (to - from)) * 1000))
+  const y = (value: number) => 6 + (54 - 6) * (1 - Math.min(value, 40) / scaleMax)
+  const segments: string[] = []
+  let current: string[] = []
+  for (const bucket of overviewBuckets.value) {
+    const ts = toDate(bucket.ts)?.getTime()
+    const value = toSeconds(bucket.p50_ms)
+    if (ts == null || !isNum(value)) {
+      if (current.length > 1) segments.push(current.join(' '))
+      current = []
+      continue
+    }
+    current.push(`${x(ts).toFixed(1)},${y(value).toFixed(1)}`)
+  }
+  if (current.length > 1) segments.push(current.join(' '))
+  return segments
+})
+const overviewTicks = computed(() => {
+  const from = overviewFrom.value, to = overviewTo.value
+  if (!from || !to || to <= from) return []
+  const span = to - from
+  const steps = [5, 10, 30, 60, 120, 180, 240, 360].map(minutes => minutes * 60000)
+  const step = steps.find(candidate => span / candidate <= 8) ?? 3600000
+  const first = Math.ceil(from / step) * step
+  const ticks: { ms: number; pct: number; label: string }[] = []
+  for (let ms = first; ms <= to; ms += step) ticks.push({ ms, pct: ((ms - from) / span) * 100, label: clock(new Date(ms)) })
+  return ticks
+})
 const isNum = (value: number | null | undefined): value is number => typeof value === 'number' && Number.isFinite(value)
 function sec(ms: number | null | undefined) { return isNum(ms) ? `${(ms / 1000).toFixed(1)}s` : '—' }
 function pct(value: number | null | undefined) { return isNum(value) ? `${Math.round(value)}%` : '—' }
@@ -422,7 +618,15 @@ function endLabelPlugin(id: string, format: (value: number) => string): Plugin<'
         const values = dataset.data as (number | null)[]
         for (let i = values.length - 1; i >= 0; i--) {
           const value = values[i]
-          if (isNum(value)) { labels.push({ y: yScale.getPixelForValue(value), text: format(value), color: String(dataset.borderColor) }); break }
+          if (isNum(value)) {
+            // 末值超出纵轴上限时坐标会是负数，把标签压回图区顶部，文字仍写实际值。
+            let y = yScale.getPixelForValue(value)
+            if (isNum(yScale.max) && value > yScale.max) y = chartArea.top + 6
+            if (!Number.isFinite(y)) y = chartArea.top + 6
+            y = Math.min(chartArea.bottom, Math.max(chartArea.top, y))
+            labels.push({ y, text: format(value), color: String(dataset.borderColor) })
+            break
+          }
         }
       })
       labels.sort((a, b) => a.y - b.y)
@@ -436,12 +640,106 @@ function endLabelPlugin(id: string, format: (value: number) => string): Plugin<'
     },
   }
 }
-const trendPlugins = [eventPlugin('fttTrendEvents', true), endLabelPlugin('fttTrendEnds', value => `${value.toFixed(1)}s`)]
-const concPlugins = [eventPlugin('fttConcEvents', false), endLabelPlugin('fttConcEnds', value => t('firstTokenTrend.kpi.countUnit', { n: value.toFixed(1) }))]
+interface SpikeMarker { index: number; value: number; color: string; label?: string }
+// 超出纵轴上限的点画 ▲：折线图默认画在图顶内侧；拆段柱状图把 ▲ 画在图区上方的留白里，
+// 尖朝上、底边贴着图区顶边，避免被同色的高柱子盖住。
+function spikePlugin<TType extends 'line' | 'bar'>(id: string, markers: () => SpikeMarker[], placement: 'inside' | 'above' = 'inside'): Plugin<TType> {
+  return {
+    id,
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart
+      const yScale = chart.scales.y
+      if (!chartArea || !yScale || !isNum(yScale.max)) return
+      const list = markers().filter(marker => marker.value > yScale.max)
+      if (!list.length) return
+      const xScale = chart.scales.x
+      const above = placement === 'above'
+      const baseY = above ? chartArea.top - 1 : chartArea.top + 8
+      const tipY = above ? chartArea.top - 9 : chartArea.top + 1
+      ctx.save()
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'
+      for (const marker of list) {
+        const x = xScale.getPixelForValue(marker.index)
+        if (!Number.isFinite(x)) continue
+        ctx.fillStyle = marker.color
+        ctx.beginPath()
+        ctx.moveTo(x - 4, baseY)
+        ctx.lineTo(x + 4, baseY)
+        ctx.lineTo(x, tipY)
+        ctx.closePath()
+        ctx.fill()
+        if (marker.label) {
+          ctx.textAlign = 'left'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(marker.label, x + 6, above ? chartArea.top - 5 : chartArea.top + 7)
+        }
+      }
+      ctx.restore()
+    },
+  }
+}
 
-const labels = computed(() => buckets.value.map(bucket => clock(bucket.ts)))
 const seriesField: Record<SeriesKey, 'avg_ms' | 'p50_ms' | 'p80_ms'> = { avg: 'avg_ms', p50: 'p50_ms', p80: 'p80_ms' }
 const thresholdLabel = computed(() => t('firstTokenTrend.trend.threshold'))
+
+// 纵轴上限：当前显示的线里 95% 位置的值 × 1.3；关掉开关就按最大值。
+const trendSeriesValues = computed(() => seriesKeys
+  .filter(key => shown[key])
+  .flatMap(key => buckets.value.map(bucket => toSeconds(bucket[seriesField[key]]))))
+const trendCap = computed(() => computeAxisCap(trendSeriesValues.value, 'seconds', capSpikes.value))
+const trendSpikes = computed<SpikeMarker[]>(() => {
+  if (!trendCap.value.capped) return []
+  return seriesKeys.filter(key => shown[key]).flatMap(key => {
+    const values = buckets.value.map(bucket => toSeconds(bucket[seriesField[key]]))
+    // 这条线最后一个有数的点：末值标签已经写在图右侧，▲ 旁不再重复写值。
+    let lastIndex = -1
+    for (let i = values.length - 1; i >= 0; i--) if (isNum(values[i])) { lastIndex = i; break }
+    return pointsAbove(values, trendCap.value.max).map(point => ({
+      ...point,
+      color: palette.value[key],
+      label: key === 'p80' && point.index !== lastIndex ? `${point.value.toFixed(1)}s` : undefined,
+    }))
+  })
+})
+
+const concValues = computed(() => buckets.value.flatMap(bucket => [
+  isNum(bucket.inflight_avg) ? bucket.inflight_avg : null,
+  isNum(bucket.concurrency_limit_sum) ? bucket.concurrency_limit_sum : null,
+]))
+const concCap = computed(() => computeAxisCap(concValues.value, 'count', capSpikes.value))
+const concSpikes = computed<SpikeMarker[]>(() => {
+  if (!concCap.value.capped) return []
+  const series = [
+    { values: buckets.value.map(bucket => (isNum(bucket.inflight_avg) ? bucket.inflight_avg : null)), color: palette.value.inflight },
+    { values: buckets.value.map(bucket => (isNum(bucket.concurrency_limit_sum) ? bucket.concurrency_limit_sum : null)), color: palette.value.concurrency },
+  ]
+  return series.flatMap(item => pointsAbove(item.values, concCap.value.max).map(point => ({ ...point, color: item.color })))
+})
+
+// 拆段是堆叠柱，按每格三段之和定纵轴，避免正常柱被压掉一截。
+const splitValues = computed(() => buckets.value.map(bucket => {
+  const values = splitSegments.map(seg => toSeconds(bucket[seg.field])).filter(isNum)
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null
+}))
+const splitCap = computed(() => computeAxisCap(splitValues.value, 'seconds', capSpikes.value))
+const splitSpikes = computed<SpikeMarker[]>(() => {
+  if (!splitCap.value.capped) return []
+  return buckets.value.flatMap((bucket, index) => {
+    const parts = splitSegments
+      .map(seg => ({ value: toSeconds(bucket[seg.field]), color: palette.value[seg.key] }))
+      .filter((part): part is { value: number; color: string } => isNum(part.value))
+    if (!parts.length) return []
+    const total = parts.reduce((sum, part) => sum + part.value, 0)
+    if (total <= splitCap.value.max) return []
+    const top = parts.reduce((best, part) => (part.value > best.value ? part : best))
+    return [{ index, value: total, color: top.color }]
+  })
+})
+
+const labels = computed(() => buckets.value.map(bucket => clock(bucket.ts)))
+const trendPlugins = [eventPlugin('fttTrendEvents', true), endLabelPlugin('fttTrendEnds', value => `${value.toFixed(1)}s`), spikePlugin<'line'>('fttTrendSpikes', () => trendSpikes.value)]
+const concPlugins = [eventPlugin('fttConcEvents', false), endLabelPlugin('fttConcEnds', value => t('firstTokenTrend.kpi.countUnit', { n: value.toFixed(1) })), spikePlugin<'line'>('fttConcSpikes', () => concSpikes.value)]
+const splitPlugins = [spikePlugin<'bar'>('fttSplitSpikes', () => splitSpikes.value, 'above')]
 
 const trendData = computed<ChartData<'line', (number | null)[], string>>(() => {
   const c = palette.value
@@ -465,6 +763,8 @@ const trendData = computed<ChartData<'line', (number | null)[], string>>(() => {
 
 function baseOptions(yUnit: string, topPadding: number, rightPadding = 8) {
   const c = palette.value
+  // 求值时读一下刻度间隔，窄屏宽度变化后重建 options，让三张图跟着重画。
+  const tickMinutes = tickStep.value
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -479,7 +779,7 @@ function baseOptions(yUnit: string, topPadding: number, rightPadding = 8) {
       },
     },
     scales: {
-      x: { type: 'category' as const, offset: true, grid: { display: false }, ticks: { color: c.text, font: { size: 10 }, autoSkip: false, maxRotation: 0, callback: (_value: string | number, index: number) => (showTick(buckets.value[index]?.ts ?? '') ? labels.value[index] : '') } },
+      x: { type: 'category' as const, offset: true, grid: { display: false }, ticks: { color: c.text, font: { size: 10 }, autoSkip: false, maxRotation: 0, callback: (_value: string | number, index: number) => (showTick(buckets.value[index]?.ts ?? '', tickMinutes) ? labels.value[index] : '') } },
       y: { type: 'linear' as const, beginAtZero: true, grid: { color: c.grid }, ticks: { color: c.text, font: { size: 10 }, callback: (value: string | number) => `${value}${yUnit}` } },
     },
   }
@@ -497,7 +797,7 @@ const trendOptions = computed<ChartOptions<'line'>>(() => {
         callbacks: { ...base.plugins.tooltip.callbacks, label: (item: TooltipItem<'line'>) => `${item.dataset.label}: ${isNum(item.parsed.y) ? `${item.parsed.y.toFixed(1)}s` : '—'}` },
       },
     },
-    scales: { ...base.scales, y: { ...base.scales.y, suggestedMax: 12 } },
+    scales: { ...base.scales, y: { ...base.scales.y, max: trendCap.value.max } },
   }
 })
 
@@ -517,6 +817,7 @@ const concOptions = computed<ChartOptions<'line'>>(() => {
   return {
     ...base,
     plugins: { ...base.plugins, tooltip: { ...base.plugins.tooltip, callbacks: { ...base.plugins.tooltip.callbacks, label: (item: TooltipItem<'line'>) => `${item.dataset.label}: ${isNum(item.parsed.y) ? (item.datasetIndex === 0 ? item.parsed.y.toFixed(1) : String(item.parsed.y)) : '—'}` } } },
+    scales: { ...base.scales, y: { ...base.scales.y, max: concCap.value.max } },
   }
 })
 
@@ -528,11 +829,12 @@ const splitData = computed<ChartData<'bar', (number | null)[], string>>(() => {
   }
 })
 const splitOptions = computed<ChartOptions<'bar'>>(() => {
-  const base = baseOptions('s', 6)
+  // 上边距 12 给图区上方的 ▲ 留位置。
+  const base = baseOptions('s', 12)
   return {
     ...base,
     plugins: { ...base.plugins, tooltip: { ...base.plugins.tooltip, callbacks: { ...base.plugins.tooltip.callbacks, label: (item: TooltipItem<'bar'>) => `${item.dataset.label}: ${isNum(item.parsed.y) ? `${item.parsed.y.toFixed(1)}s` : '—'}` } } },
-    scales: { x: { ...base.scales.x, stacked: true }, y: { ...base.scales.y, stacked: true } },
+    scales: { x: { ...base.scales.x, stacked: true }, y: { ...base.scales.y, stacked: true, max: splitCap.value.max } },
   }
 })
 
@@ -565,14 +867,29 @@ function buildSpark(values: (number | null)[]): Spark | null {
 }
 const sparks = computed<Record<string, Spark | null>>(() => Object.fromEntries((data.value?.rows ?? []).map(row => [row.key, buildSpark(row.spark ?? [])])))
 
+// 三张图共用首字趋势图的宽度来算刻度间隔；图是数据到了才渲染的，所以监听 ref 出现。
+watch(trendBoxEl, el => {
+  if (!resizeObserver) return
+  resizeObserver.disconnect()
+  if (el) resizeObserver.observe(el)
+}, { flush: 'post' })
+
 onMounted(() => {
   themeObserver = new MutationObserver(() => { isDark.value = document.documentElement.classList.contains('dark') })
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+  // jsdom 里没有 ResizeObserver，跳过，保持原有刻度密度。
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width
+      if (typeof width === 'number' && width > 0) chartWidth.value = width
+    })
+    if (trendBoxEl.value) resizeObserver.observe(trendBoxEl.value)
+  }
   void loadGroups()
   void load()
   if (autoRefresh.enabled.value) { autoRefresh.resetCountdown(); autoRefresh.start() }
 })
-onBeforeUnmount(() => { disposed = true; themeObserver?.disconnect() })
+onBeforeUnmount(() => { disposed = true; themeObserver?.disconnect(); resizeObserver?.disconnect() })
 </script>
 
 <style scoped>
@@ -634,6 +951,17 @@ onBeforeUnmount(() => { disposed = true; themeObserver?.disconnect() })
 .legend i.dash { @apply h-0 w-3.5 rounded-none border-t-2 border-dashed bg-transparent; }
 .limit-note { @apply text-amber-600 dark:text-amber-400; }
 .chart-box { @apply relative w-full min-w-0; }
+.selection-label { @apply rounded-full bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 dark:bg-primary-950/40 dark:text-primary-300; }
+.clear-selection { @apply text-xs text-primary-600 underline dark:text-primary-400; }
+.overview-head { @apply flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1; }
+.overview-head .sub { @apply text-xs text-gray-500 dark:text-gray-400; }
+.overview { @apply relative h-[70px] w-full cursor-crosshair select-none; touch-action: none; }
+.overview-svg { @apply block h-full w-full; }
+.overview-line { fill: none; stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; }
+.overview-brush { fill: rgba(13, 148, 136, 0.16); stroke: #0d9488; stroke-width: 1; }
+:global(.dark) .overview-brush { fill: rgba(45, 212, 191, 0.16); stroke: #2dd4bf; }
+.overview-axis { @apply relative mt-1 h-4 text-[10px] tabular-nums text-gray-400 dark:text-gray-500; }
+.overview-axis span { @apply absolute top-0 whitespace-nowrap; }
 .trend-box { height: 320px; }
 .conc-box { height: 170px; }
 .split-box { height: 210px; }

@@ -21,6 +21,8 @@ export default {
     '30m': '30 min',
     '1h': '1 hour',
     '2h': '2 hours',
+    '6h': '6 hours',
+    '12h': '12 hours',
   },
   step: {
     minutes: '{n} min per bucket',
@@ -28,6 +30,15 @@ export default {
     seconds: '{n} s per bucket',
   },
   metricHint: 'Same as the first-token value on the usage page: measured from when the request enters the gateway, including request-body upload time.',
+  capSpikes: 'Cap spikes',
+  selection: {
+    label: 'Selected {from}–{to}',
+    clear: 'Clear selection',
+  },
+  overview: {
+    title: 'Overview',
+    hint: 'p50 for the whole range; drag to select a period and the charts above zoom to it',
+  },
   series: {
     avg: 'Average',
     p50: 'p50',
@@ -50,7 +61,7 @@ export default {
     concurrency: 'Concurrency-limit change',
     status: 'Account-status change',
     threshold: '10 s slow line',
-    thresholdShort: '10 s slow line',
+    spike: '{count} point(s) above the axis',
   },
   concurrency: {
     title: 'Requests in flight',
