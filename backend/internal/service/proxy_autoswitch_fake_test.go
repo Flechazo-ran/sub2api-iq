@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -17,45 +18,33 @@ type pasWorld struct {
 	accounts map[int64]*ProxyAutoSwitchAccount
 	groupsOf map[int64][]int64
 	proxies  map[int64]*Proxy
-	external map[int64]int64 // proxy id -> accounts outside the test groups using it
-	// statsFn, when set, adds usage rows (and matching traces) to every
-	// FirstTokenUsage call: stat.Samples rows of stat.P50MS each on stat.ProxyID,
-	// so the switcher sees exactly these samples and p50.
-	statsFn   func(accountIDs []int64, from, to time.Time) []ProxyAutoSwitchLatencyStat
-	usage     []FirstTokenTrendUsageSample
-	traces    []FirstTokenTrendTraceSample
-	usageLog  []string // "groups from to traceFrom" of every FirstTokenUsage call
+	usage    []FirstTokenTrendUsageSample
+	traces   []FirstTokenTrendTraceSample
+
 	events    []ProxyAutoSwitchEvent
 	nextEvent int64
-	states    map[int64]ProxyAutoSwitchAccountState
-	audit     []ProxyAutoSwitchAuditWrite
 	updates   [][2]int64
 	updateErr error
-	probeMS   map[int64][]any // proxy id -> sequence of int64 ms or error, last value repeats
-	probeLog  []int64
-	settings  map[string]string
-	groups    map[int64]*Group
-	latency   map[int64]*ProxyLatencyInfo
-	exitCode  map[int64]string
-	exitCalls []int64
+
+	probeMS  map[int64][]any // proxy id -> sequence of int64 ms or error, last value repeats
+	settings map[string]string
+	groups   map[int64]*Group
+	latency  map[int64]*ProxyLatencyInfo
 }
 
 func newPASWorld() *pasWorld {
 	return &pasWorld{
-		now:      time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC),
+		now:      time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC),
 		accounts: map[int64]*ProxyAutoSwitchAccount{},
 		groupsOf: map[int64][]int64{},
 		proxies:  map[int64]*Proxy{},
-		external: map[int64]int64{},
-		states:   map[int64]ProxyAutoSwitchAccountState{},
 		probeMS:  map[int64][]any{},
 		settings: map[string]string{},
 		groups: map[int64]*Group{
 			16: {ID: 16, Name: "GPT-速刷-AUTO", Platform: PlatformOpenAI},
 			9:  {ID: 9, Name: "Claude", Platform: PlatformAnthropic},
 		},
-		latency:  map[int64]*ProxyLatencyInfo{},
-		exitCode: map[int64]string{},
+		latency: map[int64]*ProxyLatencyInfo{},
 	}
 }
 
@@ -73,10 +62,8 @@ func (w *pasWorld) addProxy(id int64, region string, expiresInDays int) *Proxy {
 }
 
 func (w *pasWorld) addAccount(id, proxyID int64) *ProxyAutoSwitchAccount {
-	// Created long ago by default, so proxy changes in tests count as manual
-	// unless a test makes the account new.
 	a := &ProxyAutoSwitchAccount{ID: id, Name: fmt.Sprintf("acc-%d", id), Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-		Status: StatusActive, Schedulable: true, CreatedAt: w.now.Add(-30 * 24 * time.Hour)}
+		Status: StatusActive, Schedulable: true, GroupIDs: []int64{16}}
 	if proxyID > 0 {
 		a.ProxyID = autoSwitchInt64(proxyID)
 	}
@@ -91,21 +78,8 @@ func (w *pasWorld) advance(d time.Duration) { w.mu.Lock(); w.now = w.now.Add(d);
 
 func (w *pasWorld) clock() time.Time { w.mu.Lock(); defer w.mu.Unlock(); return w.now }
 
-// uniform makes every account have the given samples/p50 on whatever proxy it uses now.
-func (w *pasWorld) uniform(samples int, p50 int64) {
-	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
-		out := []ProxyAutoSwitchLatencyStat{}
-		for _, id := range ids {
-			if a := w.accounts[id]; a != nil && a.ProxyID != nil {
-				out = append(out, ProxyAutoSwitchLatencyStat{AccountID: id, ProxyID: *a.ProxyID, Samples: samples, P50MS: p50})
-			}
-		}
-		return out
-	}
-}
-
 func (w *pasWorld) usedCount(proxyID int64) int64 {
-	n := w.external[proxyID]
+	n := int64(0)
 	for _, a := range w.accounts {
 		if !a.Deleted && a.ProxyID != nil && *a.ProxyID == proxyID {
 			n++
@@ -130,6 +104,19 @@ func (w *pasWorld) lastEvent() *ProxyAutoSwitchEvent {
 	return &w.events[len(w.events)-1]
 }
 
+func clonePASEvent(e ProxyAutoSwitchEvent) ProxyAutoSwitchEvent {
+	cp := e
+	if e.Before != nil {
+		b := *e.Before
+		cp.Before = &b
+	}
+	if e.After != nil {
+		a := *e.After
+		cp.After = &a
+	}
+	return cp
+}
+
 func (w *pasWorld) service() *ProxyAutoSwitchService {
 	svc := NewProxyAutoSwitchService(w, w, pasGroups{w}, pasProxies{w}, w, w, w, w, nil, nil)
 	svc.now = w.clock
@@ -137,11 +124,11 @@ func (w *pasWorld) service() *ProxyAutoSwitchService {
 }
 
 func (w *pasWorld) saveConfig(cfg ProxyAutoSwitchConfig) {
-	raw, err := jsonMarshalForTest(cfg)
+	raw, err := json.Marshal(cfg)
 	if err != nil {
 		panic(err)
 	}
-	w.settings[proxyAutoSwitchConfigKey] = raw
+	w.settings[proxyAutoSwitchConfigKey] = string(raw)
 }
 
 // --- settings ---
@@ -178,19 +165,7 @@ func (p pasProxies) GetByID(_ context.Context, id int64) (*Proxy, error) {
 		cp := *proxy
 		return &cp, nil
 	}
-	return nil, errors.New("proxy not found")
-}
-
-func (p pasProxies) ListActiveWithAccountCount(_ context.Context) ([]ProxyWithAccountCount, error) {
-	out := []ProxyWithAccountCount{}
-	for _, proxy := range p.w.proxies {
-		if proxy.Status != StatusActive {
-			continue
-		}
-		out = append(out, ProxyWithAccountCount{Proxy: *proxy, AccountCount: p.w.usedCount(proxy.ID)})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	return nil, ErrProxyNotFound
 }
 
 func (p pasProxies) CountAccountsByProxyID(_ context.Context, proxyID int64) (int64, error) {
@@ -246,14 +221,7 @@ func (w *pasWorld) proxyIDByURL(url string) int64 {
 	return 0
 }
 
-func (w *pasWorld) ProbeProxy(_ context.Context, proxyURL string) (*ProxyExitInfo, int64, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	id := w.proxyIDByURL(proxyURL)
-	w.exitCalls = append(w.exitCalls, id)
-	if code := w.exitCode[id]; code != "" {
-		return &ProxyExitInfo{CountryCode: code}, 100, nil
-	}
+func (w *pasWorld) ProbeProxy(_ context.Context, _ string) (*ProxyExitInfo, int64, error) {
 	return nil, 0, errors.New("exit probe failed")
 }
 
@@ -261,7 +229,6 @@ func (w *pasWorld) ProbeChatGPT(_ context.Context, proxyURL string) (ProxyAutoSw
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	id := w.proxyIDByURL(proxyURL)
-	w.probeLog = append(w.probeLog, id)
 	seq := w.probeMS[id]
 	if len(seq) == 0 {
 		return ProxyAutoSwitchProbeResult{}, errors.New("no probe configured")
@@ -281,16 +248,6 @@ func (w *pasWorld) ProbeChatGPT(_ context.Context, proxyURL string) (ProxyAutoSw
 	return ProxyAutoSwitchProbeResult{}, errors.New("bad probe value")
 }
 
-func (w *pasWorld) probedProxies() map[int64]int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := map[int64]int{}
-	for _, id := range w.probeLog {
-		out[id]++
-	}
-	return out
-}
-
 // --- repository ---
 
 func (w *pasWorld) ListGroupAccounts(_ context.Context, groupIDs []int64) ([]ProxyAutoSwitchAccount, error) {
@@ -300,12 +257,14 @@ func (w *pasWorld) ListGroupAccounts(_ context.Context, groupIDs []int64) ([]Pro
 	}
 	out := []ProxyAutoSwitchAccount{}
 	for id, a := range w.accounts {
-		if a.Deleted || a.ParentAccountID != nil || a.Platform != PlatformOpenAI || a.Type != AccountTypeOAuth {
+		if a.Deleted {
 			continue
 		}
 		for _, g := range w.groupsOf[id] {
 			if want[g] {
-				out = append(out, *a)
+				cp := *a
+				cp.GroupIDs = append([]int64(nil), a.GroupIDs...)
+				out = append(out, cp)
 				break
 			}
 		}
@@ -323,10 +282,8 @@ func (w *pasWorld) GetAccount(_ context.Context, id int64) (*ProxyAutoSwitchAcco
 }
 
 // FirstTokenUsage filters like the real queries: usage of the groups that
-// overlaps [from, to), traces of the groups started in [traceFrom, to).
-// usageGroup / traceGroup default to 16.
+// overlap [from, to), traces of the groups started in [traceFrom, to).
 func (w *pasWorld) FirstTokenUsage(_ context.Context, groupIDs []int64, from, to, traceFrom time.Time) ([]FirstTokenTrendUsageSample, []FirstTokenTrendTraceSample, error) {
-	w.usageLog = append(w.usageLog, fmt.Sprintf("%v %s %s %s", groupIDs, from.Format(time.RFC3339), to.Format(time.RFC3339), traceFrom.Format(time.RFC3339)))
 	inGroups := func(g int64) bool {
 		for _, id := range groupIDs {
 			if id == g {
@@ -347,42 +304,7 @@ func (w *pasWorld) FirstTokenUsage(_ context.Context, groupIDs []int64, from, to
 			traces = append(traces, t)
 		}
 	}
-	if w.statsFn != nil {
-		u, t := w.statsUsage(groupIDs, from, to)
-		usage, traces = append(usage, u...), append(traces, t...)
-	}
 	return usage, traces, nil
-}
-
-// statsUsage turns statsFn's stats for the accounts of groupIDs into usage rows
-// that started at from, plus traces that put each row on stat.ProxyID.
-func (w *pasWorld) statsUsage(groupIDs []int64, from, to time.Time) ([]FirstTokenTrendUsageSample, []FirstTokenTrendTraceSample) {
-	want := map[int64]bool{}
-	for _, g := range groupIDs {
-		want[g] = true
-	}
-	ids := []int64{}
-	for id := range w.accounts {
-		for _, g := range w.groupsOf[id] {
-			if want[g] {
-				ids = append(ids, id)
-				break
-			}
-		}
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	var usage []FirstTokenTrendUsageSample
-	var traces []FirstTokenTrendTraceSample
-	for _, st := range w.statsFn(ids, from, to) {
-		for i := 0; i < st.Samples; i++ {
-			id := fmt.Sprintf("stat-%d-%d-%d", st.AccountID, st.ProxyID, i)
-			v := st.P50MS
-			usage = append(usage, FirstTokenTrendUsageSample{StartedAt: from, EndedAt: from.Add(time.Duration(v+1000) * time.Millisecond),
-				FirstTokenMS: &v, Stream: true, AccountID: st.AccountID, Model: "gpt-5", RequestID: id})
-			traces = append(traces, FirstTokenTrendTraceSample{StartedAt: from, AccountID: st.AccountID, ProxyID: st.ProxyID, Model: "gpt-5", RequestID: id})
-		}
-	}
-	return usage, traces
 }
 
 // addUsage adds one streaming usage_logs row that started at start and got
@@ -398,12 +320,25 @@ func (w *pasWorld) addUsage(accountID, proxyID int64, start time.Time, ms int64)
 	}
 }
 
+func (w *pasWorld) addUsages(accountID, proxyID int64, count int, start time.Time, ms int64) {
+	for i := 0; i < count; i++ {
+		w.addUsage(accountID, proxyID, start, ms)
+	}
+}
+
+func (w *pasWorld) ListProxies(_ context.Context) ([]ProxyWithAccountCount, error) {
+	out := []ProxyWithAccountCount{}
+	for _, proxy := range w.proxies {
+		out = append(out, ProxyWithAccountCount{Proxy: *proxy, AccountCount: w.usedCount(proxy.ID)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 func (w *pasWorld) InsertEvent(_ context.Context, e *ProxyAutoSwitchEvent) error {
 	w.nextEvent++
 	e.ID = w.nextEvent
-	cp := *e
-	cp.Candidates = append([]ProxyAutoSwitchCandidate(nil), e.Candidates...)
-	w.events = append(w.events, cp)
+	w.events = append(w.events, clonePASEvent(*e))
 	return nil
 }
 
@@ -412,16 +347,15 @@ func (w *pasWorld) UpdateEventIfStatus(_ context.Context, e *ProxyAutoSwitchEven
 	if cur == nil || cur.Status != expected {
 		return false, nil
 	}
-	cur.UpdatedAt, cur.Status, cur.Reason = e.UpdatedAt, e.Status, e.Reason
-	cur.ToProxyID, cur.ToProxyLabel, cur.ToRegion = e.ToProxyID, e.ToProxyLabel, e.ToRegion
-	cur.CandidateProbeMS, cur.AfterP50MS, cur.AfterSamples = e.CandidateProbeMS, e.AfterP50MS, e.AfterSamples
-	cur.Candidates, cur.FinishedAt = e.Candidates, e.FinishedAt
+	cp := clonePASEvent(*e)
+	cp.ID = cur.ID
+	*cur = cp
 	return true, nil
 }
 
 func (w *pasWorld) GetEvent(_ context.Context, id int64) (*ProxyAutoSwitchEvent, error) {
 	if e := w.event(id); e != nil {
-		cp := *e
+		cp := clonePASEvent(*e)
 		if a := w.accounts[e.AccountID]; a != nil {
 			cp.AccountName = a.Name
 		}
@@ -437,19 +371,19 @@ func (w *pasWorld) ListEvents(_ context.Context, f ProxyAutoSwitchEventFilter) (
 		if (f.BeforeID > 0 && e.ID >= f.BeforeID) || (f.AccountID > 0 && e.AccountID != f.AccountID) {
 			continue
 		}
-		out = append(out, e)
-		if len(out) >= f.Limit {
+		out = append(out, clonePASEvent(e))
+		if f.Limit > 0 && len(out) >= f.Limit {
 			break
 		}
 	}
 	return out, nil
 }
 
-func (w *pasWorld) ListObserving(_ context.Context) ([]ProxyAutoSwitchEvent, error) {
+func (w *pasWorld) ListMeasuring(_ context.Context) ([]ProxyAutoSwitchEvent, error) {
 	out := []ProxyAutoSwitchEvent{}
 	for _, e := range w.events {
-		if e.Status == ProxyAutoSwitchStatusObserving {
-			out = append(out, e)
+		if e.Status == ProxyAutoSwitchStatusMeasuring {
+			out = append(out, clonePASEvent(e))
 		}
 	}
 	return out, nil
@@ -464,39 +398,6 @@ func pasContains(list []string, v string) bool {
 	return false
 }
 
-func (w *pasWorld) AccountHistory(_ context.Context, ids []int64, since time.Time, switched, misses []string) (map[int64]ProxyAutoSwitchHistory, error) {
-	out := map[int64]ProxyAutoSwitchHistory{}
-	for _, id := range ids {
-		var h ProxyAutoSwitchHistory
-		for _, e := range w.events {
-			if e.AccountID != id || e.CreatedAt.Before(since) {
-				continue
-			}
-			at := e.CreatedAt
-			if pasContains(switched, e.Status) && (h.LastSwitchAt == nil || at.After(*h.LastSwitchAt)) {
-				h.LastSwitchAt = &at
-			}
-			if pasContains(misses, e.Status) && (h.LastMissAt == nil || at.After(*h.LastMissAt)) {
-				h.LastMissAt = &at
-			}
-		}
-		if h.LastSwitchAt != nil || h.LastMissAt != nil {
-			out[id] = h
-		}
-	}
-	return out, nil
-}
-
-func (w *pasWorld) CountEventsSince(_ context.Context, since time.Time, statuses []string) (int, error) {
-	n := 0
-	for _, e := range w.events {
-		if !e.CreatedAt.Before(since) && pasContains(statuses, e.Status) {
-			n++
-		}
-	}
-	return n, nil
-}
-
 func (w *pasWorld) LatestEventPerAccount(_ context.Context, since time.Time, statuses []string) ([]ProxyAutoSwitchEvent, error) {
 	latest := map[int64]ProxyAutoSwitchEvent{}
 	for _, e := range w.events {
@@ -504,7 +405,7 @@ func (w *pasWorld) LatestEventPerAccount(_ context.Context, since time.Time, sta
 			continue
 		}
 		if cur, ok := latest[e.AccountID]; !ok || e.ID > cur.ID {
-			latest[e.AccountID] = e
+			latest[e.AccountID] = clonePASEvent(e)
 		}
 	}
 	out := []ProxyAutoSwitchEvent{}
@@ -512,39 +413,5 @@ func (w *pasWorld) LatestEventPerAccount(_ context.Context, since time.Time, sta
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
-	return out, nil
-}
-
-func (w *pasWorld) LoadAccountStates(_ context.Context, ids []int64) (map[int64]ProxyAutoSwitchAccountState, error) {
-	out := map[int64]ProxyAutoSwitchAccountState{}
-	for _, id := range ids {
-		if st, ok := w.states[id]; ok {
-			out[id] = st
-		}
-	}
-	return out, nil
-}
-
-// UpsertAccountState mirrors the SQL: keep the stored change unless a newer one
-// is given; with no new one, drop a stored change at or before ClearExternalUpTo.
-func (w *pasWorld) UpsertAccountState(_ context.Context, st ProxyAutoSwitchAccountState) error {
-	if prev, ok := w.states[st.AccountID]; ok && prev.ExternalChangeAt != nil {
-		cleared := st.ExternalChangeAt == nil && st.ClearExternalUpTo != nil && !prev.ExternalChangeAt.After(*st.ClearExternalUpTo)
-		if !cleared && (st.ExternalChangeAt == nil || prev.ExternalChangeAt.After(*st.ExternalChangeAt)) {
-			st.ExternalChangeAt = prev.ExternalChangeAt
-		}
-	}
-	st.ClearExternalUpTo = nil // not a stored column
-	w.states[st.AccountID] = st
-	return nil
-}
-
-func (w *pasWorld) ListAuditProxyWrites(_ context.Context, since time.Time) ([]ProxyAutoSwitchAuditWrite, error) {
-	out := []ProxyAutoSwitchAuditWrite{}
-	for _, a := range w.audit {
-		if !a.CreatedAt.Before(since) {
-			out = append(out, a)
-		}
-	}
 	return out, nil
 }

@@ -913,14 +913,14 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/probe", h.Admin.AccountTokenGuardV2.Probe)
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/relogin", h.Admin.AccountTokenGuardV2.Relogin)
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/resume-relogin-budget", h.Admin.AccountTokenGuardV2.ResumeReloginBudget)
-	// 代理优选：响应头慢的号自动换到更快的空闲代理
+	// 代理优选：使用记录首字慢的号从候选代理池按策略换代理
 	proxyAutoSwitch := admin.Group("/proxy-autoswitch")
 	proxyAutoSwitch.GET("/config", h.Admin.ProxyAutoSwitch.GetConfig)
 	proxyAutoSwitch.PUT("/config", h.Admin.ProxyAutoSwitch.SaveConfig)
 	proxyAutoSwitch.GET("/events", h.Admin.ProxyAutoSwitch.ListEvents)
-	proxyAutoSwitch.POST("/events/:id/revert", h.Admin.ProxyAutoSwitch.RevertEvent)
 	proxyAutoSwitch.GET("/recent", h.Admin.ProxyAutoSwitch.Recent)
 	proxyAutoSwitch.GET("/accounts", h.Admin.ProxyAutoSwitch.Accounts)
+	proxyAutoSwitch.GET("/proxies", h.Admin.ProxyAutoSwitch.Proxies)
 	// 线路优化 → 首字趋势（只读）
 	admin.GET("/first-token-trend", h.Admin.FirstTokenTrend.Get)
 	admin.GET("/first-token-trend/groups", h.Admin.FirstTokenTrend.Groups)
