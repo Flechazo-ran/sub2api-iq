@@ -20,6 +20,12 @@ function bucket(ts: string, overrides: Partial<FirstTokenTrendBucket> = {}): Fir
 function trend(overrides: Partial<FirstTokenTrendData> = {}): FirstTokenTrendData {
   return {
     group: { id: 16, name: 'GPT-速刷-AUTO' }, range: '2h', step_seconds: 120, metric: 'usage', dimension: 'account',
+    account_id: null,
+    accounts: [
+      { id: 98, label: '#98 jeremiassmith649', status: 'active', schedulable: true },
+      { id: 97, label: '#97 fingermaikon7', status: 'error', schedulable: false },
+      { id: 99, label: '#99 new', status: 'active', schedulable: false },
+    ],
     from: '2026-11-05T06:02:00Z', to: '2026-11-05T08:01:00Z', limit_is_current: false,
     buckets: [
       bucket('2026-11-05T07:54:00Z'),
@@ -81,13 +87,19 @@ function dragOverview(fromX: number, toX: number) {
   fire('pointermove', toX)
   fire('pointerup', toX)
 }
+function selectAccount(value: string) {
+  return wrapper.get('[data-testid="ftt-account"]').setValue(value)
+}
 
 beforeEach(() => {
+  // 用例里的响应都固定在 2026-11-05；把 Date.now 钉在数据附近，否则真实时钟一旦晚于数据
+  // 超过 12 小时，按当前时钟夹取会把框选窗口整个夹掉。只桩 Date.now，定时器保持真实。
+  vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-05T08:31:00Z').getTime())
   localStorage.clear()
   api.getTrend.mockReset().mockResolvedValue(trend())
   api.listGroups.mockReset().mockResolvedValue([{ id: 16, name: 'GPT-速刷-AUTO' }, { id: 20, name: '1028GPT-PRO' }])
 })
-afterEach(() => wrapper?.unmount())
+afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks() })
 
 describe('FirstTokenTrendView', () => {
   it('loads group 16, 2h, by account and renders the latest complete bucket', async () => {
@@ -108,6 +120,224 @@ describe('FirstTokenTrendView', () => {
     expect(wrapper.get('[data-testid="ftt-kpi-inflight"] .d').classes()).not.toContain('down')
     expect(wrapper.get('[data-testid="ftt-kpi-samples"] .v').text()).toBe('527')
     expect(wrapper.get('[data-testid="ftt-metric-hint"]').text()).toBe('首字和使用记录页一致，从请求进网关算，含上传请求体的时间')
+  })
+
+  it('lists all accounts as the default and then every account returned for the group', async () => {
+    wrapper = mountView(); await flushPromises()
+    expect(lastQuery()).not.toHaveProperty('account_id')
+    const options = wrapper.findAll('[data-testid="ftt-account"] option')
+    expect(options.map(option => option.text())).toEqual([
+      '全部账号（不区分）',
+      '#98 jeremiassmith649',
+      '#97 fingermaikon7（不可用）',
+      '#99 new（不可用）',
+    ])
+  })
+
+  it('requests only the selected account and goes back to the whole group', async () => {
+    wrapper = mountView(); await flushPromises()
+    await selectAccount('98'); await flushPromises()
+    expect(lastQuery()).toEqual({ group_id: 16, range: '2h', dimension: 'account', account_id: 98 })
+    await selectAccount('null'); await flushPromises()
+    expect(lastQuery()).toEqual({ group_id: 16, range: '2h', dimension: 'account' })
+  })
+
+  it('resets the account filter when the group changes', async () => {
+    wrapper = mountView(); await flushPromises()
+    await selectAccount('98'); await flushPromises()
+    await wrapper.get('[data-testid="ftt-group"]').setValue('20'); await flushPromises()
+    expect(api.getTrend).toHaveBeenCalledTimes(3)
+    expect(lastQuery()).toEqual({ group_id: 20, range: '2h', dimension: 'account' })
+    expect((wrapper.get('[data-testid="ftt-account"]').element as HTMLSelectElement).selectedIndex).toBe(0)
+  })
+
+  it('empties the account dropdown while the new group loads and refills it afterwards', async () => {
+    let releaseGroup: (value: FirstTokenTrendData) => void = () => {}
+    const groupPending = new Promise<FirstTokenTrendData>(resolve => { releaseGroup = resolve })
+    api.getTrend.mockImplementation((query: { group_id: number }) =>
+      query.group_id === 20 ? groupPending : Promise.resolve(trend()))
+    wrapper = mountView(); await flushPromises()
+    await selectAccount('98'); await flushPromises()
+    await wrapper.get('[data-testid="ftt-group"]').setValue('20')
+    const optionTexts = () => wrapper.findAll('[data-testid="ftt-account"] option').map(option => option.text())
+    // 新分组的请求还挂着，下拉里不能留旧分组的号。
+    expect(optionTexts()).toEqual(['全部账号（不区分）'])
+    expect(api.getTrend.mock.calls.filter(call => call[0].group_id === 20).every(call => !('account_id' in call[0]))).toBe(true)
+    releaseGroup(trend({ group: { id: 20, name: '1028GPT-PRO' }, accounts: [{ id: 201, label: '#201 pro-a', status: 'active', schedulable: true }] }))
+    await flushPromises()
+    expect(optionTexts()).toEqual(['全部账号（不区分）', '#201 pro-a'])
+    expect((wrapper.get('[data-testid="ftt-account"]').element as HTMLSelectElement).selectedIndex).toBe(0)
+  })
+
+  it('keeps the selected window when switching accounts', async () => {
+    wrapper = mountView(); await flushPromises()
+    dragOverview(100, 400); await flushPromises()
+    const window = { from: lastQuery().from, to: lastQuery().to }
+    await selectAccount('98'); await flushPromises()
+    expect(lastQuery()).toMatchObject({ group_id: 16, dimension: 'account', account_id: 98, from: window.from, to: window.to })
+    expect(lastQuery()).not.toHaveProperty('range')
+    expect(wrapper.get('[data-testid="ftt-selection-label"]').exists()).toBe(true)
+  })
+
+  it('refreshes the overview strip for the new account while a selection is active', async () => {
+    const accountTrend = trend({
+      buckets: [
+        bucket('2026-11-05T07:54:00Z', { p50_ms: 30000 }),
+        bucket('2026-11-05T07:56:00Z', { p50_ms: 30000 }),
+        bucket('2026-11-05T07:58:00Z', { p50_ms: 30000 }),
+        bucket('2026-11-05T08:00:00Z', { p50_ms: 30000 }),
+      ],
+    })
+    api.getTrend.mockImplementation((query: { account_id?: number; range?: string }) =>
+      query.account_id === 98 && query.range ? Promise.resolve(accountTrend) : Promise.resolve(trend()))
+    wrapper = mountView(); await flushPromises()
+    dragOverview(100, 400); await flushPromises()
+    const before = wrapper.findAll('[data-testid="ftt-overview-line"]').map(line => line.attributes('points'))
+    await selectAccount('98'); await flushPromises()
+    const queries = api.getTrend.mock.calls.map(call => call[0])
+    // ① 总览条请求：整范围 + 新账号，不带 from/to。
+    expect(queries).toContainEqual({ group_id: 16, range: '2h', dimension: 'account', account_id: 98 })
+    // ② 主区请求：带 from/to + 新账号，不带 range。
+    const windowQueries = queries.filter(query => query.from && query.to && query.account_id === 98)
+    expect(windowQueries.length).toBeGreaterThan(0)
+    expect(windowQueries.every(query => !query.range)).toBe(true)
+    // ③ 最后一次仍是主区请求。
+    expect(lastQuery()).toMatchObject({ account_id: 98, from: expect.any(String), to: expect.any(String) })
+    expect(lastQuery()).not.toHaveProperty('range')
+    // ④ 总览条换成新账号的数据，框选状态还在。
+    const after = wrapper.findAll('[data-testid="ftt-overview-line"]').map(line => line.attributes('points'))
+    expect(after).not.toEqual(before)
+    expect(wrapper.get('[data-testid="ftt-selection-label"]').exists()).toBe(true)
+  })
+
+  it('ignores a stale overview refresh after the selection is cleared', async () => {
+    let release: (value: FirstTokenTrendData) => void = () => {}
+    const pending = new Promise<FirstTokenTrendData>(resolve => { release = resolve })
+    const stale = trend({
+      buckets: [
+        bucket('2026-11-05T07:54:00Z', { p50_ms: 30000 }),
+        bucket('2026-11-05T07:56:00Z', { p50_ms: 30000 }),
+        bucket('2026-11-05T07:58:00Z', { p50_ms: 30000 }),
+        bucket('2026-11-05T08:00:00Z', { p50_ms: 30000 }),
+      ],
+    })
+    const fresh = trend({
+      buckets: [
+        bucket('2026-11-05T07:54:00Z', { p50_ms: 2000 }),
+        bucket('2026-11-05T07:56:00Z', { p50_ms: 2000 }),
+        bucket('2026-11-05T07:58:00Z', { p50_ms: 2000 }),
+        bucket('2026-11-05T08:00:00Z', { p50_ms: 2000 }),
+      ],
+    })
+    // 同样形状的整范围 query 按调用顺序区分：第一次挂起（换号时的总览条），第二次返回 B（取消框选）。
+    let rangeCalls = 0
+    api.getTrend.mockImplementation((query: { account_id?: number; range?: string }) => {
+      if (query.account_id === 98 && query.range) {
+        rangeCalls += 1
+        return rangeCalls === 1 ? pending : Promise.resolve(fresh)
+      }
+      return Promise.resolve(trend())
+    })
+    wrapper = mountView(); await flushPromises()
+    dragOverview(100, 400); await flushPromises()
+    await selectAccount('98'); await flushPromises()
+    await wrapper.get('[data-testid="ftt-clear-selection"]').trigger('click'); await flushPromises()
+    const afterCancel = wrapper.findAll('[data-testid="ftt-overview-line"]').map(line => line.attributes('points'))
+    release(stale); await flushPromises()
+    expect(rangeCalls).toBe(2)
+    expect(wrapper.findAll('[data-testid="ftt-overview-line"]').map(line => line.attributes('points'))).toEqual(afterCancel)
+  })
+
+  it('clamps the selection start to now minus 12 hours plus 1 minute when the overview is stale', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-05T08:31:00Z'))
+      api.getTrend.mockResolvedValue(rangeTrend('12h', 300, 144, '2026-11-04T20:01:00Z', '2026-11-05T08:01:00Z'))
+      wrapper = mountView(); await flushPromises()
+      dragOverview(0, 500); await flushPromises()
+      const query = lastQuery()
+      expect(query.from).toBe('2026-11-04T20:32:00.000Z')
+      expect(new Date(query.to).getTime()).toBeLessThanOrEqual(new Date('2026-11-05T08:31:00Z').getTime())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clamps the selection end to now when the browser clock is behind the response', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-05T07:31:00Z'))
+      api.getTrend.mockResolvedValue(rangeTrend('12h', 300, 144, '2026-11-04T20:01:00Z', '2026-11-05T08:01:00Z'))
+      wrapper = mountView(); await flushPromises()
+      dragOverview(500, 1000); await flushPromises()
+      expect(lastQuery().to).toBe('2026-11-05T07:31:00.000Z')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not request a selection that is shorter than 10 minutes after clamping', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-05T19:56:00Z'))
+      api.getTrend.mockResolvedValue(rangeTrend('12h', 300, 144, '2026-11-04T20:01:00Z', '2026-11-05T08:01:00Z'))
+      wrapper = mountView(); await flushPromises()
+      dragOverview(800, 1000); await flushPromises()
+      expect(api.getTrend).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('[data-testid="ftt-selection-label"]').exists()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-clamps the selection start to the clock when switching accounts after waiting', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-05T08:00:00Z'))
+      api.getTrend.mockResolvedValue(rangeTrend('12h', 300, 144, '2026-11-04T20:01:00Z', '2026-11-05T08:01:00Z'))
+      wrapper = mountView(); await flushPromises()
+      dragOverview(0, 500); await flushPromises()
+      // 此刻「现在 − 12 小时 + 1 分钟」正好是 20:01，没被夹。
+      expect(lastQuery().from).toBe('2026-11-04T20:01:00.000Z')
+      vi.setSystemTime(new Date('2026-11-05T08:10:00Z'))
+      await selectAccount('98'); await flushPromises()
+      expect(lastQuery()).toMatchObject({ account_id: 98, from: '2026-11-04T20:11:00.000Z' })
+      expect(new Date(lastQuery().to).getTime()).toBeLessThanOrEqual(new Date('2026-11-05T08:10:00Z').getTime())
+      expect(wrapper.get('[data-testid="ftt-selection-label"]').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not resend the selection when the clock moves it under 10 minutes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-05T08:00:00Z'))
+      api.getTrend.mockResolvedValue(rangeTrend('12h', 300, 144, '2026-11-04T20:01:00Z', '2026-11-05T08:01:00Z'))
+      wrapper = mountView(); await flushPromises()
+      dragOverview(0, 15); await flushPromises()
+      expect(lastQuery().from).toBeTruthy()
+      const windowCalls = () => api.getTrend.mock.calls.filter(call => call[0].from).length
+      const before = windowCalls()
+      vi.setSystemTime(new Date('2026-11-05T08:29:00Z'))
+      await selectAccount('98'); await flushPromises()
+      // 换号时总览条会发一次不带 from/to 的整范围请求，这个不算。
+      expect(windowCalls()).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('draws a custom 12h response whose first bucket starts before the returned from', async () => {
+    const start = new Date('2026-11-05T06:55:00Z').getTime()
+    const buckets = Array.from({ length: 145 }, (_, index) => bucket(new Date(start + index * 300000).toISOString(), {
+      samples: 10, avg_ms: 5000, p50_ms: 4000, p80_ms: 6000, over10_pct: 0,
+    }))
+    api.getTrend.mockResolvedValue(trend({ range: 'custom', step_seconds: 300, from: '2026-11-05T07:00:00Z', to: '2026-11-05T19:00:00Z', buckets }))
+    wrapper = mountView(); await flushPromises()
+    expect(charts('Line')[0].props('data').labels).toHaveLength(145)
+    expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('5 分钟一格')
+    expect(wrapper.find('[data-testid="ftt-overview"]').exists()).toBe(true)
   })
 
   it('draws three lines plus the 10 s line, in-flight vs limit, and the stacked split, in seconds', async () => {

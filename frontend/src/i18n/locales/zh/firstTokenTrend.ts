@@ -11,6 +11,9 @@ export default {
   updatedAt: '{time} 更新',
   filters: {
     group: '分组',
+    account: '账号',
+    accountAll: '全部账号（不区分）',
+    accountUnavailable: '（不可用）',
     range: '范围',
     series: '指标',
     autoRefresh: '自动刷新',

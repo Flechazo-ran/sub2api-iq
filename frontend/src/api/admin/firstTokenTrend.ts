@@ -14,6 +14,8 @@ export type FirstTokenTrendEventType = 'proxy' | 'concurrency' | 'status'
 
 export interface FirstTokenTrendQuery {
   group_id: number
+  // 可选：只统计这个账号；不传就是这个分组所有账号合在一起。
+  account_id?: number
   // range 和 from/to 二选一：给 from/to 时不要传 range。
   range?: FirstTokenTrendRange
   from?: string
@@ -65,8 +67,19 @@ export interface FirstTokenTrendEvent {
   p50_after_ms: number | null
 }
 
+export interface FirstTokenTrendAccount {
+  id: number
+  label: string
+  status: string
+  schedulable: boolean
+}
+
 export interface FirstTokenTrendData {
   group: { id: number; name: string }
+  // 当前筛选的账号；null 表示整组所有账号合在一起。
+  account_id: number | null
+  // 这个分组里所有未删除的号，不管有没有筛选都给全量。
+  accounts: FirstTokenTrendAccount[]
   range: FirstTokenTrendResponseRange
   step_seconds: number
   metric?: FirstTokenTrendMetric
@@ -86,7 +99,7 @@ export interface FirstTokenTrendGroup {
 
 export async function getTrend(query: FirstTokenTrendQuery): Promise<FirstTokenTrendData> {
   const { data } = await apiClient.get<FirstTokenTrendData>(base, { params: query })
-  return { ...data, buckets: data?.buckets ?? [], rows: data?.rows ?? [], events: data?.events ?? [] }
+  return { ...data, account_id: data?.account_id ?? null, accounts: data?.accounts ?? [], buckets: data?.buckets ?? [], rows: data?.rows ?? [], events: data?.events ?? [] }
 }
 
 export async function listGroups(): Promise<FirstTokenTrendGroup[]> {
