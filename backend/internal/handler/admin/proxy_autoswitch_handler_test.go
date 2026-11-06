@@ -93,6 +93,9 @@ func (s *pasHandlerStore) GetAccount(_ context.Context, id int64) (*service.Prox
 func (s *pasHandlerStore) LatencyStats(context.Context, string, []int64, time.Time, time.Time) ([]service.ProxyAutoSwitchLatencyStat, error) {
 	return []service.ProxyAutoSwitchLatencyStat{{AccountID: 65, ProxyID: 96, Samples: 40, P50MS: 1300}}, nil
 }
+func (s *pasHandlerStore) FirstTokenUsage(context.Context, []int64, time.Time, time.Time, time.Time) ([]service.FirstTokenTrendUsageSample, []service.FirstTokenTrendTraceSample, error) {
+	return nil, nil, nil
+}
 func (s *pasHandlerStore) InsertEvent(context.Context, *service.ProxyAutoSwitchEvent) error {
 	return errors.New("not used")
 }
@@ -265,10 +268,31 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Contains(t, body["message"], "window_minutes")
 	data["window_minutes"] = 10
 
-	data["account_cooldown_minutes"] = 4
+	data["account_cooldown_minutes"] = -1
 	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", data)
 	require.Equal(t, http.StatusBadRequest, code)
-	require.Contains(t, body["message"], "account_cooldown_minutes 必须在 5 到 1440 之间")
+	require.Contains(t, body["message"], "account_cooldown_minutes 必须在 0 到 1440 之间")
+	data["account_cooldown_minutes"] = 10
+
+	// 11-06 规则：使用记录首字、1 个样本、0 = 不限、不分地区都能存。
+	live := map[string]any{}
+	for k, v := range data {
+		live[k] = v
+	}
+	for k, v := range map[string]any{"metric": "usage_first_token", "window_minutes": 5, "min_samples": 1, "threshold_ms": 10000,
+		"observe_minutes": 0, "account_cooldown_minutes": 0, "max_switches_per_hour": 0, "min_days_to_expiry": 0,
+		"region_policy": "any", "min_improvement_pct": 0} {
+		live[k] = v
+	}
+	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", live)
+	require.Equal(t, http.StatusOK, code)
+	got := pasAs[map[string]any](t, body["data"])
+	for _, k := range []string{"observe_minutes", "account_cooldown_minutes", "max_switches_per_hour", "min_days_to_expiry", "min_improvement_pct"} {
+		require.Equal(t, float64(0), got[k], k)
+	}
+	require.Equal(t, "usage_first_token", got["metric"])
+	require.Equal(t, "any", got["region_policy"])
+	require.Equal(t, float64(1), got["min_samples"])
 
 	// An older client still sending only hours gets minutes back.
 	legacy := map[string]any{}

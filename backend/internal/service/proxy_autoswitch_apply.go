@@ -247,8 +247,12 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 		qualified = proxyAutoSwitchQualified(currentMS, cfg.MinImprovementPct, event.Candidates[firstCount:])
 	}
 	if len(qualified) == 0 {
+		why := fmt.Sprintf("没有快 %d%% 以上的", cfg.MinImprovementPct)
+		if cfg.MinImprovementPct <= 0 {
+			why = "测速都失败了"
+		}
 		return false, s.recordMiss(ctx, event, ProxyAutoSwitchStatusNoCandidate,
-			fmt.Sprintf("%s；%s；测了 %d 个候选，没有快 %d%% 以上的", base, currentNote, len(event.Candidates), cfg.MinImprovementPct))
+			fmt.Sprintf("%s；%s；测了 %d 个候选，%s", base, currentNote, len(event.Candidates), why))
 	}
 
 	for _, candidate := range qualified {
@@ -305,7 +309,11 @@ func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fro
 		event.ToProxyLabel = autoSwitchString(candidate.Label)
 		event.ToRegion = &region
 		event.CandidateProbeMS = autoSwitchInt64(*candidate.ProbeMS)
-		event.Reason = truncateReason(fmt.Sprintf("%s；换到 %s 测速 %dms，快 %d%%", reasonPrefix, candidate.Label, *candidate.ProbeMS, improvement))
+		speed := fmt.Sprintf("快 %d%%", improvement)
+		if improvement < 0 {
+			speed = fmt.Sprintf("慢 %d%%（候选里最快的）", -improvement)
+		}
+		event.Reason = truncateReason(fmt.Sprintf("%s；换到 %s 测速 %dms，%s", reasonPrefix, candidate.Label, *candidate.ProbeMS, speed))
 		event.CreatedAt, event.UpdatedAt, event.SwitchedAt = now, now, &now
 		event.FinishedAt = nil
 		// Record before switching so cooldown and the hourly cap hold even if
@@ -333,12 +341,23 @@ func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fro
 	return switched, busy, err
 }
 
-// proxyAutoSwitchObservationDecision: after observe_minutes, kept when the new
+// proxyAutoSwitchObserveDuration is how long a switch is observed before its
+// result is recorded. observe_minutes = 0 means the observation does not hold
+// the account (see proxyAutoSwitchGate); the result is then still recorded
+// once, after the judging window (window_minutes).
+func proxyAutoSwitchObserveDuration(cfg ProxyAutoSwitchConfig) time.Duration {
+	if cfg.ObserveMinutes <= 0 {
+		return time.Duration(cfg.WindowMinutes) * time.Minute
+	}
+	return time.Duration(cfg.ObserveMinutes) * time.Minute
+}
+
+// proxyAutoSwitchObservationDecision: after the observe duration, kept when the new
 // p50 ≤ before × 0.8, otherwise not_faster; with too few samples wait up to
-// 2 × observe_minutes and then kept_insufficient. Only the result is recorded:
+// 2 × the observe duration and then kept_insufficient. Only the result is recorded:
 // the account keeps the new proxy either way.
 func proxyAutoSwitchObservationDecision(cfg ProxyAutoSwitchConfig, elapsed time.Duration, beforeP50 *int64, samples int, p50 int64) string {
-	observe := time.Duration(cfg.ObserveMinutes) * time.Minute
+	observe := proxyAutoSwitchObserveDuration(cfg)
 	if elapsed < observe {
 		return proxyAutoSwitchDecisionWait
 	}
@@ -380,7 +399,7 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 	}
 	now := s.now()
 	elapsed := now.Sub(switchedAt)
-	observe := time.Duration(cfg.ObserveMinutes) * time.Minute
+	observe := proxyAutoSwitchObserveDuration(cfg)
 	if elapsed < observe {
 		return nil
 	}
@@ -391,7 +410,7 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 	// Compare with the metric this event was judged by, even if the config
 	// changed meanwhile, so before and after measure the same thing.
 	metric := proxyAutoSwitchEventMetric(event)
-	stats, err := s.repo.LatencyStats(ctx, metric, []int64{event.AccountID}, switchedAt, end)
+	stats, err := s.latencyStats(ctx, metric, cfg.GroupIDs, map[int64]int64{event.AccountID: *event.ToProxyID}, switchedAt, end)
 	if err != nil {
 		return err
 	}

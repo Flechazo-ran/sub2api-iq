@@ -12,7 +12,6 @@ export default {
   filters: {
     group: '分组',
     range: '范围',
-    metric: '口径',
     series: '指标',
     autoRefresh: '自动刷新',
     autoRefreshHint: '每 60 秒',
@@ -28,14 +27,7 @@ export default {
     hours: '{n} 小时一格',
     seconds: '{n} 秒一格',
   },
-  metric: {
-    usage: '使用记录首字',
-    switch: '代理优选首字',
-  },
-  metricHint: {
-    usage: '从请求进网关开始算，和使用记录页的首字一致，含上传请求体的时间',
-    switch: '从请求体上传完开始算，代理优选用这个数判慢，不含上传时间',
-  },
+  metricHint: '和使用记录页的首字一致，从请求进网关算，含上传请求体的时间',
   series: {
     avg: '平均',
     p50: 'p50',
@@ -69,14 +61,14 @@ export default {
   },
   split: {
     title: '首字 p50 拆段',
-    sub: '三段都按连接记录算 p50，不随上面的口径切换，看慢在哪一段',
+    sub: '三段都按连接记录算 p50，和上面的首字口径不同，看慢在哪一段',
     head: '进网关→发完请求头',
     upload: '上传请求体（走代理）',
     after: '上传完→首字（上游）',
   },
   events: {
     title: '变动日志',
-    sub: '代理、并发上限、号状态的每次变动，以及变动前后各 10 分钟的首字 p50（按所选口径）',
+    sub: '代理、并发上限、号状态的每次变动，以及变动前后各 10 分钟的首字 p50',
     empty: '这段时间没有变动。',
     colTime: '时间',
     colAccount: '号',

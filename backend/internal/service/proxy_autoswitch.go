@@ -17,9 +17,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// 代理优选：OpenAI OAuth 号的上游首字或响应头时间（按配置选）持续偏慢时，自动换到
-// 更快的空闲代理。换完观察一段时间，只记录有没有变快，不换回；还慢就过了冷却再换。
-// 只在后台页面记录，不推送消息。
+// 代理优选：OpenAI OAuth 号的首字或响应头时间（按配置选口径）持续偏慢时，自动换到
+// 更快的空闲代理。换完观察一段时间，只记录有没有变快，不换回；还慢就接着换
+// （冷却、观察期、每小时上限配 0 就不拦）。只在后台页面记录，不推送消息。
 const (
 	ProxyAutoSwitchStatusObserving        = "observing"
 	ProxyAutoSwitchStatusKept             = "kept"
@@ -44,9 +44,13 @@ const (
 	ProxyAutoSwitchStateInsufficient = "insufficient"
 	ProxyAutoSwitchStateSkipped      = "skipped"
 
-	// 判慢指标：同一个 egress 尝试里 events.<指标> − events.request_written（毫秒）。
+	// 判慢指标 response_headers / first_token：同一个 egress 尝试里
+	// events.<指标> − events.request_written（毫秒），即上游时间，不含上传请求体。
 	ProxyAutoSwitchMetricResponseHeaders = "response_headers"
 	ProxyAutoSwitchMetricFirstToken      = "first_token"
+	// usage_first_token：usage_logs.first_token_ms，和使用记录页、首字趋势看板同一个口径
+	// （从请求进网关算，含上传请求体），取样和 p50 算法都和首字趋势共用（11-06 起线上用这个）。
+	ProxyAutoSwitchMetricUsageFirstToken = "usage_first_token"
 
 	proxyAutoSwitchConfigKey = "proxy_autoswitch_config"
 
@@ -61,8 +65,9 @@ const (
 	proxyAutoSwitchKeepDropPct = 20
 	// 观察样本不足时最多延长到观察时长的 2 倍（默认 10 → 20 分钟）。
 	proxyAutoSwitchObserveExtendFactor = 2
-	// 不是本功能改的代理（人工改过），6 小时内不自动改。
-	proxyAutoSwitchExternalHold = 6 * time.Hour
+	// 第一次看到的号，回看这么久的 audit_logs 记下人工改代理的时间（external_change_at）。
+	// 只做记录：人工改过代理不再拦自动换（老板 11-06 定，一个号大概只活 2 小时）。
+	proxyAutoSwitchAuditLookback = 6 * time.Hour
 	// proxyAutoSwitchNewAccountSetup：建号后这段时间内设的代理属于建号流程（导入后再补代理、分组），
 	// 不算人工改过代理，新号首字慢照样可以自动换（老板 11-04 定）。
 	proxyAutoSwitchNewAccountSetup = 30 * time.Minute
@@ -70,8 +75,8 @@ const (
 	// 判慢后没找到候选或换失败，也等一个冷却时间（account_cooldown_minutes）再试。
 	// 全站每小时上限是另一条查询，固定回看 1 小时。
 	proxyAutoSwitchHistoryMinSpan = time.Hour
-	// account_cooldown_minutes 的范围；旧配置只存了 account_cooldown_hours 时换算后超过上限取上限。
-	proxyAutoSwitchCooldownMinMinutes = 5
+	// account_cooldown_minutes 的范围（0 = 不冷却）；旧配置只存了 account_cooldown_hours 时换算后超过上限取上限。
+	proxyAutoSwitchCooldownMinMinutes = 0
 	proxyAutoSwitchCooldownMaxMinutes = 1440
 	// 两次检查之间超过这个时间，说明中间没在看（停机/没开），期间的代理变化按刚发生处理。
 	proxyAutoSwitchStateGap = 10 * time.Minute
@@ -120,15 +125,19 @@ type ProxyAutoSwitchConfig struct {
 	Metric            string `json:"metric"`
 	ThresholdMS       int    `json:"threshold_ms"`
 	ConsecutiveChecks int    `json:"consecutive_checks"`
-	MinImprovementPct int    `json:"min_improvement_pct"`
-	// AccountCooldownMinutes：同一个号两次自动换代理至少隔这么久；没换成后也隔这么久再试。
+	// MinImprovementPct：候选测速要比当前代理快这么多才换；0 = 不和当前代理比，直接挑测速最快的。
+	MinImprovementPct int `json:"min_improvement_pct"`
+	// AccountCooldownMinutes：同一个号两次自动换代理至少隔这么久；没换成后也隔这么久再试。0 = 不冷却。
 	// 旧字段 account_cooldown_hours 只在读的时候认（见 UnmarshalJSON），不再输出。
-	AccountCooldownMinutes int     `json:"account_cooldown_minutes"`
-	MaxSwitchesPerHour     int     `json:"max_switches_per_hour"`
-	ObserveMinutes         int     `json:"observe_minutes"`
-	MinDaysToExpiry        int     `json:"min_days_to_expiry"`
-	RegionPolicy           string  `json:"region_policy"`
-	GroupIDs               []int64 `json:"group_ids"`
+	AccountCooldownMinutes int `json:"account_cooldown_minutes"`
+	// MaxSwitchesPerHour：全站每小时最多自动换几次；0 = 不限。
+	MaxSwitchesPerHour int `json:"max_switches_per_hour"`
+	// ObserveMinutes：换完观察多久记一次有没有变快；观察期间不再换这个号。0 = 不拦（观察只做记录）。
+	ObserveMinutes int `json:"observe_minutes"`
+	// MinDaysToExpiry：候选代理离到期至少还剩几天；0 = 只要没过期。
+	MinDaysToExpiry int     `json:"min_days_to_expiry"`
+	RegionPolicy    string  `json:"region_policy"`
+	GroupIDs        []int64 `json:"group_ids"`
 }
 
 func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
@@ -223,10 +232,10 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 		{"min_samples", cfg.MinSamples, 1, 1000},
 		{"threshold_ms", cfg.ThresholdMS, 200, 120000},
 		{"consecutive_checks", cfg.ConsecutiveChecks, 1, 10},
-		{"min_improvement_pct", cfg.MinImprovementPct, 5, 90},
+		{"min_improvement_pct", cfg.MinImprovementPct, 0, 90},
 		{"account_cooldown_minutes", cfg.AccountCooldownMinutes, proxyAutoSwitchCooldownMinMinutes, proxyAutoSwitchCooldownMaxMinutes},
-		{"max_switches_per_hour", cfg.MaxSwitchesPerHour, 1, 50},
-		{"observe_minutes", cfg.ObserveMinutes, 5, 60},
+		{"max_switches_per_hour", cfg.MaxSwitchesPerHour, 0, 50},
+		{"observe_minutes", cfg.ObserveMinutes, 0, 60},
 		{"min_days_to_expiry", cfg.MinDaysToExpiry, 0, 90},
 	}
 	for _, r := range ranges {
@@ -235,7 +244,7 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 		}
 	}
 	if !proxyAutoSwitchValidMetric(cfg.Metric) {
-		return errors.New("metric 只能是 response_headers 或 first_token")
+		return errors.New("metric 只能是 response_headers、first_token 或 usage_first_token")
 	}
 	switch cfg.RegionPolicy {
 	case ProxyAutoSwitchRegionPreferSame, ProxyAutoSwitchRegionSameOnly, ProxyAutoSwitchRegionAny:
@@ -251,13 +260,20 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 }
 
 func proxyAutoSwitchValidMetric(metric string) bool {
-	return metric == ProxyAutoSwitchMetricResponseHeaders || metric == ProxyAutoSwitchMetricFirstToken
+	switch metric {
+	case ProxyAutoSwitchMetricResponseHeaders, ProxyAutoSwitchMetricFirstToken, ProxyAutoSwitchMetricUsageFirstToken:
+		return true
+	}
+	return false
 }
 
 // proxyAutoSwitchMetricLabel is the word used in reason texts.
 func proxyAutoSwitchMetricLabel(metric string) string {
-	if metric == ProxyAutoSwitchMetricFirstToken {
+	switch metric {
+	case ProxyAutoSwitchMetricFirstToken:
 		return "首字"
+	case ProxyAutoSwitchMetricUsageFirstToken:
+		return "使用记录首字"
 	}
 	return "响应头"
 }
@@ -402,6 +418,11 @@ type ProxyAutoSwitchRepository interface {
 	// LatencyStats returns p50 per (account, proxy) for metric, which must be
 	// ProxyAutoSwitchMetricResponseHeaders or ProxyAutoSwitchMetricFirstToken.
 	LatencyStats(ctx context.Context, metric string, accountIDs []int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error)
+	// FirstTokenUsage runs the first-token-trend usage query (usage_logs of the
+	// groups overlapping [from, to)) and trace query (egress attempts started in
+	// [traceFrom, to), with request ids) for each group, so usage_first_token is
+	// judged on exactly the samples the trend board shows.
+	FirstTokenUsage(ctx context.Context, groupIDs []int64, from, to, traceFrom time.Time) ([]FirstTokenTrendUsageSample, []FirstTokenTrendTraceSample, error)
 	InsertEvent(ctx context.Context, event *ProxyAutoSwitchEvent) error
 	// UpdateEventIfStatus updates mutable fields only while the row still has
 	// expectedStatus; it reports whether the row was updated.

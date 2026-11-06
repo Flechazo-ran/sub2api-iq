@@ -12,7 +12,6 @@ export default {
   filters: {
     group: 'Group',
     range: 'Range',
-    metric: 'Measure',
     series: 'Series',
     autoRefresh: 'Auto refresh',
     autoRefreshHint: 'every 60 s',
@@ -28,14 +27,7 @@ export default {
     hours: '{n} h per bucket',
     seconds: '{n} s per bucket',
   },
-  metric: {
-    usage: 'Usage-log first token',
-    switch: 'Proxy-optimizer first token',
-  },
-  metricHint: {
-    usage: 'Measured from when the request enters the gateway. Matches the first-token value on the usage page and includes request-body upload time.',
-    switch: 'Measured from when the request body finishes uploading. The proxy optimizer uses this to detect slow accounts; upload time is excluded.',
-  },
+  metricHint: 'Same as the first-token value on the usage page: measured from when the request enters the gateway, including request-body upload time.',
   series: {
     avg: 'Average',
     p50: 'p50',
@@ -69,14 +61,14 @@ export default {
   },
   split: {
     title: 'First-token p50 breakdown',
-    sub: 'All three segments are p50 from connection traces and do not follow the measure switch above; shows where the time goes',
+    sub: 'All three segments are p50 from connection traces, measured differently from the first-token value above; shows where the time goes',
     head: 'Gateway → headers sent',
     upload: 'Body upload (via proxy)',
     after: 'Upload done → first token (upstream)',
   },
   events: {
     title: 'Change log',
-    sub: 'Every proxy, concurrency-limit and account-status change, with first-token p50 (selected measure) for 10 minutes before and after',
+    sub: 'Every proxy, concurrency-limit and account-status change, with first-token p50 for 10 minutes before and after',
     empty: 'No changes in this range.',
     colTime: 'Time',
     colAccount: 'Account',

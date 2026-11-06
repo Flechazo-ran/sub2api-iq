@@ -145,6 +145,28 @@ func (r *proxyAutoSwitchRepository) LatencyStats(ctx context.Context, metric str
 	return out, rows.Err()
 }
 
+// FirstTokenUsage reuses the first-token-trend queries unchanged (same SQL,
+// same group filter), so usage_first_token judges on the samples the trend
+// board and the usage page show.
+func (r *proxyAutoSwitchRepository) FirstTokenUsage(ctx context.Context, groupIDs []int64, from, to, traceFrom time.Time) ([]service.FirstTokenTrendUsageSample, []service.FirstTokenTrendTraceSample, error) {
+	trend := &firstTokenTrendRepository{db: r.db}
+	var usage []service.FirstTokenTrendUsageSample
+	var traces []service.FirstTokenTrendTraceSample
+	for _, groupID := range groupIDs {
+		u, err := trend.UsageSamples(ctx, groupID, from, to, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("usage samples of group %d: %w", groupID, err)
+		}
+		t, err := trend.TraceSamples(ctx, groupID, traceFrom, to, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("trace samples of group %d: %w", groupID, err)
+		}
+		usage = append(usage, u...)
+		traces = append(traces, t...)
+	}
+	return usage, traces, nil
+}
+
 const proxyAutoSwitchEventSelect = `
 SELECT e.id, e.created_at, e.updated_at, e.account_id, COALESCE(a.name, ''), e.status, e.metric, e.reason,
        e.from_proxy_id, e.from_proxy_label, e.from_region, e.to_proxy_id, e.to_proxy_label, e.to_region,

@@ -73,7 +73,7 @@ describe('FirstTokenTrendView', () => {
     expect(wrapper.get('[data-testid="ftt-kpi-over10"] .v').text()).toBe('32%')
     expect(wrapper.get('[data-testid="ftt-kpi-inflight"] .d').classes()).not.toContain('down')
     expect(wrapper.get('[data-testid="ftt-kpi-samples"] .v').text()).toBe('527')
-    expect(wrapper.get('[data-testid="ftt-metric-hint"]').text()).toBe(zhFirstTokenTrend.metricHint.usage)
+    expect(wrapper.get('[data-testid="ftt-metric-hint"]').text()).toBe('和使用记录页的首字一致，从请求进网关算，含上传请求体的时间')
   })
 
   it('draws three lines plus the 10 s line, in-flight vs limit, and the stacked split, in seconds', async () => {
@@ -128,13 +128,13 @@ describe('FirstTokenTrendView', () => {
     expect(rows[2].text()).toContain(zhFirstTokenTrend.dims.noRowData)
   })
 
-  it('reloads when the measure changes and swaps the explanation', async () => {
+  it('has no measure switch: always usage-log first token', async () => {
     wrapper = mountView(); await flushPromises()
-    api.getTrend.mockResolvedValueOnce(trend({ metric: 'switch' }))
-    await wrapper.get('[data-testid="ftt-metric-switch"]').trigger('click'); await flushPromises()
-    expect(api.getTrend).toHaveBeenCalledTimes(2)
-    expect(lastQuery()).toMatchObject({ metric: 'switch', dimension: 'account' })
-    expect(wrapper.get('[data-testid="ftt-metric-hint"]').text()).toBe(zhFirstTokenTrend.metricHint.switch)
+    expect(wrapper.find('[data-testid="ftt-metric-usage"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="ftt-metric-switch"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('代理优选首字')
+    await wrapper.get('[data-testid="ftt-range-30m"]').trigger('click'); await flushPromises()
+    expect(lastQuery()).toMatchObject({ metric: 'usage', range: '30m' })
   })
 
   it('reloads when the breakdown dimension or range changes', async () => {
