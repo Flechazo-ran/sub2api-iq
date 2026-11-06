@@ -19,6 +19,13 @@
           <span v-if="groupsError" class="field-hint text-amber-600 dark:text-amber-400" data-testid="ftt-groups-error">{{ t('firstTokenTrend.filters.groupsLoadFailed') }}</span>
         </div>
         <div class="fgroup">
+          <label class="flabel" for="ftt-account">{{ t('firstTokenTrend.filters.account') }}</label>
+          <select id="ftt-account" v-model="accountId" class="input group-select" data-testid="ftt-account">
+            <option :value="null">{{ t('firstTokenTrend.filters.accountAll') }}</option>
+            <option v-for="account in accountOptions" :key="account.id" :value="account.id">{{ accountOptionLabel(account) }}</option>
+          </select>
+        </div>
+        <div class="fgroup">
           <span id="ftt-range-label" class="flabel">{{ t('firstTokenTrend.filters.range') }}</span>
           <div class="seg" role="radiogroup" aria-labelledby="ftt-range-label">
             <button v-for="option in ranges" :key="option" type="button" role="radio" :aria-checked="!selection && range === option" :class="{ on: !selection && range === option }" :data-testid="`ftt-range-${option}`" @click="setRange(option)">{{ t(`firstTokenTrend.range.${option}`) }}</button>
@@ -177,7 +184,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { useAutoRefresh } from '@/composables/useAutoRefresh'
 import { tickEveryMinutes } from '@/components/admin/firstTokenTrend/axis'
 import { computeAxisCap, pointsAbove } from '@/components/admin/firstTokenTrend/spike'
-import { firstTokenTrendAPI, type FirstTokenTrendBucket, type FirstTokenTrendData, type FirstTokenTrendDimension, type FirstTokenTrendEvent, type FirstTokenTrendEventType, type FirstTokenTrendGroup, type FirstTokenTrendQuery, type FirstTokenTrendRange, type FirstTokenTrendRow } from '@/api/admin/firstTokenTrend'
+import { firstTokenTrendAPI, type FirstTokenTrendAccount, type FirstTokenTrendBucket, type FirstTokenTrendData, type FirstTokenTrendDimension, type FirstTokenTrendEvent, type FirstTokenTrendEventType, type FirstTokenTrendGroup, type FirstTokenTrendQuery, type FirstTokenTrendRange, type FirstTokenTrendRow } from '@/api/admin/firstTokenTrend'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, BarElement, Tooltip, Filler)
@@ -209,6 +216,8 @@ const palette = computed(() => isDark.value
 
 // ---- 筛选 ----
 const groupId = ref(DEFAULT_GROUP_ID)
+// null = 全部账号（不区分）；有值就带 account_id 只算这个号。
+const accountId = ref<number | null>(null)
 const range = ref<FirstTokenTrendRange>('2h')
 const dimension = ref<FirstTokenTrendDimension>('account')
 const shown = reactive<Record<SeriesKey, boolean>>({ avg: true, p50: true, p80: true })
@@ -232,6 +241,12 @@ async function loadGroups() {
 
 // ---- 数据 ----
 const data = ref<FirstTokenTrendData | null>(null)
+// 下拉里的号用后端每次返回的全量 accounts；切分组时先清空，等新分组的数据回来再填，避免在空档里选到旧分组的号。
+const accountOptions = ref<FirstTokenTrendAccount[]>([])
+function accountOptionLabel(account: FirstTokenTrendAccount) {
+  const unavailable = account.status !== 'active' || !account.schedulable
+  return `${account.label}${unavailable ? t('firstTokenTrend.filters.accountUnavailable') : ''}`
+}
 const loading = ref(false), error = ref(''), loadedAt = ref('')
 // 总览条保留框选前那次整段请求的 buckets，框选后不覆盖。
 const overviewBuckets = ref<FirstTokenTrendBucket[]>([])
@@ -240,6 +255,8 @@ const overviewEl = ref<HTMLElement | null>(null)
 const trendBoxEl = ref<HTMLElement | null>(null)
 let resizeObserver: ResizeObserver | null = null
 const MIN_SELECTION_MS = 10 * 60 * 1000
+// 后端规定 from 不能早于「现在 − 12 小时 − 1 分钟」；这里取「现在 − 12 小时 + 1 分钟」，给请求在路上的时间和本机时钟的误差留余量。
+const MAX_LOOKBACK_MS = 12 * 60 * 60 * 1000 - 60 * 1000
 interface TimeSelection { from: number; to: number }
 const selection = ref<TimeSelection | null>(null)
 const previewSelection = ref<TimeSelection | null>(null)
@@ -273,11 +290,27 @@ function cancelSelection() {
   void load()
 }
 
+function applyOverview(result: FirstTokenTrendData) {
+  overviewBuckets.value = result.buckets
+  overviewFrom.value = toDate(result.from)?.getTime() ?? 0
+  overviewTo.value = toDate(result.to)?.getTime() ?? 0
+  overviewStepMs.value = (result.step_seconds || 60) * 1000
+}
 let seq = 0, disposed = false
 async function load() {
+  let selected = selection.value ? { ...selection.value } : null
+  if (selected) {
+    const clamped = clampSelectionToRange(selected)
+    // 夹完不足 10 分钟就不发请求；不动 seq 和 loading，正在飞的请求照常处理。
+    if (!clamped) return
+    selected = clamped
+    // 让框选标签、总览高亮和实际发出去的窗口一致。
+    if (clamped.from !== selection.value!.from || clamped.to !== selection.value!.to) selection.value = clamped
+  }
   const current = ++seq
-  const selected = selection.value ? { ...selection.value } : null
+  const account = accountId.value
   const query: FirstTokenTrendQuery = { group_id: groupId.value, dimension: dimension.value }
+  if (account != null) query.account_id = account
   if (selected) {
     query.from = new Date(selected.from).toISOString()
     query.to = new Date(selected.to).toISOString()
@@ -289,13 +322,9 @@ async function load() {
     const result = await firstTokenTrendAPI.getTrend(query)
     if (current !== seq || disposed) return
     data.value = result
+    accountOptions.value = result.accounts
     // 只有整段范围的请求才更新总览；框选后仍显示框选前的整段。
-    if (!selected && !selection.value) {
-      overviewBuckets.value = result.buckets
-      overviewFrom.value = toDate(result.from)?.getTime() ?? 0
-      overviewTo.value = toDate(result.to)?.getTime() ?? 0
-      overviewStepMs.value = (result.step_seconds || 60) * 1000
-    }
+    if (!selected && !selection.value) applyOverview(result)
     loadedAt.value = clock(new Date(), true)
     hoveredEvent.value = null
   } catch (err) {
@@ -306,7 +335,34 @@ async function load() {
 }
 const autoRefresh = useAutoRefresh({ storageKey: 'admin.firstTokenTrend.autoRefresh', intervals: [60], defaultInterval: 60, defaultEnabled: true, onRefresh: load, shouldPause: () => document.hidden || loading.value || !!selection.value })
 function manualRefresh() { autoRefresh.resetCountdown(); void load() }
-watch(groupId, () => { clearSelectionState(); manualRefresh() })
+// 框选期间换号：主区仍走带 from/to 的请求，这里再发一次整范围请求，只刷新总览条。
+let overviewSeq = 0
+async function refreshOverview() {
+  const current = ++overviewSeq
+  const query: FirstTokenTrendQuery = { group_id: groupId.value, dimension: dimension.value, range: range.value }
+  if (accountId.value != null) query.account_id = accountId.value
+  try {
+    const result = await firstTokenTrendAPI.getTrend(query)
+    if (current !== overviewSeq || disposed || !selection.value) return
+    applyOverview(result)
+  } catch { /* 总览条刷新失败不影响主区 */ }
+}
+// 切分组时账号筛选回到「全部账号」，并且只发一次请求（账号的 watch 不再重复触发）。
+let accountResetForGroup = false
+watch(groupId, () => {
+  clearSelectionState()
+  accountOptions.value = []
+  if (accountId.value !== null) {
+    accountResetForGroup = true
+    accountId.value = null
+  }
+  manualRefresh()
+})
+watch(accountId, () => {
+  if (accountResetForGroup) { accountResetForGroup = false; return }
+  if (selection.value) void refreshOverview()
+  manualRefresh()
+})
 watch(dimension, manualRefresh)
 
 const buckets = computed<FirstTokenTrendBucket[]>(() => data.value?.buckets ?? [])
@@ -397,6 +453,14 @@ function makeSelection(a: number, b: number): TimeSelection | null {
   if (from == null || to == null || to - from < MIN_SELECTION_MS) return null
   return { from, to }
 }
+// 总览条可能停在旧数据上，from 会早于后端允许的「现在 − 12 小时」，to 不能晚于现在；按当前时钟再夹一次。夹完不足 10 分钟就不发请求。框选之后 `load()` 重发请求时也会再夹。
+function clampSelectionToRange(selected: TimeSelection): TimeSelection | null {
+  const now = Date.now()
+  const from = Math.max(selected.from, now - MAX_LOOKBACK_MS)
+  const to = Math.min(selected.to, now)
+  if (to - from < MIN_SELECTION_MS) return null
+  return { from, to }
+}
 function onOverviewPointerDown(event: PointerEvent) {
   if (event.button != null && event.button !== 0) return
   const time = timeAtClientX(event.clientX)
@@ -420,8 +484,9 @@ function onOverviewPointerUp(event: PointerEvent) {
   try { (event.currentTarget as Element | null)?.releasePointerCapture?.(event.pointerId) } catch { /* ignore */ }
   const next = makeSelection(start, end)
   previewSelection.value = null
-  if (!next) return
-  selection.value = next
+  const clamped = next ? clampSelectionToRange(next) : null
+  if (!clamped) return
+  selection.value = clamped
   autoRefresh.resetCountdown()
   void load()
 }
