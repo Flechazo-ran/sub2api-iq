@@ -25,11 +25,16 @@ func TestHTTPUpstreamProxyChangeKeepsInFlightStream(t *testing.T) {
 			oldProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					t.Error("missing Flusher")
+					return
+				}
 				_, _ = io.WriteString(w, "data: first\n\n")
-				w.(http.Flusher).Flush()
+				flusher.Flush()
 				<-release
 				_, _ = io.WriteString(w, "data: second\n\n")
-				w.(http.Flusher).Flush()
+				flusher.Flush()
 				_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			}))
 			t.Cleanup(oldProxy.Close)
@@ -62,7 +67,8 @@ func TestHTTPUpstreamProxyChangeKeepsInFlightStream(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, next.Body.Close())
 			require.Equal(t, "via-new-proxy", string(body))
-			svc := upstream.(*httpUpstreamService)
+			svc, ok := upstream.(*httpUpstreamService)
+			require.True(t, ok)
 			svc.mu.RLock()
 			pools := len(svc.clients)
 			svc.mu.RUnlock()

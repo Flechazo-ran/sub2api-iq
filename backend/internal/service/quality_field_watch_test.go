@@ -327,7 +327,7 @@ func (r *fieldWatchPlanRepo) ClaimPelican(_ context.Context, p *ScheduledTestPla
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	due := r.plan.NextRunAt != nil && !r.plan.NextRunAt.After(now)
-	if !due && !(IsQualityFieldWatchTrigger(p.TriggerSource) && isOpenAICodexFieldWatchPlan(r.plan.PelicanConfig)) {
+	if !due && (!IsQualityFieldWatchTrigger(p.TriggerSource) || !isOpenAICodexFieldWatchPlan(r.plan.PelicanConfig)) {
 		return false, nil
 	}
 	r.claims = append(r.claims, p.TriggerSource)

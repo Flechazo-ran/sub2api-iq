@@ -18,8 +18,8 @@ func TestOriginalCandyVariantIsTheOriginalQuestion(t *testing.T) {
 var (
 	candyVariantClarifyAppleFirst = regexp.MustCompile(`圆形的?苹果(口)?味[^，。；]*?五角星形?的?桃子`)
 	candyVariantClarifyPeachFirst = regexp.MustCompile(`圆形的?桃子(口)?味[^，。；]*?五角星形?的?苹果`)
-	candyVariantRuleMarkers      = []string{"前决定", "开始前就定好", "前先确定", "摸之前", "开始前报出"}
-	candyVariantTouchMarkers     = []string{"手感", "一摸"}
+	candyVariantRuleMarkers       = []string{"前决定", "开始前就定好", "前先确定", "摸之前", "开始前报出"}
+	candyVariantTouchMarkers      = []string{"手感", "一摸"}
 )
 
 // 随机题面逐条核对：题目的每个条件都还在，答案不会混进题面。
