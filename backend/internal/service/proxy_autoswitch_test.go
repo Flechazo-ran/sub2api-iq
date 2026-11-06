@@ -603,12 +603,12 @@ func TestProxyAutoSwitchAccountCooldown(t *testing.T) {
 	cfg := DefaultProxyAutoSwitchConfig()
 	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	hist := ProxyAutoSwitchHistory{LastSwitchAt: &at}
-	require.NotNil(t, proxyAutoSwitchGate(cfg, at.Add(9*time.Minute), false, hist, nil))
-	require.NotNil(t, proxyAutoSwitchGate(cfg, at.Add(10*time.Minute-time.Second), false, hist, nil))
-	require.Nil(t, proxyAutoSwitchGate(cfg, at.Add(10*time.Minute), false, hist, nil))
-	require.Nil(t, proxyAutoSwitchGate(cfg, at.Add(11*time.Minute), false, hist, nil))
+	require.NotNil(t, proxyAutoSwitchGate(cfg, at.Add(9*time.Minute), false, hist))
+	require.NotNil(t, proxyAutoSwitchGate(cfg, at.Add(10*time.Minute-time.Second), false, hist))
+	require.Nil(t, proxyAutoSwitchGate(cfg, at.Add(10*time.Minute), false, hist))
+	require.Nil(t, proxyAutoSwitchGate(cfg, at.Add(11*time.Minute), false, hist))
 	cfg.AccountCooldownMinutes = 360
-	require.NotNil(t, proxyAutoSwitchGate(cfg, at.Add(5*time.Hour), false, hist, nil), "a configured longer cooldown still holds")
+	require.NotNil(t, proxyAutoSwitchGate(cfg, at.Add(5*time.Hour), false, hist), "a configured longer cooldown still holds")
 }
 
 func TestProxyAutoSwitchRetryBackoffAfterNoCandidate(t *testing.T) {
@@ -721,21 +721,30 @@ func TestProxyAutoSwitchHourlyCap(t *testing.T) {
 	}
 }
 
-func TestProxyAutoSwitchManualChangeHold(t *testing.T) {
+// 人工改过代理不再有等待期：改完后在新代理上重新数连续慢，连续慢 2 次照样换。
+func TestProxyAutoSwitchManualChangeThenTwoSlowChecksSwitches(t *testing.T) {
 	w := slowWorld(t)
 	svc := w.service()
 	runChecks(t, svc, w, 1)
+	require.Equal(t, 1, svc.slowChecks(65, autoSwitchInt64(91), enabledPASConfig().Metric))
 	// Someone moves the account to another proxy outside this feature.
 	w.addProxy(92, "JP", 30)
 	w.accounts[65].ProxyID = autoSwitchInt64(92)
 	w.setProbe(92, 1800)
-	runChecks(t, svc, w, 4)
-	require.Empty(t, w.updates)
-	require.NotNil(t, w.states[65].ExternalChangeAt)
 
-	w.advance(6 * time.Hour)
-	runChecks(t, svc, w, 2)
-	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	runChecks(t, svc, w, 1)
+	require.Empty(t, w.updates, "the streak on the old proxy does not carry over")
+	require.NotNil(t, w.states[65].ExternalChangeAt, "the manual change is still recorded")
+	require.Equal(t, 1, svc.slowChecks(65, autoSwitchInt64(92), enabledPASConfig().Metric))
+	diag, err := svc.AccountsDiag(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, ProxyAutoSwitchStateSlow, diag.Items[0].State)
+	require.Empty(t, diag.Items[0].Note)
+	require.Nil(t, diag.Items[0].CooldownUntil)
+
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates, "second slow check on the new proxy switches")
+	require.Equal(t, int64(92), *w.lastEvent().FromProxyID)
 }
 
 func TestProxyAutoSwitchManualChangeFromAuditOnFirstSight(t *testing.T) {
@@ -745,16 +754,22 @@ func TestProxyAutoSwitchManualChangeFromAuditOnFirstSight(t *testing.T) {
 		{CreatedAt: w.now.Add(-2 * time.Hour), Action: "admin.accounts.update", ParamID: "66", RequestBody: `{"proxy_id":91}`},
 	}
 	svc := w.service()
-	runChecks(t, svc, w, 2)
-	require.Equal(t, [][2]int64{{65, 96}}, w.updates, "older than 6h or other account: not a hold")
+	runChecks(t, svc, w, 1)
+	require.Nil(t, w.states[65].ExternalChangeAt, "older than 6h or other account: not recorded")
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 
+	// A recent manual change found in audit_logs is recorded, but does not hold the account.
 	w = slowWorld(t)
 	w.audit = []ProxyAutoSwitchAuditWrite{
 		{CreatedAt: w.now.Add(-2 * time.Hour), Action: "admin.accounts.bulk_update.create", RequestBody: `{"account_ids":[3,65],"proxy_id":91}`},
 	}
-	runChecks(t, w.service(), w, 3)
+	svc = w.service()
+	runChecks(t, svc, w, 1)
 	require.Empty(t, w.updates)
-	require.Equal(t, w.now.Add(-2*time.Hour-3*time.Minute), *w.states[65].ExternalChangeAt)
+	require.Equal(t, w.now.Add(-2*time.Hour-time.Minute), *w.states[65].ExternalChangeAt)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 }
 
 // The #68 case: imported at 13:55:48, proxy set by admin.accounts.update at
@@ -796,7 +811,7 @@ func TestProxyAutoSwitchNewAccountClearsStoredSetupChange(t *testing.T) {
 	svc := w.service()
 	diag, err := svc.AccountsDiag(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, ProxyAutoSwitchStateSkipped, diag.Items[0].State, "before the next check the old value still holds")
+	require.Equal(t, ProxyAutoSwitchStateSlow, diag.Items[0].State, "a stored change does not hold the account")
 
 	runChecks(t, svc, w, 1)
 	require.Nil(t, w.states[65].ExternalChangeAt, "stored setup-time change is cleared")
@@ -816,7 +831,8 @@ func TestProxyAutoSwitchNewAccountClearsStoredSetupChange(t *testing.T) {
 }
 
 func TestProxyAutoSwitchProxyChangedAfterSetupWindowIsManual(t *testing.T) {
-	// Created 31 minutes ago, proxy changed now: a manual change, 6-hour hold.
+	// Created 31 minutes ago, proxy changed now: recorded as a manual change,
+	// which no longer holds the account.
 	w := slowWorld(t)
 	w.accounts[65].CreatedAt = w.now.Add(-31 * time.Minute)
 	svc := w.service()
@@ -824,14 +840,16 @@ func TestProxyAutoSwitchProxyChangedAfterSetupWindowIsManual(t *testing.T) {
 	w.addProxy(92, "JP", 30)
 	w.setProbe(92, 1800)
 	w.accounts[65].ProxyID = autoSwitchInt64(92)
-	runChecks(t, svc, w, 4)
+	runChecks(t, svc, w, 1)
 	require.Empty(t, w.updates)
 	require.NotNil(t, w.states[65].ExternalChangeAt)
 	diag, err := svc.AccountsDiag(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "代理被人工改过，6 小时内不自动改", diag.Items[0].Note)
+	require.Empty(t, diag.Items[0].Note)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 
-	// On first sight, an audit edit 31 minutes after creation is a hold too.
+	// On first sight, an audit edit 31 minutes after creation is recorded too.
 	w = slowWorld(t)
 	created := w.now.Add(-2 * time.Hour)
 	w.accounts[65].CreatedAt = created
@@ -839,9 +857,9 @@ func TestProxyAutoSwitchProxyChangedAfterSetupWindowIsManual(t *testing.T) {
 		{CreatedAt: created.Add(3 * time.Second), Action: "admin.accounts.update", ParamID: "65", RequestBody: `{"proxy_id":91}`},
 		{CreatedAt: created.Add(31 * time.Minute), Action: "admin.accounts.update", ParamID: "65", RequestBody: `{"proxy_id":91}`},
 	}
-	runChecks(t, w.service(), w, 3)
-	require.Empty(t, w.updates)
+	runChecks(t, w.service(), w, 2)
 	require.Equal(t, created.Add(31*time.Minute), *w.states[65].ExternalChangeAt)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 
 	// A stored change after the window is not cleared by later checks.
 	w = slowWorld(t)
@@ -849,9 +867,9 @@ func TestProxyAutoSwitchProxyChangedAfterSetupWindowIsManual(t *testing.T) {
 	w.accounts[65].CreatedAt = created
 	manual := created.Add(40 * time.Minute)
 	w.states[65] = ProxyAutoSwitchAccountState{AccountID: 65, ProxyID: autoSwitchInt64(91), SeenAt: w.now.Add(-time.Minute), ExternalChangeAt: &manual}
-	runChecks(t, w.service(), w, 3)
-	require.Empty(t, w.updates)
+	runChecks(t, w.service(), w, 2)
 	require.Equal(t, manual, *w.states[65].ExternalChangeAt)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 }
 
 func TestProxyAutoSwitchNextStateSetupWindow(t *testing.T) {
@@ -1115,7 +1133,7 @@ func TestProxyAutoSwitchManualRevert(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ProxyAutoSwitchStatusManualRevert, got.Status)
 	require.Equal(t, int64(91), *w.accounts[65].ProxyID)
-	require.NotNil(t, w.states[65].ExternalChangeAt, "manual revert starts the 6-hour manual hold")
+	require.NotNil(t, w.states[65].ExternalChangeAt, "manual revert is recorded as a manual change")
 
 	_, err = svc.ManualRevert(ctx, e.ID)
 	requireBadRequest(t, err, "只有观察中、已换上新代理")

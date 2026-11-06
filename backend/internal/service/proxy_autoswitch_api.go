@@ -101,10 +101,6 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 	if err != nil {
 		return nil, err
 	}
-	states, err := s.repo.LoadAccountStates(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
 	regions, _ := s.cachedRegions(ctx, proxyIDs)
 	for _, a := range accounts {
 		st := latencyStatFor(stats, a.ID, a.ProxyID)
@@ -116,13 +112,9 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 		if st.Samples > 0 {
 			item.P50MS = autoSwitchInt64(st.P50MS)
 		}
-		var state *ProxyAutoSwitchAccountState
-		if v, ok := states[a.ID]; ok {
-			state = &v
-		}
 		if ok, note := proxyAutoSwitchEligible(a); !ok {
 			item.State, item.Note = ProxyAutoSwitchStateSkipped, note
-		} else if gate := proxyAutoSwitchGate(cfg, now, observing[a.ID], history[a.ID], state); gate != nil {
+		} else if gate := proxyAutoSwitchGate(cfg, now, observing[a.ID], history[a.ID]); gate != nil {
 			item.State, item.CooldownUntil, item.Note = gate.state, gate.until, gate.note
 		} else {
 			item.State = proxyAutoSwitchJudge(cfg, st.Samples, st.P50MS)
@@ -143,9 +135,9 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 
 // ManualRevert puts the old proxy back for an observing, kept or not_faster switch, when
 // the account still uses the proxy this event switched to and the old proxy is
-// still idle. A manual revert counts as a manual proxy change (6-hour hold),
-// except within 30 minutes of creating the account, where every proxy change
-// counts as part of the setup.
+// still idle. A manual revert is recorded as a manual proxy change
+// (external_change_at, a record only, no hold), except within 30 minutes of
+// creating the account, where every proxy change counts as part of the setup.
 func (s *ProxyAutoSwitchService) ManualRevert(ctx context.Context, eventID int64) (*ProxyAutoSwitchEvent, error) {
 	if eventID <= 0 {
 		return nil, infraerrors.BadRequest("PROXY_AUTOSWITCH_EVENT_INVALID", "记录 ID 无效")

@@ -114,7 +114,9 @@ type proxyAutoSwitchGateResult struct {
 }
 
 // proxyAutoSwitchGate decides whether a slow account may be switched now.
-func proxyAutoSwitchGate(cfg ProxyAutoSwitchConfig, now time.Time, observing bool, hist ProxyAutoSwitchHistory, state *ProxyAutoSwitchAccountState) *proxyAutoSwitchGateResult {
+// A manual proxy change does not hold the account: the new proxy starts a
+// fresh slow streak (recordCheck) and is judged like any other.
+func proxyAutoSwitchGate(cfg ProxyAutoSwitchConfig, now time.Time, observing bool, hist ProxyAutoSwitchHistory) *proxyAutoSwitchGateResult {
 	if observing {
 		return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateObserving, note: "换代理后观察中"}
 	}
@@ -124,13 +126,6 @@ func proxyAutoSwitchGate(cfg ProxyAutoSwitchConfig, now time.Time, observing boo
 		if now.Before(until) {
 			return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateCooldown, until: &until,
 				note: fmt.Sprintf("%d 分钟内已经自动换过一次代理", cfg.AccountCooldownMinutes)}
-		}
-	}
-	if state != nil && state.ExternalChangeAt != nil {
-		until := state.ExternalChangeAt.Add(proxyAutoSwitchExternalHold)
-		if now.Before(until) {
-			return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateSkipped, until: &until,
-				note: "代理被人工改过，6 小时内不自动改"}
 		}
 	}
 	if hist.LastMissAt != nil {
@@ -154,9 +149,9 @@ func sameProxyID(a, b *int64) bool {
 // differs from the previous check and was not set by this feature (the feature
 // updates the state itself right after switching) counts as an external change.
 // For an account seen for the first time, audit_logs of the last 6 hours decide.
+// external_change_at is only a record; it does not stop automatic switching.
 // A proxy set during the new-account setup window (created_at + 30 min) is part
-// of creating the account, not a manual change, so it never holds the account:
-// such a change is not recorded, and one already stored (from before this rule,
+// of creating the account, not a manual change: such a change is not recorded, and one already stored (from before this rule,
 // in prev or in the table) is cleared through ClearExternalUpTo.
 func proxyAutoSwitchNextState(prev *ProxyAutoSwitchAccountState, account ProxyAutoSwitchAccount, now time.Time, audit []ProxyAutoSwitchAuditWrite) ProxyAutoSwitchAccountState {
 	next := ProxyAutoSwitchAccountState{AccountID: account.ID, ProxyID: account.ProxyID, SeenAt: now}
@@ -255,7 +250,7 @@ func (s *ProxyAutoSwitchService) trackAccountStates(ctx context.Context, account
 	var audit []ProxyAutoSwitchAuditWrite
 	for _, a := range accounts {
 		if _, ok := states[a.ID]; !ok {
-			audit, err = s.repo.ListAuditProxyWrites(ctx, now.Add(-proxyAutoSwitchExternalHold))
+			audit, err = s.repo.ListAuditProxyWrites(ctx, now.Add(-proxyAutoSwitchAuditLookback))
 			if err != nil {
 				return err
 			}
@@ -340,10 +335,6 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 	if err != nil {
 		return err
 	}
-	states, err := s.repo.LoadAccountStates(ctx, dueIDs)
-	if err != nil {
-		return err
-	}
 	switchedLastHour, err := s.repo.CountEventsSince(ctx, now.Add(-time.Hour), proxyAutoSwitchSwitchedStatuses)
 	if err != nil {
 		return err
@@ -352,11 +343,7 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var state *ProxyAutoSwitchAccountState
-		if st, ok := states[d.account.ID]; ok {
-			state = &st
-		}
-		if gate := proxyAutoSwitchGate(cfg, s.now(), observing[d.account.ID], history[d.account.ID], state); gate != nil {
+		if gate := proxyAutoSwitchGate(cfg, s.now(), observing[d.account.ID], history[d.account.ID]); gate != nil {
 			continue
 		}
 		if switchedLastHour >= cfg.MaxSwitchesPerHour {

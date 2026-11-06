@@ -61,8 +61,9 @@ const (
 	proxyAutoSwitchKeepDropPct = 20
 	// 观察样本不足时最多延长到观察时长的 2 倍（默认 10 → 20 分钟）。
 	proxyAutoSwitchObserveExtendFactor = 2
-	// 不是本功能改的代理（人工改过），6 小时内不自动改。
-	proxyAutoSwitchExternalHold = 6 * time.Hour
+	// 第一次看到的号，回看这么久的 audit_logs 记下人工改代理的时间（external_change_at）。
+	// 只做记录：人工改过代理不再拦自动换（老板 11-06 定，一个号大概只活 2 小时）。
+	proxyAutoSwitchAuditLookback = 6 * time.Hour
 	// proxyAutoSwitchNewAccountSetup：建号后这段时间内设的代理属于建号流程（导入后再补代理、分组），
 	// 不算人工改过代理，新号首字慢照样可以自动换（老板 11-04 定）。
 	proxyAutoSwitchNewAccountSetup = 30 * time.Minute
