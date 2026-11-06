@@ -2,18 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
-
-func autoSwitchInt64(v int64) *int64 { return &v }
-
-func autoSwitchString(v string) *string { return &v }
 
 func (s *ProxyAutoSwitchService) rememberRegion(proxyID int64, code string, ttl time.Duration) {
 	s.mu.Lock()
@@ -22,10 +20,9 @@ func (s *ProxyAutoSwitchService) rememberRegion(proxyID int64, code string, ttl 
 }
 
 // cachedRegions reads exit country codes from the proxy latency cache and the
-// in-memory memo, never probing. Hints are cached latencies used for ordering.
-func (s *ProxyAutoSwitchService) cachedRegions(ctx context.Context, ids []int64) (map[int64]string, map[int64]*int64) {
+// in-memory memo, never probing.
+func (s *ProxyAutoSwitchService) cachedRegions(ctx context.Context, ids []int64) map[int64]string {
 	regions := make(map[int64]string, len(ids))
-	hints := make(map[int64]*int64, len(ids))
 	if s.latency != nil && len(ids) > 0 {
 		if infos, err := s.latency.GetProxyLatencies(ctx, ids); err == nil {
 			for id, info := range infos {
@@ -34,9 +31,6 @@ func (s *ProxyAutoSwitchService) cachedRegions(ctx context.Context, ids []int64)
 				}
 				if code := strings.ToUpper(strings.TrimSpace(info.CountryCode)); code != "" {
 					regions[id] = code
-				}
-				if info.Success && info.LatencyMs != nil {
-					hints[id] = autoSwitchInt64(*info.LatencyMs)
 				}
 			}
 		} else {
@@ -54,18 +48,18 @@ func (s *ProxyAutoSwitchService) cachedRegions(ctx context.Context, ids []int64)
 		}
 	}
 	s.mu.Unlock()
-	return regions, hints
+	return regions
 }
 
 // resolveRegions fills missing regions with the proxy exit-info probe.
-func (s *ProxyAutoSwitchService) resolveRegions(ctx context.Context, proxies []Proxy) (map[int64]string, map[int64]*int64) {
+func (s *ProxyAutoSwitchService) resolveRegions(ctx context.Context, proxies []Proxy) map[int64]string {
 	ids := make([]int64, 0, len(proxies))
 	for _, p := range proxies {
 		ids = append(ids, p.ID)
 	}
-	regions, hints := s.cachedRegions(ctx, ids)
+	regions := s.cachedRegions(ctx, ids)
 	if s.exitProber == nil {
-		return regions, hints
+		return regions
 	}
 	now := s.now()
 	missing := make([]Proxy, 0)
@@ -81,7 +75,7 @@ func (s *ProxyAutoSwitchService) resolveRegions(ctx context.Context, proxies []P
 	}
 	s.mu.Unlock()
 	if len(missing) == 0 {
-		return regions, hints
+		return regions
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, proxyAutoSwitchRegionTimeout)
 	defer cancel()
@@ -110,16 +104,14 @@ func (s *ProxyAutoSwitchService) resolveRegions(ctx context.Context, proxies []P
 		}(p)
 	}
 	wg.Wait()
-	return regions, hints
+	return regions
 }
 
-// withAssignLock serializes every proxy assignment made by this feature
-// (background switches and manual reverts) across instances, so the "target
-// proxy is still idle" check and the update cannot interleave. Finishing an
-// observation takes it too, so it cannot race a manual revert. fn gets
-// a context detached from the caller's cancellation (bounded by
-// proxyAutoSwitchAssignTimeout), so a cycle timeout or a closed admin request
-// cannot stop between the account update and its event record.
+// withAssignLock serializes every proxy assignment made by this feature across
+// instances, so the "target proxy is still idle" check and the update cannot
+// interleave. fn gets a context detached from the caller's cancellation
+// (bounded by proxyAutoSwitchAssignTimeout), so a cycle timeout or a closed
+// admin request cannot stop between the account update and its event record.
 func (s *ProxyAutoSwitchService) withAssignLock(ctx context.Context, fn func(ctx context.Context) error) error {
 	s.assignMu.Lock()
 	defer s.assignMu.Unlock()
@@ -171,11 +163,14 @@ func (s *ProxyAutoSwitchService) setAccountProxy(ctx context.Context, accountID,
 	return nil
 }
 
-func (s *ProxyAutoSwitchService) saveSeenProxy(ctx context.Context, accountID, proxyID int64, external *time.Time) {
-	state := ProxyAutoSwitchAccountState{AccountID: accountID, ProxyID: autoSwitchInt64(proxyID), SeenAt: s.now(), ExternalChangeAt: external}
-	if err := s.repo.UpsertAccountState(ctx, state); err != nil {
-		slog.Warn("proxy_autoswitch_save_state_failed", "account_id", accountID, "error", err)
+func proxyAutoSwitchLabel(p *Proxy) string {
+	if p == nil {
+		return ""
 	}
+	if name := strings.TrimSpace(p.Name); name != "" {
+		return name
+	}
+	return "#" + fmt.Sprint(p.ID)
 }
 
 func truncateReason(text string) string {
@@ -186,101 +181,264 @@ func truncateReason(text string) string {
 	return text
 }
 
-// attemptSwitch probes candidates for one slow account and switches when a
-// candidate is fast enough. It reports whether the account was switched.
-func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAutoSwitchConfig, account ProxyAutoSwitchAccount, stat ProxyAutoSwitchLatencyStat) (bool, error) {
+func sameProxyID(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func proxyAutoSwitchGroupID(account ProxyAutoSwitchAccount, cfg ProxyAutoSwitchConfig) *int64 {
+	for _, groupID := range account.GroupIDs {
+		for _, configured := range cfg.GroupIDs {
+			if groupID == configured {
+				v := groupID
+				return &v
+			}
+		}
+	}
+	if len(cfg.GroupIDs) > 0 {
+		v := cfg.GroupIDs[0]
+		return &v
+	}
+	return nil
+}
+
+func proxyAutoSwitchStats(stat ProxyAutoSwitchLatencyStat) *ProxyAutoSwitchEventStats {
+	out := &ProxyAutoSwitchEventStats{Samples: stat.Samples}
+	if stat.Samples > 0 {
+		out.P60MS = autoSwitchInt64(stat.P60MS)
+		out.MeanMS = autoSwitchInt64(stat.MeanMS)
+		out.DurationMeanMS = autoSwitchInt64(stat.DurationMeanMS)
+	}
+	return out
+}
+
+func proxyAutoSwitchEventFor(account ProxyAutoSwitchAccount, cfg ProxyAutoSwitchConfig, current *Proxy,
+	currentRegion string, stat ProxyAutoSwitchLatencyStat) *ProxyAutoSwitchEvent {
+	groupID := proxyAutoSwitchGroupID(account, cfg)
+	strategy := cfg.Strategy
+	window := cfg.WindowMinutes
+	return &ProxyAutoSwitchEvent{
+		AccountID:      account.ID,
+		AccountName:    account.Name,
+		GroupID:        groupID,
+		Strategy:       &strategy,
+		FromProxyID:    autoSwitchInt64(current.ID),
+		FromProxyLabel: proxyAutoSwitchLabel(current),
+		FromRegion:     currentRegion,
+		WindowMinutes:  &window,
+		Before:         proxyAutoSwitchStats(stat),
+	}
+}
+
+// proxyAutoSwitchPoolIssue counts why configured candidates were not usable.
+type proxyAutoSwitchPoolIssue struct {
+	missing  int
+	inactive int
+	expired  int
+	used     int
+	current  int
+}
+
+func (p proxyAutoSwitchPoolIssue) emptyReason() string {
+	total := p.missing + p.inactive + p.expired + p.used + p.current
+	switch {
+	case total == 0:
+		return "候选代理池为空"
+	case p.used == total:
+		return "池子里的代理都被别的号占用了"
+	case p.expired == total:
+		return "池子里的代理都过期了"
+	case p.inactive == total:
+		return "池子里的代理都不可用了"
+	case p.current == total:
+		return "候选代理池里只有当前代理"
+	}
+	parts := make([]string, 0, 4)
+	if p.missing > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个不存在或已删除", p.missing))
+	}
+	if p.inactive > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个状态不可用", p.inactive))
+	}
+	if p.expired > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个已过期", p.expired))
+	}
+	if p.used > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个被别的号占用", p.used))
+	}
+	if p.current > 0 {
+		parts = append(parts, "当前代理不能选")
+	}
+	return "没有可用候选代理：" + strings.Join(parts, "，")
+}
+
+// loadCandidatePool 只从 candidate_proxy_ids 里挑：没删除、状态可用、没过期、
+// 没有任何别的未删除账号在用、不是当前代理。顺序与 candidate_proxy_ids 一致。
+func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg ProxyAutoSwitchConfig, now time.Time,
+	currentID int64) ([]Proxy, string, error) {
+	var issue proxyAutoSwitchPoolIssue
+	eligible := make([]Proxy, 0, len(cfg.CandidateProxyIDs))
+	for _, id := range cfg.CandidateProxyIDs {
+		if id == currentID {
+			issue.current++
+			continue
+		}
+		p, err := s.proxies.GetByID(ctx, id)
+		if err != nil || p == nil {
+			if err != nil && !errors.Is(err, ErrProxyNotFound) {
+				return nil, "", err
+			}
+			issue.missing++
+			continue
+		}
+		if p.Status != StatusActive {
+			issue.inactive++
+			continue
+		}
+		if p.IsExpired(now) {
+			issue.expired++
+			continue
+		}
+		used, err := s.proxies.CountAccountsByProxyID(ctx, id)
+		if err != nil {
+			return nil, "", err
+		}
+		if used > 0 {
+			issue.used++
+			continue
+		}
+		eligible = append(eligible, *p)
+	}
+	if len(eligible) == 0 {
+		return nil, issue.emptyReason(), nil
+	}
+	return eligible, "", nil
+}
+
+// selectProxy applies the configured strategy to the already qualified pool.
+// sequential keeps candidate_proxy_ids order and starts after the current proxy,
+// wrapping once; random and region pick a random qualified proxy.
+func (s *ProxyAutoSwitchService) selectProxy(cfg ProxyAutoSwitchConfig, currentID int64, currentRegion string,
+	eligible []Proxy, regions map[int64]string) (*Proxy, string) {
+	switch cfg.Strategy {
+	case ProxyAutoSwitchStrategySequential:
+		start := 0
+		for i, id := range cfg.CandidateProxyIDs {
+			if id == currentID {
+				start = i + 1
+				break
+			}
+		}
+		byID := make(map[int64]Proxy, len(eligible))
+		for _, p := range eligible {
+			byID[p.ID] = p
+		}
+		n := len(cfg.CandidateProxyIDs)
+		for offset := 0; offset < n; offset++ {
+			id := cfg.CandidateProxyIDs[(start+offset)%n]
+			if p, ok := byID[id]; ok {
+				return &p, ""
+			}
+		}
+		return nil, "顺序策略没有可用候选代理"
+	case ProxyAutoSwitchStrategyRegion:
+		different := make([]Proxy, 0, len(eligible))
+		for _, p := range eligible {
+			region := regions[p.ID]
+			if region == "" || region == currentRegion {
+				continue
+			}
+			different = append(different, p)
+		}
+		if len(different) == 0 {
+			return nil, "没有不同地区的候选代理"
+		}
+		p := different[s.randPick(len(different))]
+		return &p, ""
+	default: // random
+		p := eligible[s.randPick(len(eligible))]
+		return &p, ""
+	}
+}
+
+func (s *ProxyAutoSwitchService) randPick(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	if s.randInt != nil {
+		return s.randInt(n)
+	}
+	return rand.Intn(n)
+}
+
+// probeProxyMS probes one proxy once with the existing multi-attempt prober;
+// any successful attempt gives a median, all failures give null.
+func (s *ProxyAutoSwitchService) probeProxyMS(ctx context.Context, p Proxy) *int64 {
+	if s.prober == nil {
+		return nil
+	}
+	values := s.probeOne(ctx, p)
+	if len(values) == 0 {
+		return nil
+	}
+	ms := medianInt64(values)
+	return &ms
+}
+
+// attemptSwitch picks a proxy from the configured pool and switches to it.
+func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAutoSwitchConfig, account ProxyAutoSwitchAccount,
+	stat ProxyAutoSwitchLatencyStat) (bool, error) {
+	now := s.now()
 	currentID := *account.ProxyID
 	current, err := s.proxies.GetByID(ctx, currentID)
 	if err != nil || current == nil {
 		return false, fmt.Errorf("load current proxy %d: %w", currentID, err)
 	}
-	proxies, err := s.proxies.ListActiveWithAccountCount(ctx)
+	eligible, reason, err := s.loadCandidatePool(ctx, cfg, now, currentID)
 	if err != nil {
-		return false, fmt.Errorf("list proxies: %w", err)
+		return false, fmt.Errorf("load candidate proxies: %w", err)
 	}
-	now := s.now()
-	idle := proxyAutoSwitchIdleCandidates(cfg, now, currentID, proxies)
-	regionInput := make([]Proxy, 0, len(idle)+1)
+	if len(eligible) == 0 {
+		regions := s.cachedRegions(ctx, []int64{currentID})
+		event := proxyAutoSwitchEventFor(account, cfg, current, regions[currentID], stat)
+		return false, s.recordNoCandidate(ctx, event, reason)
+	}
+	regionInput := make([]Proxy, 0, len(eligible)+1)
 	regionInput = append(regionInput, *current)
-	for _, p := range idle {
-		regionInput = append(regionInput, p.Proxy)
-	}
-	regions, hints := s.resolveRegions(ctx, regionInput)
+	regionInput = append(regionInput, eligible...)
+	regions := s.resolveRegions(ctx, regionInput)
 	currentRegion := regions[currentID]
-	pool := proxyAutoSwitchBuildPool(cfg, currentRegion, idle, regions, hints, proxyAutoSwitchMaxCandidates)
-
-	event := &ProxyAutoSwitchEvent{
-		AccountID:      account.ID,
-		AccountName:    account.Name,
-		Metric:         ProxyAutoSwitchMetricUsageFirstToken,
-		FromProxyID:    autoSwitchInt64(currentID),
-		FromProxyLabel: proxyAutoSwitchLabel(current),
-		FromRegion:     currentRegion,
-		BeforeP50MS:    autoSwitchInt64(stat.P50MS),
-		BeforeSamples:  stat.Samples,
-		Candidates:     []ProxyAutoSwitchCandidate{},
+	target, reason := s.selectProxy(cfg, currentID, currentRegion, eligible, regions)
+	if target == nil {
+		event := proxyAutoSwitchEventFor(account, cfg, current, currentRegion, stat)
+		return false, s.recordNoCandidate(ctx, event, reason)
 	}
-	base := fmt.Sprintf("最近 %d 分钟使用记录首字 p50 %dms（%d 个样本），连续 %d 次检查超过 %dms",
-		cfg.WindowMinutes, stat.P50MS, stat.Samples, cfg.ConsecutiveChecks, cfg.ThresholdMS)
-	if len(pool.first) == 0 && len(pool.second) == 0 {
-		return false, s.recordMiss(ctx, event, ProxyAutoSwitchStatusNoCandidate, base+"；"+pool.emptyReason)
+	event := proxyAutoSwitchEventFor(account, cfg, current, currentRegion, stat)
+	event.ToProxyID = autoSwitchInt64(target.ID)
+	event.ToProxyLabel = autoSwitchString(proxyAutoSwitchLabel(target))
+	region := regions[target.ID]
+	event.ToRegion = &region
+	event.FromProbeMS = s.probeProxyMS(ctx, *current)
+	event.ToProbeMS = s.probeProxyMS(ctx, *target)
+	switched, busy, err := s.applySwitch(ctx, account.ID, currentID, *target, event)
+	if err != nil || switched {
+		return switched, err
 	}
-
-	targets := append([]proxyAutoSwitchProbeTarget{{proxy: *current, region: currentRegion}}, pool.first...)
-	outcomes := s.probeTargets(ctx, targets)
-	currentOutcome := outcomes[0]
-	currentMS := currentOutcome.currentMedian()
-	event.CurrentProbeMS = autoSwitchInt64(currentMS)
-	currentNote := fmt.Sprintf("当前代理测速 %dms", currentMS)
-	if currentOutcome.failures > 0 {
-		currentNote += fmt.Sprintf("（%d 次失败按 %d 秒算）", currentOutcome.failures, int(ProxyAutoSwitchProbeTimeout.Seconds()))
+	if busy {
+		event.ToProxyID, event.ToProxyLabel, event.ToRegion = nil, nil, nil
+		event.FromProbeMS, event.ToProbeMS = nil, nil
+		return false, s.recordNoCandidate(ctx, event, "候选代理在换之前被别的号占用了")
 	}
-	for _, o := range outcomes[1:] {
-		event.Candidates = append(event.Candidates, o.candidateResult())
-	}
-	qualified := proxyAutoSwitchQualified(currentMS, cfg.MinImprovementPct, event.Candidates)
-	if len(qualified) == 0 && len(pool.second) > 0 {
-		firstCount := len(event.Candidates)
-		for _, o := range s.probeTargets(ctx, pool.second) {
-			event.Candidates = append(event.Candidates, o.candidateResult())
-		}
-		qualified = proxyAutoSwitchQualified(currentMS, cfg.MinImprovementPct, event.Candidates[firstCount:])
-	}
-	if len(qualified) == 0 {
-		why := fmt.Sprintf("没有快 %d%% 以上的", cfg.MinImprovementPct)
-		if cfg.MinImprovementPct <= 0 {
-			why = "测速都失败了"
-		}
-		return false, s.recordMiss(ctx, event, ProxyAutoSwitchStatusNoCandidate,
-			fmt.Sprintf("%s；%s；测了 %d 个候选，%s", base, currentNote, len(event.Candidates), why))
-	}
-
-	for _, candidate := range qualified {
-		switched, busy, err := s.applySwitch(ctx, account.ID, currentID, candidate, event, base+"；"+currentNote)
-		if err != nil || switched {
-			return switched, err
-		}
-		if !busy {
-			return false, nil
-		}
-	}
-	return false, s.recordMiss(ctx, event, ProxyAutoSwitchStatusNoCandidate,
-		fmt.Sprintf("%s；%s；更快的候选在换之前被别的号占用了", base, currentNote))
-}
-
-func (s *ProxyAutoSwitchService) recordMiss(ctx context.Context, event *ProxyAutoSwitchEvent, status, reason string) error {
-	event.Status = status
-	event.Reason = truncateReason(reason)
-	event.ToProxyID, event.ToProxyLabel, event.ToRegion, event.CandidateProbeMS = nil, nil, nil, nil
-	now := s.now()
-	event.CreatedAt, event.UpdatedAt, event.FinishedAt = now, now, &now
-	return s.repo.InsertEvent(ctx, event)
+	return false, nil
 }
 
 // applySwitch rechecks under the assign lock that the account still uses the
 // slow proxy and the target is still idle, then switches through the admin
 // account edit path. busy means the target was taken meanwhile.
-func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fromID int64, candidate ProxyAutoSwitchCandidate, event *ProxyAutoSwitchEvent, reasonPrefix string) (switched, busy bool, err error) {
+func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fromID int64, target Proxy,
+	event *ProxyAutoSwitchEvent) (switched, busy bool, err error) {
 	err = s.withAssignLock(ctx, func(ctx context.Context) error {
 		fresh, err := s.repo.GetAccount(ctx, accountID)
 		if err != nil {
@@ -290,7 +448,7 @@ func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fro
 			slog.Info("proxy_autoswitch_account_changed_before_switch", "account_id", accountID)
 			return nil
 		}
-		used, err := s.proxies.CountAccountsByProxyID(ctx, candidate.ProxyID)
+		used, err := s.proxies.CountAccountsByProxyID(ctx, target.ID)
 		if err != nil {
 			return err
 		}
@@ -299,82 +457,52 @@ func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fro
 			return nil
 		}
 		now := s.now()
-		improvement := 0
-		if event.CurrentProbeMS != nil && *event.CurrentProbeMS > 0 {
-			improvement = int(100 - (*candidate.ProbeMS)*100 / *event.CurrentProbeMS)
-		}
-		region := candidate.Region
-		event.Status = ProxyAutoSwitchStatusObserving
-		event.ToProxyID = autoSwitchInt64(candidate.ProxyID)
-		event.ToProxyLabel = autoSwitchString(candidate.Label)
-		event.ToRegion = &region
-		event.CandidateProbeMS = autoSwitchInt64(*candidate.ProbeMS)
-		speed := fmt.Sprintf("快 %d%%", improvement)
-		if improvement < 0 {
-			speed = fmt.Sprintf("慢 %d%%（候选里最快的）", -improvement)
-		}
-		event.Reason = truncateReason(fmt.Sprintf("%s；换到 %s 测速 %dms，%s", reasonPrefix, candidate.Label, *candidate.ProbeMS, speed))
-		event.CreatedAt, event.UpdatedAt, event.SwitchedAt = now, now, &now
-		event.FinishedAt = nil
-		// Record before switching so cooldown and the hourly cap hold even if
-		// the process dies right after the account update.
+		event.Status = ProxyAutoSwitchStatusMeasuring
+		event.CreatedAt, event.SwitchedAt = now, &now
+		event.After, event.AfterFinishedAt = nil, nil
 		if err := s.repo.InsertEvent(ctx, event); err != nil {
 			return fmt.Errorf("insert proxy autoswitch event: %w", err)
 		}
-		if err := s.setAccountProxy(ctx, accountID, candidate.ProxyID); err != nil {
+		if err := s.setAccountProxy(ctx, accountID, target.ID); err != nil {
 			failed := *event
 			failed.Status = ProxyAutoSwitchStatusFailed
-			failed.Reason = truncateReason(fmt.Sprintf("%s；换到 %s 失败：%s", reasonPrefix, candidate.Label, err.Error()))
-			failed.ToProxyID, failed.ToProxyLabel, failed.ToRegion, failed.CandidateProbeMS = nil, nil, nil, nil
-			finished := s.now()
-			failed.UpdatedAt, failed.FinishedAt = finished, &finished
-			if _, uerr := s.repo.UpdateEventIfStatus(ctx, &failed, ProxyAutoSwitchStatusObserving); uerr != nil {
+			failed.Reason = truncateReason(fmt.Sprintf("换到 %s 失败：%s", proxyAutoSwitchLabel(&target), err.Error()))
+			failed.After, failed.AfterFinishedAt = nil, nil
+			if _, uerr := s.repo.UpdateEventIfStatus(ctx, &failed, ProxyAutoSwitchStatusMeasuring); uerr != nil {
 				slog.Warn("proxy_autoswitch_mark_failed_failed", "event_id", event.ID, "error", uerr)
 			}
 			return nil
 		}
 		switched = true
-		s.saveSeenProxy(ctx, accountID, candidate.ProxyID, nil)
-		slog.Info("proxy_autoswitch_switched", "account_id", accountID, "from_proxy_id", fromID, "to_proxy_id", candidate.ProxyID, "event_id", event.ID)
+		slog.Info("proxy_autoswitch_switched", "account_id", accountID, "from_proxy_id", fromID,
+			"to_proxy_id", target.ID, "event_id", event.ID)
 		return nil
 	})
 	return switched, busy, err
 }
 
-// proxyAutoSwitchObserveDuration is how long a switch is observed before its
-// result is recorded. observe_minutes = 0 means the observation does not hold
-// the account (see proxyAutoSwitchGate); the result is then still recorded
-// once, after the judging window (window_minutes).
-func proxyAutoSwitchObserveDuration(cfg ProxyAutoSwitchConfig) time.Duration {
-	if cfg.ObserveMinutes <= 0 {
-		return time.Duration(cfg.WindowMinutes) * time.Minute
+func (s *ProxyAutoSwitchService) recordNoCandidate(ctx context.Context, event *ProxyAutoSwitchEvent, reason string) error {
+	latest, err := s.repo.ListEvents(ctx, ProxyAutoSwitchEventFilter{AccountID: event.AccountID, Limit: 1})
+	if err != nil {
+		return err
 	}
-	return time.Duration(cfg.ObserveMinutes) * time.Minute
+	if len(latest) > 0 && latest[0].Status == ProxyAutoSwitchStatusNoCandidate &&
+		sameProxyID(latest[0].FromProxyID, event.FromProxyID) && latest[0].Reason == reason {
+		return nil
+	}
+	event.Status = ProxyAutoSwitchStatusNoCandidate
+	event.Reason = reason
+	event.ToProxyID, event.ToProxyLabel, event.ToRegion = nil, nil, nil
+	event.SwitchedAt, event.After, event.AfterFinishedAt = nil, nil, nil
+	event.FromProbeMS, event.ToProbeMS = nil, nil
+	event.CreatedAt = s.now()
+	return s.repo.InsertEvent(ctx, event)
 }
 
-// proxyAutoSwitchObservationDecision: after the observe duration, kept when the new
-// p50 ≤ before × 0.8, otherwise not_faster; with too few samples wait up to
-// 2 × the observe duration and then kept_insufficient. Only the result is recorded:
-// the account keeps the new proxy either way.
-func proxyAutoSwitchObservationDecision(cfg ProxyAutoSwitchConfig, elapsed time.Duration, beforeP50 *int64, samples int, p50 int64) string {
-	observe := proxyAutoSwitchObserveDuration(cfg)
-	if elapsed < observe {
-		return proxyAutoSwitchDecisionWait
-	}
-	if samples >= cfg.MinSamples {
-		if beforeP50 == nil || float64(p50) <= float64(*beforeP50)*proxyAutoSwitchKeepRatio {
-			return proxyAutoSwitchDecisionKeep
-		}
-		return proxyAutoSwitchDecisionNotFaster
-	}
-	if elapsed >= observe*proxyAutoSwitchObserveExtendFactor {
-		return proxyAutoSwitchDecisionKeepInsufficient
-	}
-	return proxyAutoSwitchDecisionWait
-}
-
-func (s *ProxyAutoSwitchService) finishObservations(ctx context.Context, cfg ProxyAutoSwitchConfig) error {
-	events, err := s.repo.ListObserving(ctx)
+// updateMeasurements refreshes the after numbers of every measuring record and
+// closes the ones whose fixed 10-minute window is over.
+func (s *ProxyAutoSwitchService) updateMeasurements(ctx context.Context, cfg ProxyAutoSwitchConfig) error {
+	events, err := s.repo.ListMeasuring(ctx)
 	if err != nil {
 		return err
 	}
@@ -382,108 +510,52 @@ func (s *ProxyAutoSwitchService) finishObservations(ctx context.Context, cfg Pro
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := s.finishObservation(ctx, cfg, &events[i]); err != nil {
-			slog.Warn("proxy_autoswitch_finish_observation_failed", "event_id", events[i].ID, "error", err)
+		if err := s.finishMeasurement(ctx, cfg, &events[i]); err != nil {
+			slog.Warn("proxy_autoswitch_finish_measurement_failed", "event_id", events[i].ID, "error", err)
 		}
 	}
 	return nil
 }
 
-func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg ProxyAutoSwitchConfig, event *ProxyAutoSwitchEvent) error {
-	if event.ToProxyID == nil || event.FromProxyID == nil {
+func (s *ProxyAutoSwitchService) finishMeasurement(ctx context.Context, cfg ProxyAutoSwitchConfig, event *ProxyAutoSwitchEvent) error {
+	if event.ToProxyID == nil {
 		return nil
 	}
-	switchedAt := event.CreatedAt
+	start := event.CreatedAt
 	if event.SwitchedAt != nil {
-		switchedAt = *event.SwitchedAt
+		start = *event.SwitchedAt
 	}
+	windowEnd := start.Add(proxyAutoSwitchAfterWindow)
 	now := s.now()
-	elapsed := now.Sub(switchedAt)
-	observe := proxyAutoSwitchObserveDuration(cfg)
-	if elapsed < observe {
-		return nil
-	}
+	final := !now.Before(windowEnd)
 	end := now
-	if limit := switchedAt.Add(observe * proxyAutoSwitchObserveExtendFactor); end.After(limit) {
-		end = limit
+	if final {
+		end = windowEnd
 	}
-	// 换后也按使用记录首字算。旧记录（metric 列是 response_headers / first_token）
-	// 也一样，换前 p50 是旧口径记下的，比出来只作参考。
-	stats, err := s.latencyStats(ctx, cfg.GroupIDs, map[int64]int64{event.AccountID: *event.ToProxyID}, switchedAt, end)
+	groups := cfg.GroupIDs
+	if event.GroupID != nil {
+		groups = []int64{*event.GroupID}
+	}
+	stats, err := s.latencyStats(ctx, groups, map[int64]int64{event.AccountID: *event.ToProxyID}, start, end)
 	if err != nil {
 		return err
 	}
 	stat := latencyStatFor(stats, event.AccountID, event.ToProxyID)
-	decision := proxyAutoSwitchObservationDecision(cfg, elapsed, event.BeforeP50MS, stat.Samples, stat.P50MS)
-	if decision == proxyAutoSwitchDecisionWait {
-		return nil
-	}
 	return s.withAssignLock(ctx, func(ctx context.Context) error {
 		fresh, err := s.repo.GetEvent(ctx, event.ID)
 		if err != nil {
 			return err
 		}
-		if fresh == nil || fresh.Status != ProxyAutoSwitchStatusObserving {
+		if fresh == nil || fresh.Status != ProxyAutoSwitchStatusMeasuring {
 			return nil
 		}
-		fresh.AfterSamples = stat.Samples
-		if stat.Samples > 0 {
-			fresh.AfterP50MS = autoSwitchInt64(stat.P50MS)
+		fresh.After = proxyAutoSwitchStats(stat)
+		if final {
+			fresh.Status = ProxyAutoSwitchStatusDone
+			finishedAt := windowEnd
+			fresh.AfterFinishedAt = &finishedAt
 		}
-		minutes := int(end.Sub(switchedAt).Round(time.Minute) / time.Minute)
-		before := int64(0)
-		if fresh.BeforeP50MS != nil {
-			before = *fresh.BeforeP50MS
-		}
-		account, err := s.repo.GetAccount(ctx, fresh.AccountID)
-		if err != nil {
-			return err
-		}
-		// Nothing here changes the account's proxy: a switch that did not help
-		// stays, and the account is switched again later if it is still slow.
-		// When the account is gone or someone else moved it, the comparison no
-		// longer means anything; that is recorded as not_faster with the reason.
-		switch {
-		case account == nil || account.Deleted:
-			fresh.Status = ProxyAutoSwitchStatusNotFaster
-			fresh.Reason += "；观察期间账号被删除，没有比较快慢"
-		case account.ProxyID == nil || *account.ProxyID != *fresh.ToProxyID:
-			fresh.Status = ProxyAutoSwitchStatusNotFaster
-			fresh.Reason += "；观察期间账号代理被改成别的了，没有比较快慢"
-		case decision == proxyAutoSwitchDecisionKeep:
-			fresh.Status = ProxyAutoSwitchStatusKept
-			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理使用记录首字 p50 %dms（%d 个样本），换前 %dms，留下", minutes, stat.P50MS, stat.Samples, before)
-		case decision == proxyAutoSwitchDecisionKeepInsufficient:
-			fresh.Status = ProxyAutoSwitchStatusKeptInsufficient
-			fresh.Reason += fmt.Sprintf("；观察 %d 分钟只有 %d 个样本（少于 %d 个），留下", minutes, stat.Samples, cfg.MinSamples)
-		default:
-			fresh.Status = ProxyAutoSwitchStatusNotFaster
-			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理使用记录首字 p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上；不换回，还慢就接着换",
-				minutes, stat.P50MS, stat.Samples, before, proxyAutoSwitchKeepDropPct)
-		}
-		fresh.Reason = truncateReason(fresh.Reason)
-		finished := s.now()
-		fresh.UpdatedAt, fresh.FinishedAt = finished, &finished
-		_, err = s.repo.UpdateEventIfStatus(ctx, fresh, ProxyAutoSwitchStatusObserving)
+		_, err = s.repo.UpdateEventIfStatus(ctx, fresh, ProxyAutoSwitchStatusMeasuring)
 		return err
 	})
-}
-
-// revertBlockedReason explains why the old proxy cannot be taken back, or "".
-func (s *ProxyAutoSwitchService) revertBlockedReason(ctx context.Context, proxyID int64) string {
-	old, err := s.proxies.GetByID(ctx, proxyID)
-	if err != nil || old == nil {
-		return "旧代理已删除"
-	}
-	if old.Status != StatusActive {
-		return fmt.Sprintf("旧代理状态是 %s", old.Status)
-	}
-	used, err := s.proxies.CountAccountsByProxyID(ctx, proxyID)
-	if err != nil {
-		return "查不到旧代理的使用情况"
-	}
-	if used > 0 {
-		return "旧代理已被别的号占用"
-	}
-	return ""
 }

@@ -77,20 +77,6 @@ func (h *ProxyAutoSwitchHandler) ListEvents(c *gin.Context) {
 	response.Success(c, list)
 }
 
-func (h *ProxyAutoSwitchHandler) RevertEvent(c *gin.Context) {
-	id, err := strconv.ParseInt(strings.TrimSpace(c.Param("id")), 10, 64)
-	if err != nil || id <= 0 {
-		response.BadRequest(c, "记录 ID 无效")
-		return
-	}
-	event, err := h.service.ManualRevert(c.Request.Context(), id)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, event)
-}
-
 func (h *ProxyAutoSwitchHandler) Recent(c *gin.Context) {
 	days, ok := parseProxyAutoSwitchInt(c, "days")
 	if !ok {
@@ -105,7 +91,16 @@ func (h *ProxyAutoSwitchHandler) Recent(c *gin.Context) {
 }
 
 func (h *ProxyAutoSwitchHandler) Accounts(c *gin.Context) {
-	list, err := h.service.AccountsDiag(c.Request.Context())
+	list, err := h.service.Accounts(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, list)
+}
+
+func (h *ProxyAutoSwitchHandler) Proxies(c *gin.Context) {
+	list, err := h.service.Proxies(c.Request.Context())
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
