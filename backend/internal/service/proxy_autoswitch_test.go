@@ -70,13 +70,13 @@ func TestProxyAutoSwitchConfigValidation(t *testing.T) {
 		"metric empty":     func(c *ProxyAutoSwitchConfig) { c.Metric = "" },
 		"consecutive low":  func(c *ProxyAutoSwitchConfig) { c.ConsecutiveChecks = 0 },
 		"consecutive high": func(c *ProxyAutoSwitchConfig) { c.ConsecutiveChecks = 11 },
-		"improvement low":  func(c *ProxyAutoSwitchConfig) { c.MinImprovementPct = 4 },
+		"improvement low":  func(c *ProxyAutoSwitchConfig) { c.MinImprovementPct = -1 },
 		"improvement high": func(c *ProxyAutoSwitchConfig) { c.MinImprovementPct = 91 },
-		"cooldown low":     func(c *ProxyAutoSwitchConfig) { c.AccountCooldownMinutes = 4 },
+		"cooldown low":     func(c *ProxyAutoSwitchConfig) { c.AccountCooldownMinutes = -1 },
 		"cooldown high":    func(c *ProxyAutoSwitchConfig) { c.AccountCooldownMinutes = 1441 },
-		"per hour low":     func(c *ProxyAutoSwitchConfig) { c.MaxSwitchesPerHour = 0 },
+		"per hour low":     func(c *ProxyAutoSwitchConfig) { c.MaxSwitchesPerHour = -1 },
 		"per hour high":    func(c *ProxyAutoSwitchConfig) { c.MaxSwitchesPerHour = 51 },
-		"observe low":      func(c *ProxyAutoSwitchConfig) { c.ObserveMinutes = 4 },
+		"observe low":      func(c *ProxyAutoSwitchConfig) { c.ObserveMinutes = -1 },
 		"observe high":     func(c *ProxyAutoSwitchConfig) { c.ObserveMinutes = 61 },
 		"expiry low":       func(c *ProxyAutoSwitchConfig) { c.MinDaysToExpiry = -1 },
 		"expiry high":      func(c *ProxyAutoSwitchConfig) { c.MinDaysToExpiry = 91 },
@@ -97,6 +97,12 @@ func TestProxyAutoSwitchConfigValidation(t *testing.T) {
 	require.NoError(t, ValidateProxyAutoSwitchConfig(edges))
 	edges.AccountCooldownMinutes = 5
 	require.NoError(t, ValidateProxyAutoSwitchConfig(edges))
+	// 11-06 规则：样本 1 个、冷却 / 观察 / 每小时上限 / 快多少 / 到期天数都可以是 0（0 = 不限）。
+	zero := DefaultProxyAutoSwitchConfig()
+	zero.Metric, zero.MinSamples = ProxyAutoSwitchMetricUsageFirstToken, 1
+	zero.ObserveMinutes, zero.AccountCooldownMinutes, zero.MaxSwitchesPerHour = 0, 0, 0
+	zero.MinDaysToExpiry, zero.MinImprovementPct, zero.RegionPolicy = 0, 0, ProxyAutoSwitchRegionAny
+	require.NoError(t, ValidateProxyAutoSwitchConfig(zero))
 }
 
 func TestProxyAutoSwitchConfigCooldownHoursToMinutes(t *testing.T) {

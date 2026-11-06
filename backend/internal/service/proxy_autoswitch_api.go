@@ -89,7 +89,7 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 			proxyIDs = append(proxyIDs, *a.ProxyID)
 		}
 	}
-	stats, err := s.repo.LatencyStats(ctx, cfg.Metric, ids, now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
+	stats, err := s.latencyStats(ctx, cfg.Metric, cfg.GroupIDs, currentProxies(accounts), now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
 	if err != nil {
 		return nil, err
 	}

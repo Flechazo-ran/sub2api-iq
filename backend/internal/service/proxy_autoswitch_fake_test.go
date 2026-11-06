@@ -20,6 +20,9 @@ type pasWorld struct {
 	external  map[int64]int64 // proxy id -> accounts outside the test groups using it
 	statsFn   func(metric string, accountIDs []int64, from, to time.Time) []ProxyAutoSwitchLatencyStat
 	statsLog  []string // metric of every LatencyStats call
+	usage     []FirstTokenTrendUsageSample
+	traces    []FirstTokenTrendTraceSample
+	usageLog  []string // "groups from to traceFrom" of every FirstTokenUsage call
 	events    []ProxyAutoSwitchEvent
 	nextEvent int64
 	states    map[int64]ProxyAutoSwitchAccountState
@@ -326,6 +329,47 @@ func (w *pasWorld) LatencyStats(_ context.Context, metric string, ids []int64, f
 		return nil, nil
 	}
 	return w.statsFn(metric, ids, from, to), nil
+}
+
+// FirstTokenUsage filters like the real queries: usage of the groups that
+// overlaps [from, to), traces of the groups started in [traceFrom, to).
+// usageGroup / traceGroup default to 16.
+func (w *pasWorld) FirstTokenUsage(_ context.Context, groupIDs []int64, from, to, traceFrom time.Time) ([]FirstTokenTrendUsageSample, []FirstTokenTrendTraceSample, error) {
+	w.usageLog = append(w.usageLog, fmt.Sprintf("%v %s %s %s", groupIDs, from.Format(time.RFC3339), to.Format(time.RFC3339), traceFrom.Format(time.RFC3339)))
+	inGroups := func(g int64) bool {
+		for _, id := range groupIDs {
+			if id == g {
+				return true
+			}
+		}
+		return false
+	}
+	usage := []FirstTokenTrendUsageSample{}
+	for _, u := range w.usage {
+		if inGroups(16) && u.EndedAt.After(from) && u.StartedAt.Before(to) {
+			usage = append(usage, u)
+		}
+	}
+	traces := []FirstTokenTrendTraceSample{}
+	for _, t := range w.traces {
+		if inGroups(16) && !t.StartedAt.Before(traceFrom) && t.StartedAt.Before(to) {
+			traces = append(traces, t)
+		}
+	}
+	return usage, traces, nil
+}
+
+// addUsage adds one streaming usage_logs row that started at start and got
+// its first token after ms; proxyID > 0 also adds the matching trace.
+func (w *pasWorld) addUsage(accountID, proxyID int64, start time.Time, ms int64) {
+	id := fmt.Sprintf("req-%d", len(w.usage)+1)
+	v := ms
+	w.usage = append(w.usage, FirstTokenTrendUsageSample{StartedAt: start, EndedAt: start.Add(time.Duration(ms+1000) * time.Millisecond),
+		FirstTokenMS: &v, Stream: true, AccountID: accountID, Model: "gpt-5", RequestID: id})
+	if proxyID > 0 {
+		w.traces = append(w.traces, FirstTokenTrendTraceSample{StartedAt: start, AccountID: accountID, ProxyID: proxyID, Model: "gpt-5",
+			AfterMS: float64(ms) / 2, RequestID: id})
+	}
 }
 
 func (w *pasWorld) InsertEvent(_ context.Context, e *ProxyAutoSwitchEvent) error {

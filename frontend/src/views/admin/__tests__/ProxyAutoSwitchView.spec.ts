@@ -67,7 +67,7 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-mode-off"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.text()).not.toContain('只记录建议')
     const metric = wrapper.get('[data-testid="pas-metric"]')
-    expect(metric.findAll('button').map(button => button.text())).toEqual(['首字时间', '响应头时间'])
+    expect(metric.findAll('button').map(button => button.text())).toEqual(['使用记录首字', '上游首字', '响应头时间'])
     expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('false')
     expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toBe(zhProxyAutoSwitch.metricHint.response_headers)
@@ -96,13 +96,13 @@ describe('ProxyAutoSwitchView settings', () => {
     expect((wrapper.get('[data-testid="pas-observe_minutes"]').element as HTMLInputElement).value).toBe('10')
     const observeHint = wrapper.get('[data-testid="pas-hint-observe"]').text()
     expect(observeHint).toContain('只记录效果，不换回')
-    expect(observeHint).toContain('号还慢就过了冷却接着换')
+    expect(observeHint).toContain('观察期间不再换这个号')
     expect(wrapper.text()).not.toContain('自动换回')
     expect(wrapper.text()).toContain('只记录有没有变快，不换回')
 
-    await cooldown.setValue('4')
+    await cooldown.setValue('-1')
     expect(cooldown.attributes('aria-invalid')).toBe('true')
-    expect(wrapper.text()).toContain('要填整数，范围 5–1440')
+    expect(wrapper.text()).toContain('要填整数，范围 0–1440')
     expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
     await cooldown.setValue('1441')
     expect(cooldown.attributes('aria-invalid')).toBe('true')
@@ -151,14 +151,10 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('false')
     const hint = wrapper.get('[data-testid="pas-metric-hint"]').text()
-    expect(hint).toContain('包含模型思考时间')
-    expect(hint).toContain('换代理只能改善网络部分')
-    expect(hint).toContain('「没找到快 30% 的代理」')
-    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里首字时间的中位数')
-    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('首字时间中位数降到换前的 80% 及以下记「变快了」')
-    await wrapper.get('[data-testid="pas-min_improvement_pct"]').setValue('40')
-    expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toContain('「没找到快 40% 的代理」')
-    await wrapper.get('[data-testid="pas-min_improvement_pct"]').setValue('30')
+    expect(hint).toContain('含模型思考时间')
+    expect(hint).toContain('不含上传时间')
+    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里上游首字时间的中位数')
+    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('上游首字时间中位数降到换前的 80% 及以下记「变快了」')
 
     // Up to 120 s is allowed now; above that is blocked.
     await wrapper.get('[data-testid="pas-threshold_s"]').setValue('121')
@@ -176,6 +172,58 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
     await wrapper.get('[data-testid="pas-discard"]').trigger('click')
     expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('true')
+  })
+
+  it('edits the 11-06 rules: usage-log first token, any region and 0 = no limit', async () => {
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+    wrapper = mountView(); await flushPromises()
+    for (const [key, label] of [
+      ['max_switches_per_hour', '每小时上限（0 = 不限）'],
+      ['account_cooldown_minutes', '同一个号多久最多换一次（0 = 不限）'],
+      ['observe_minutes', '换完观察（0 = 不拦）'],
+      ['min_improvement_pct', '新代理至少快（0 = 不比，挑最快的）'],
+      ['min_days_to_expiry', '离过期至少（0 = 没过期就行）'],
+    ]) {
+      expect(wrapper.get(`[data-testid="pas-${key}"]`).element.closest('.field')?.textContent).toContain(label)
+    }
+    expect(wrapper.text()).not.toContain('6 小时')
+    expect(wrapper.text()).not.toContain('快 20%')
+
+    await wrapper.get('[data-testid="pas-mode-auto"]').trigger('click')
+    await wrapper.get('[data-testid="pas-metric-usage_first_token"]').trigger('click')
+    expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toBe('和使用记录页、首字趋势的首字一致：从请求进网关算，含上传请求体的时间和模型思考时间。')
+    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里使用记录首字的中位数')
+    await wrapper.get('[data-testid="pas-window_minutes"]').setValue('5')
+    await wrapper.get('[data-testid="pas-min_samples"]').setValue('1')
+    await wrapper.get('[data-testid="pas-threshold_s"]').setValue('10')
+    for (const key of ['min_improvement_pct', 'account_cooldown_minutes', 'max_switches_per_hour', 'observe_minutes', 'min_days_to_expiry']) {
+      const input = wrapper.get(`[data-testid="pas-${key}"]`)
+      await input.setValue('0')
+      expect(input.attributes('aria-invalid'), key).toBeUndefined()
+    }
+    expect(wrapper.get('[data-testid="pas-hint-improvement"]').text()).toBe('每个空闲代理测速 3 次取中位数，直接换测速最快的，不要求比当前代理快')
+    expect(wrapper.get('[data-testid="pas-hint-cooldown"]').text()).toBe('不冷却：刚换过或上次没换成，下一轮还慢照样换')
+    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('观察不拦号，换完过一个统计窗口记一次效果')
+    await wrapper.get('[data-testid="pas-region"]').setValue('any')
+    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
+    await flushPromises()
+    expect(api.updateConfig).toHaveBeenCalledWith(config({
+      enabled: true, metric: 'usage_first_token', window_minutes: 5, min_samples: 1, threshold_ms: 10000, consecutive_checks: 2,
+      min_improvement_pct: 0, account_cooldown_minutes: 0, max_switches_per_hour: 0, observe_minutes: 0, min_days_to_expiry: 0, region_policy: 'any',
+    }))
+    expect((wrapper.get('[data-testid="pas-metric-usage_first_token"]').attributes('aria-checked'))).toBe('true')
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
+
+    // Negative values are still out of range.
+    await wrapper.get('[data-testid="pas-max_switches_per_hour"]').setValue('-1')
+    expect(wrapper.text()).toContain('要填整数，范围 0–50')
+  })
+
+  it('says no usable idle proxy when the saved improvement is 0', async () => {
+    api.getConfig.mockResolvedValue(config({ min_improvement_pct: 0 }))
+    api.listEvents.mockResolvedValue({ items: [event(2, 'no_candidate')], next_cursor: 0 })
+    wrapper = mountView(); await flushPromises()
+    expect(rowFor(2).get('[data-testid="pas-status"]').text()).toBe('没找到能用的空闲代理')
   })
 
   it('treats a config without metric (older backend) as response headers', async () => {
@@ -283,14 +331,18 @@ describe('ProxyAutoSwitchView switch log', () => {
       event(1, 'kept', { metric: 'first_token', before_p50_ms: 12000, before_samples: 40 }),
       event(2, 'no_candidate'),
       event(3, 'kept', { metric: undefined as unknown as ProxyAutoSwitchEvent['metric'] }),
+      event(4, 'observing', { metric: 'usage_first_token', before_p50_ms: 15020, before_samples: 1 }),
     ], next_cursor: 0 })
     wrapper = mountView(); await flushPromises()
-    expect(rowFor(1).get('[data-testid="pas-metric-tag"]').text()).toBe('首字')
-    expect(rowFor(1).get('[data-testid="pas-latency"]').text()).toContain('首字12.00 s → 1.12 s')
+    expect(rowFor(1).get('[data-testid="pas-metric-tag"]').text()).toBe('上游首字')
+    expect(rowFor(1).get('[data-testid="pas-latency"]').text()).toContain('上游首字12.00 s → 1.12 s')
+    expect(rowFor(4).get('[data-testid="pas-metric-tag"]').text()).toBe('记录首字')
     expect(rowFor(2).get('[data-testid="pas-metric-tag"]').text()).toBe('响应头')
     expect(rowFor(3).get('[data-testid="pas-metric-tag"]').text()).toBe('响应头')
     await rowFor(1).trigger('click')
-    expect(wrapper.get('[data-event-id="1"] [data-testid="pas-detail-metric"]').text()).toBe('按首字时间判慢：换前 p50 12.00 s（40 个样本）')
+    expect(wrapper.get('[data-event-id="1"] [data-testid="pas-detail-metric"]').text()).toBe('按上游首字时间判慢：换前 p50 12.00 s（40 个样本）')
+    await rowFor(4).trigger('click')
+    expect(wrapper.get('[data-event-id="4"] [data-testid="pas-detail-metric"]').text()).toBe('按使用记录首字判慢：换前 p50 15.02 s（1 个样本）')
     await rowFor(2).trigger('click')
     expect(wrapper.get('[data-event-id="2"] [data-testid="pas-detail-metric"]').text()).toBe('按响应头时间判慢：换前 p50 3.51 s（42 个样本）')
   })

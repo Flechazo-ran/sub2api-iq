@@ -4,8 +4,9 @@ import { apiClient } from '../client'
 const base = '/admin/proxy-autoswitch'
 
 export type ProxyAutoSwitchRegionPolicy = 'prefer_same' | 'same_only' | 'any'
-// 判慢指标：first_token = 首字（first_semantic − request_written），response_headers = 响应头。
-export type ProxyAutoSwitchMetric = 'response_headers' | 'first_token'
+// 判慢指标：usage_first_token = 使用记录首字（usage_logs.first_token_ms，和使用记录页、首字趋势一致，含上传）；
+// first_token = 上游首字（first_semantic − request_written）；response_headers = 响应头。
+export type ProxyAutoSwitchMetric = 'usage_first_token' | 'response_headers' | 'first_token'
 
 export interface ProxyAutoSwitchConfig {
   enabled: boolean
@@ -14,10 +15,13 @@ export interface ProxyAutoSwitchConfig {
   metric: ProxyAutoSwitchMetric
   threshold_ms: number
   consecutive_checks: number
+  // 0 = 不比当前代理，直接挑测速最快的空闲代理。
   min_improvement_pct: number
-  // 同一个号两次自动换代理至少隔几分钟（5–1440）；没换成后也隔这么久再试。
+  // 同一个号两次自动换代理至少隔几分钟（0–1440，0 = 不冷却）；没换成后也隔这么久再试。
   account_cooldown_minutes: number
+  // 全站每小时上限（0–50，0 = 不限）。
   max_switches_per_hour: number
+  // 换完观察几分钟（0–60）；0 = 观察不拦号，按统计窗口记一次效果。
   observe_minutes: number
   min_days_to_expiry: number
   region_policy: ProxyAutoSwitchRegionPolicy

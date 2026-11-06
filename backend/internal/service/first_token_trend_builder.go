@@ -22,8 +22,49 @@ type firstTokenTrendBuilder struct {
 	traces   []FirstTokenTrendTraceSample
 	samples  []firstTokenTrendSample // 所选口径，含 from 前 10 分钟
 	// 按代理拆时，usage 记录靠 request_id 对上 trace 拿到出口代理。
-	proxyByRequest map[string]int64
-	proxyByClient  map[string]int64
+	proxies firstTokenUsageProxyIndex
+}
+
+// firstTokenUsageValue 是「使用记录首字」口径的取样规则：流式、first_token_ms 非空、
+// 开始时间（created_at − duration_ms）在 [from, to) 内。首字趋势看板和代理优选的
+// usage_first_token 判慢共用这一条，两边对同一批 usage_logs 取到的样本完全一样。
+func firstTokenUsageValue(u FirstTokenTrendUsageSample, from, to time.Time) (float64, bool) {
+	if !u.Stream || u.FirstTokenMS == nil || u.StartedAt.Before(from) || !u.StartedAt.Before(to) {
+		return 0, false
+	}
+	return float64(*u.FirstTokenMS), true
+}
+
+// firstTokenUsageProxyIndex 用 request_id（或 client:<client_request_id>）把 usage 记录
+// 对上 trace，拿到这条请求走的出口代理。对不上返回 0。
+type firstTokenUsageProxyIndex struct {
+	byRequest map[string]int64
+	byClient  map[string]int64
+}
+
+func newFirstTokenUsageProxyIndex(traces []FirstTokenTrendTraceSample) firstTokenUsageProxyIndex {
+	ix := firstTokenUsageProxyIndex{byRequest: make(map[string]int64, len(traces)), byClient: make(map[string]int64, len(traces))}
+	for _, t := range traces {
+		if t.RequestID != "" {
+			ix.byRequest[t.RequestID] = t.ProxyID
+		}
+		if t.ClientRequestID != "" {
+			ix.byClient[t.ClientRequestID] = t.ProxyID
+		}
+	}
+	return ix
+}
+
+func (ix firstTokenUsageProxyIndex) proxyOf(u FirstTokenTrendUsageSample) int64 {
+	if rest, ok := strings.CutPrefix(u.RequestID, "client:"); ok {
+		if p, ok := ix.byClient[rest]; ok {
+			return p
+		}
+	}
+	if p, ok := ix.byRequest[u.RequestID]; ok {
+		return p
+	}
+	return 0
 }
 
 func newFirstTokenTrendBuilder(w firstTokenTrendWindow, q FirstTokenTrendQuery, accounts []FirstTokenTrendAccount,
@@ -33,16 +74,7 @@ func newFirstTokenTrendBuilder(w firstTokenTrendWindow, q FirstTokenTrendQuery, 
 		b.known[a.ID] = true
 	}
 	if q.Dimension == FirstTokenTrendDimensionProxy {
-		b.proxyByRequest = make(map[string]int64, len(traces))
-		b.proxyByClient = make(map[string]int64, len(traces))
-		for _, t := range traces {
-			if t.RequestID != "" {
-				b.proxyByRequest[t.RequestID] = t.ProxyID
-			}
-			if t.ClientRequestID != "" {
-				b.proxyByClient[t.ClientRequestID] = t.ProxyID
-			}
-		}
+		b.proxies = newFirstTokenUsageProxyIndex(traces)
 	}
 	sampleFrom := w.from.Add(-firstTokenTrendEventWindow)
 	if q.Metric == FirstTokenTrendMetricSwitch {
@@ -54,31 +86,20 @@ func newFirstTokenTrendBuilder(w firstTokenTrendWindow, q FirstTokenTrendQuery, 
 		}
 	} else {
 		for _, u := range usage {
-			if !u.Stream || u.FirstTokenMS == nil || u.StartedAt.Before(sampleFrom) || !u.StartedAt.Before(w.to) {
+			ms, ok := firstTokenUsageValue(u, sampleFrom, w.to)
+			if !ok {
 				continue
 			}
-			b.samples = append(b.samples, firstTokenTrendSample{at: u.StartedAt, accountID: u.AccountID, key: b.usageKey(u), ms: float64(*u.FirstTokenMS)})
+			b.samples = append(b.samples, firstTokenTrendSample{at: u.StartedAt, accountID: u.AccountID, key: b.usageKey(u), ms: ms})
 		}
 	}
 	return b
 }
 
-func (b *firstTokenTrendBuilder) usageProxy(u FirstTokenTrendUsageSample) int64 {
-	if rest, ok := strings.CutPrefix(u.RequestID, "client:"); ok {
-		if p, ok := b.proxyByClient[rest]; ok {
-			return p
-		}
-	}
-	if p, ok := b.proxyByRequest[u.RequestID]; ok {
-		return p
-	}
-	return 0
-}
-
 func (b *firstTokenTrendBuilder) usageKey(u FirstTokenTrendUsageSample) string {
 	switch b.q.Dimension {
 	case FirstTokenTrendDimensionProxy:
-		return strconv.FormatInt(b.usageProxy(u), 10)
+		return strconv.FormatInt(b.proxies.proxyOf(u), 10)
 	case FirstTokenTrendDimensionModel:
 		return u.Model
 	}

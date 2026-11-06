@@ -46,7 +46,7 @@ func proxyAutoSwitchEligible(a ProxyAutoSwitchAccount) (bool, string) {
 }
 
 // proxyAutoSwitchJudge: fewer than min_samples is not judged; p50 above the
-// threshold is slow.
+// threshold is slow (exactly the threshold is not).
 func proxyAutoSwitchJudge(cfg ProxyAutoSwitchConfig, samples int, p50 int64) string {
 	if samples < cfg.MinSamples {
 		return ProxyAutoSwitchStateInsufficient
@@ -116,11 +116,17 @@ type proxyAutoSwitchGateResult struct {
 // proxyAutoSwitchGate decides whether a slow account may be switched now.
 // A manual proxy change does not hold the account: the new proxy starts a
 // fresh slow streak (recordCheck) and is judged like any other.
+// observe_minutes = 0 does not hold an observing account (the observation is
+// only a record), and account_cooldown_minutes = 0 means no cooldown after a
+// switch or a miss.
 func proxyAutoSwitchGate(cfg ProxyAutoSwitchConfig, now time.Time, observing bool, hist ProxyAutoSwitchHistory) *proxyAutoSwitchGateResult {
-	if observing {
+	if observing && cfg.ObserveMinutes > 0 {
 		return &proxyAutoSwitchGateResult{state: ProxyAutoSwitchStateObserving, note: "换代理后观察中"}
 	}
 	cooldown := proxyAutoSwitchCooldown(cfg)
+	if cooldown <= 0 {
+		return nil
+	}
 	if hist.LastSwitchAt != nil {
 		until := hist.LastSwitchAt.Add(cooldown)
 		if now.Before(until) {
@@ -294,12 +300,10 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 	now := s.now()
 	eligible := make([]ProxyAutoSwitchAccount, 0, len(accounts))
 	keep := make(map[int64]struct{}, len(accounts))
-	ids := make([]int64, 0, len(accounts))
 	for _, a := range accounts {
 		if ok, _ := proxyAutoSwitchEligible(a); ok {
 			eligible = append(eligible, a)
 			keep[a.ID] = struct{}{}
-			ids = append(ids, a.ID)
 		}
 	}
 	s.resetStreaks(keep)
@@ -307,7 +311,7 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 		return nil
 	}
 	window := time.Duration(cfg.WindowMinutes) * time.Minute
-	stats, err := s.repo.LatencyStats(ctx, cfg.Metric, ids, now.Add(-window), now)
+	stats, err := s.latencyStats(ctx, cfg.Metric, cfg.GroupIDs, currentProxies(eligible), now.Add(-window), now)
 	if err != nil {
 		return fmt.Errorf("%s latency stats: %w", cfg.Metric, err)
 	}
@@ -346,7 +350,7 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 		if gate := proxyAutoSwitchGate(cfg, s.now(), observing[d.account.ID], history[d.account.ID]); gate != nil {
 			continue
 		}
-		if switchedLastHour >= cfg.MaxSwitchesPerHour {
+		if cfg.MaxSwitchesPerHour > 0 && switchedLastHour >= cfg.MaxSwitchesPerHour {
 			slog.Info("proxy_autoswitch_hourly_cap_reached", "limit", cfg.MaxSwitchesPerHour)
 			return nil
 		}
@@ -397,7 +401,8 @@ func proxyAutoSwitchLabel(p *Proxy) string {
 }
 
 // proxyAutoSwitchIdleCandidates: no undeleted account uses it, status active,
-// and at least min_days_to_expiry left (no expiry counts as enough).
+// not expired (expires after now), and at least min_days_to_expiry left
+// (no expiry counts as enough; 0 days = only not expired).
 func proxyAutoSwitchIdleCandidates(cfg ProxyAutoSwitchConfig, now time.Time, currentID int64, proxies []ProxyWithAccountCount) []ProxyWithAccountCount {
 	minExpiry := now.Add(time.Duration(cfg.MinDaysToExpiry) * 24 * time.Hour)
 	out := make([]ProxyWithAccountCount, 0)
@@ -405,7 +410,7 @@ func proxyAutoSwitchIdleCandidates(cfg ProxyAutoSwitchConfig, now time.Time, cur
 		if p.ID == currentID || p.AccountCount > 0 || p.Status != StatusActive {
 			continue
 		}
-		if p.ExpiresAt != nil && p.ExpiresAt.Before(minExpiry) {
+		if p.ExpiresAt != nil && (!p.ExpiresAt.After(now) || p.ExpiresAt.Before(minExpiry)) {
 			continue
 		}
 		out = append(out, p)
@@ -465,6 +470,9 @@ func proxyAutoSwitchBuildPool(cfg ProxyAutoSwitchConfig, currentRegion string, c
 	}
 	pool := proxyAutoSwitchPool{}
 	noIdle := fmt.Sprintf("没有空闲、状态正常且离过期 ≥ %d 天的代理", cfg.MinDaysToExpiry)
+	if cfg.MinDaysToExpiry <= 0 {
+		noIdle = "没有空闲、状态正常且没过期的代理"
+	}
 	switch cfg.RegionPolicy {
 	case ProxyAutoSwitchRegionAny:
 		all := append(append([]proxyAutoSwitchProbeTarget{}, same...), other...)
@@ -599,13 +607,15 @@ func (s *ProxyAutoSwitchService) probeTargets(ctx context.Context, targets []pro
 
 // proxyAutoSwitchQualified returns candidates whose median is at least
 // min_improvement_pct faster than the current proxy, fastest first.
+// min_improvement_pct = 0 does not compare with the current proxy: every
+// candidate whose probe succeeded qualifies and the fastest one is used.
 func proxyAutoSwitchQualified(currentMS int64, minImprovementPct int, candidates []ProxyAutoSwitchCandidate) []ProxyAutoSwitchCandidate {
 	out := make([]ProxyAutoSwitchCandidate, 0)
 	for _, c := range candidates {
 		if c.Error != "" || c.ProbeMS == nil {
 			continue
 		}
-		if *c.ProbeMS*100 <= currentMS*int64(100-minImprovementPct) {
+		if minImprovementPct <= 0 || *c.ProbeMS*100 <= currentMS*int64(100-minImprovementPct) {
 			out = append(out, c)
 		}
 	}

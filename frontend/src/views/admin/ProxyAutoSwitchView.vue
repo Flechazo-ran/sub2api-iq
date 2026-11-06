@@ -25,7 +25,7 @@
               <div class="mode-switch metric-switch" role="radiogroup" aria-labelledby="pas-metric-label" data-testid="pas-metric">
                 <button v-for="metric in metrics" :key="metric" type="button" role="radio" :aria-checked="draft.metric === metric" :class="{ on: draft.metric === metric }" :data-testid="`pas-metric-${metric}`" @click="draft.metric = metric">{{ t(`proxyAutoSwitch.metric.${metric}`) }}</button>
               </div>
-              <span class="field-hint" data-testid="pas-metric-hint">{{ t(`proxyAutoSwitch.metricHint.${draft.metric}`, { pct: hintImprovementPct }) }}</span>
+              <span class="field-hint" data-testid="pas-metric-hint">{{ t(`proxyAutoSwitch.metricHint.${draft.metric}`) }}</span>
             </div>
             <div v-for="card in cards" :key="card.id" class="field">
               <label class="field-label" :for="`pas-${card.primary.key}`">{{ t(card.label) }}</label>
@@ -35,7 +35,7 @@
                 <label class="sub-field" :for="`pas-${card.sub.key}`"><span>{{ t(card.sub.label) }}</span><span class="field-input"><input :id="`pas-${card.sub.key}`" v-model.number="draft[card.sub.key]" type="number" class="input num-input" :min="ranges[card.sub.key].min" :max="ranges[card.sub.key].max" step="1" :aria-invalid="fieldError(card.sub.key) ? 'true' : undefined" :data-testid="`pas-${card.sub.key}`" /><span>{{ t(card.sub.unit) }}</span></span></label>
                 <span v-if="fieldError(card.sub.key)" class="field-error">{{ fieldError(card.sub.key) }}</span>
               </template>
-              <span v-if="card.hint" class="field-hint" :data-testid="`pas-hint-${card.id}`">{{ t(card.hint, { metric: t(`proxyAutoSwitch.metricName.${draft.metric}`) }) }}</span>
+              <span v-if="card.hint" class="field-hint" :data-testid="`pas-hint-${card.id}`">{{ t(hintKey(card), { metric: t(`proxyAutoSwitch.metricName.${draft.metric}`) }) }}</span>
             </div>
           </div>
           <div class="field-grid field-grid-wide">
@@ -150,32 +150,33 @@ const PAGE_SIZE = 50
 type NumericKey = 'window_minutes' | 'min_samples' | 'threshold_s' | 'consecutive_checks' | 'min_improvement_pct' | 'account_cooldown_minutes' | 'max_switches_per_hour' | 'observe_minutes' | 'min_days_to_expiry'
 type Draft = Record<NumericKey, number | string> & { enabled: boolean; metric: ProxyAutoSwitchMetric; region_policy: ProxyAutoSwitchRegionPolicy; group_ids: number[] }
 interface NumberSpec { key: NumericKey; unit: string; step?: number }
-interface FieldCard { id: string; label: string; prefix?: string; primary: NumberSpec; sub?: NumberSpec & { label: string }; hint?: string }
+// hintZero：主输入填 0（不限）时换成这条说明。
+interface FieldCard { id: string; label: string; prefix?: string; primary: NumberSpec; sub?: NumberSpec & { label: string }; hint?: string; hintZero?: string }
 
-// 与后端 PUT /config 的校验范围一致。
+// 与后端 PUT /config 的校验范围一致；快多少、冷却、每小时上限、观察、到期天数填 0 = 不限。
 const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }> = {
   window_minutes: { min: 5, max: 60, integer: true },
   min_samples: { min: 1, max: 1000, integer: true },
   threshold_s: { min: 0.2, max: 120, integer: false },
   consecutive_checks: { min: 1, max: 10, integer: true },
-  min_improvement_pct: { min: 5, max: 90, integer: true },
-  account_cooldown_minutes: { min: 5, max: 1440, integer: true },
-  max_switches_per_hour: { min: 1, max: 50, integer: true },
-  observe_minutes: { min: 5, max: 60, integer: true },
+  min_improvement_pct: { min: 0, max: 90, integer: true },
+  account_cooldown_minutes: { min: 0, max: 1440, integer: true },
+  max_switches_per_hour: { min: 0, max: 50, integer: true },
+  observe_minutes: { min: 0, max: 60, integer: true },
   min_days_to_expiry: { min: 0, max: 90, integer: true },
 }
 const cards: FieldCard[] = [
   { id: 'window', label: 'proxyAutoSwitch.window', prefix: 'proxyAutoSwitch.windowPrefix', primary: { key: 'window_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'min_samples', label: 'proxyAutoSwitch.minSamples', unit: 'proxyAutoSwitch.unit.requests' } },
   { id: 'threshold', label: 'proxyAutoSwitch.threshold', primary: { key: 'threshold_s', unit: 'proxyAutoSwitch.unit.seconds', step: 0.1 }, sub: { key: 'consecutive_checks', label: 'proxyAutoSwitch.consecutive', unit: 'proxyAutoSwitch.unit.times' }, hint: 'proxyAutoSwitch.thresholdHint' },
-  { id: 'improvement', label: 'proxyAutoSwitch.improvement', primary: { key: 'min_improvement_pct', unit: 'proxyAutoSwitch.unit.percent' }, hint: 'proxyAutoSwitch.improvementHint' },
-  { id: 'cooldown', label: 'proxyAutoSwitch.cooldown', primary: { key: 'account_cooldown_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'max_switches_per_hour', label: 'proxyAutoSwitch.maxPerHour', unit: 'proxyAutoSwitch.unit.accounts' }, hint: 'proxyAutoSwitch.cooldownHint' },
-  { id: 'observe', label: 'proxyAutoSwitch.observe', primary: { key: 'observe_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, hint: 'proxyAutoSwitch.observeHint' },
+  { id: 'improvement', label: 'proxyAutoSwitch.improvement', primary: { key: 'min_improvement_pct', unit: 'proxyAutoSwitch.unit.percent' }, hint: 'proxyAutoSwitch.improvementHint', hintZero: 'proxyAutoSwitch.improvementHintZero' },
+  { id: 'cooldown', label: 'proxyAutoSwitch.cooldown', primary: { key: 'account_cooldown_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'max_switches_per_hour', label: 'proxyAutoSwitch.maxPerHour', unit: 'proxyAutoSwitch.unit.accounts' }, hint: 'proxyAutoSwitch.cooldownHint', hintZero: 'proxyAutoSwitch.cooldownHintZero' },
+  { id: 'observe', label: 'proxyAutoSwitch.observe', primary: { key: 'observe_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, hint: 'proxyAutoSwitch.observeHint', hintZero: 'proxyAutoSwitch.observeHintZero' },
 ]
 const modes = [{ id: 'off', value: false, label: 'proxyAutoSwitch.modeOff' }, { id: 'auto', value: true, label: 'proxyAutoSwitch.modeAuto' }]
 const regionPolicies: ProxyAutoSwitchRegionPolicy[] = ['prefer_same', 'same_only', 'any']
-const metrics: ProxyAutoSwitchMetric[] = ['first_token', 'response_headers']
+const metrics: ProxyAutoSwitchMetric[] = ['usage_first_token', 'first_token', 'response_headers']
 // 后端没给或给了不认识的值（旧版本），按响应头算。
-function metricOf(value: string | null | undefined): ProxyAutoSwitchMetric { return value === 'first_token' ? 'first_token' : 'response_headers' }
+function metricOf(value: string | null | undefined): ProxyAutoSwitchMetric { return metrics.find(metric => metric === value) ?? 'response_headers' }
 // 换完不再自动换回；账号还在新代理上的记录（含「没变快」）都能手动换回。
 const revertableStatuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'not_faster']
 const tones: Record<ProxyAutoSwitchStatus, string> = { observing: 'tone-info', kept: 'tone-success', kept_insufficient: 'tone-success', not_faster: 'tone-warning', reverted: 'tone-warning', revert_skipped: 'tone-warning', no_candidate: 'tone-neutral', failed: 'tone-danger', manual_revert: 'tone-muted' }
@@ -220,8 +221,7 @@ function fieldError(key: NumericKey): string {
   return valid ? '' : t(range.integer ? 'proxyAutoSwitch.integerError' : 'proxyAutoSwitch.rangeError', { min: range.min, max: range.max })
 }
 const invalidCount = computed(() => (Object.keys(ranges) as NumericKey[]).filter(key => fieldError(key)).length)
-// 首字说明里的「快 N%」跟着正在填的「至少快」走，填错时退回已保存的值。
-const hintImprovementPct = computed(() => (fieldError('min_improvement_pct') ? savedImprovementPct.value : Number(draft.min_improvement_pct)))
+function hintKey(card: FieldCard) { return card.hintZero && Number(draft[card.primary.key]) === 0 && !fieldError(card.primary.key) ? card.hintZero : card.hint ?? '' }
 const dirty = computed(() => !!saved.value && JSON.stringify(toPayload()) !== JSON.stringify(canonical(saved.value)))
 // 已选但不在 OpenAI 分组列表里的编号（停用的分组或列表没拉到）也留着显示，免得保存时被悄悄丢掉。
 const groupOptions = computed(() => {
@@ -304,7 +304,11 @@ function isExpanded(id: number) { return expanded.value.includes(id) }
 function toggle(id: number) { expanded.value = isExpanded(id) ? expanded.value.filter(item => item !== id) : [...expanded.value, id] }
 function canRevert(event: ProxyAutoSwitchEvent) { return revertableStatuses.includes(event.status) }
 function eventMetric(event: ProxyAutoSwitchEvent) { return metricOf(event.metric) }
-function statusLabel(status: string) { const key = `proxyAutoSwitch.status.${status}`; return te(key) ? t(key, { pct: savedImprovementPct.value }) : status }
+// 「至少快」设成 0 时没有「快 N%」这回事，没换成就是没有能用的空闲代理（没有或测速都失败）。
+function statusLabel(status: string) {
+  const key = status === 'no_candidate' && savedImprovementPct.value === 0 ? 'proxyAutoSwitch.status.no_candidate_any' : `proxyAutoSwitch.status.${status}`
+  return te(key) ? t(key, { pct: savedImprovementPct.value }) : status
+}
 function tone(status: ProxyAutoSwitchStatus) { return tones[status] ?? 'tone-neutral' }
 function sortedCandidates(event: ProxyAutoSwitchEvent) {
   const rank = (ms: number | null) => (ms == null || !Number.isFinite(ms) ? Number.POSITIVE_INFINITY : ms)

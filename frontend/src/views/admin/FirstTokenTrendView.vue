@@ -26,12 +26,6 @@
           <span v-if="stepText" class="flabel" data-testid="ftt-step">{{ stepText }}</span>
         </div>
         <div class="fgroup">
-          <span id="ftt-metric-label" class="flabel">{{ t('firstTokenTrend.filters.metric') }}</span>
-          <div class="seg" role="radiogroup" aria-labelledby="ftt-metric-label">
-            <button v-for="option in metrics" :key="option" type="button" role="radio" :aria-checked="metric === option" :class="{ on: metric === option }" :data-testid="`ftt-metric-${option}`" @click="metric = option">{{ t(`firstTokenTrend.metric.${option}`) }}</button>
-          </div>
-        </div>
-        <div class="fgroup">
           <span class="flabel">{{ t('firstTokenTrend.filters.series') }}</span>
           <button v-for="key in seriesKeys" :key="key" type="button" class="chip" :aria-pressed="shown[key]" :data-testid="`ftt-series-${key}`" @click="toggleSeries(key)"><i :class="seriesSwatch[key]" />{{ t(`firstTokenTrend.series.${key}`) }}</button>
         </div>
@@ -62,7 +56,7 @@
             </div>
           </div>
           <section class="workspace-panel card" aria-labelledby="ftt-trend-heading">
-            <header class="card-h"><h3 id="ftt-trend-heading">{{ t('firstTokenTrend.trend.title') }}</h3><span class="sub" data-testid="ftt-metric-hint">{{ t(`firstTokenTrend.metricHint.${metric}`) }}</span></header>
+            <header class="card-h"><h3 id="ftt-trend-heading">{{ t('firstTokenTrend.trend.title') }}</h3><span class="sub" data-testid="ftt-metric-hint">{{ t('firstTokenTrend.metricHint') }}</span></header>
             <div class="legend">
               <span v-for="type in eventTypes" :key="type"><i class="dot" :class="eventSwatch[type]" />{{ t(`firstTokenTrend.trend.${type}`) }}</span>
               <span><i class="dash border-red-600 dark:border-red-400" />{{ t('firstTokenTrend.trend.threshold') }}</span>
@@ -174,7 +168,6 @@ type SeriesKey = 'avg' | 'p50' | 'p80'
 const DEFAULT_GROUP_ID = 16
 const SLOW_MS = 10000
 const ranges: FirstTokenTrendRange[] = ['30m', '1h', '2h']
-const metrics: FirstTokenTrendMetric[] = ['usage', 'switch']
 const dimensions: FirstTokenTrendDimension[] = ['account', 'proxy', 'model']
 const seriesKeys: SeriesKey[] = ['avg', 'p50', 'p80']
 const eventTypes: FirstTokenTrendEventType[] = ['proxy', 'concurrency', 'status']
@@ -197,7 +190,8 @@ const palette = computed(() => isDark.value
 // ---- 筛选 ----
 const groupId = ref(DEFAULT_GROUP_ID)
 const range = ref<FirstTokenTrendRange>('2h')
-const metric = ref<FirstTokenTrendMetric>('usage')
+// 只看使用记录首字（和使用记录页、代理优选判慢同一个口径），11-06 去掉了口径切换。
+const metric: FirstTokenTrendMetric = 'usage'
 const dimension = ref<FirstTokenTrendDimension>('account')
 const shown = reactive<Record<SeriesKey, boolean>>({ avg: true, p50: true, p80: true })
 function toggleSeries(key: SeriesKey) {
@@ -226,7 +220,7 @@ async function load() {
   const current = ++seq
   loading.value = true; error.value = ''
   try {
-    const result = await firstTokenTrendAPI.getTrend({ group_id: groupId.value, range: range.value, metric: metric.value, dimension: dimension.value })
+    const result = await firstTokenTrendAPI.getTrend({ group_id: groupId.value, range: range.value, metric, dimension: dimension.value })
     if (current !== seq || disposed) return
     data.value = result
     loadedAt.value = clock(new Date(), true)
@@ -239,7 +233,7 @@ async function load() {
 }
 const autoRefresh = useAutoRefresh({ storageKey: 'admin.firstTokenTrend.autoRefresh', intervals: [60], defaultInterval: 60, defaultEnabled: true, onRefresh: load, shouldPause: () => document.hidden || loading.value })
 function manualRefresh() { autoRefresh.resetCountdown(); void load() }
-watch([groupId, range, metric, dimension], manualRefresh)
+watch([groupId, range, dimension], manualRefresh)
 
 const buckets = computed<FirstTokenTrendBucket[]>(() => data.value?.buckets ?? [])
 const stepMs = computed(() => (data.value?.step_seconds ?? 300) * 1000)
