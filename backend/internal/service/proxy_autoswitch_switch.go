@@ -58,9 +58,9 @@ func proxyAutoSwitchJudge(cfg ProxyAutoSwitchConfig, samples int, p50 int64) str
 }
 
 // recordCheck keeps the in-memory consecutive-slow count. Any check that is
-// not slow (including too few samples) breaks the streak; so does a proxy or
-// metric change.
-func (s *ProxyAutoSwitchService) recordCheck(accountID, proxyID int64, metric, state string) int {
+// not slow (including too few samples) breaks the streak; so does a proxy
+// change.
+func (s *ProxyAutoSwitchService) recordCheck(accountID, proxyID int64, state string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if state != ProxyAutoSwitchStateSlow {
@@ -68,19 +68,19 @@ func (s *ProxyAutoSwitchService) recordCheck(accountID, proxyID int64, metric, s
 		return 0
 	}
 	streak := s.streaks[accountID]
-	if streak.proxyID != proxyID || streak.metric != metric {
-		streak = proxyAutoSwitchStreak{proxyID: proxyID, metric: metric}
+	if streak.proxyID != proxyID {
+		streak = proxyAutoSwitchStreak{proxyID: proxyID}
 	}
 	streak.count++
 	s.streaks[accountID] = streak
 	return streak.count
 }
 
-func (s *ProxyAutoSwitchService) slowChecks(accountID int64, proxyID *int64, metric string) int {
+func (s *ProxyAutoSwitchService) slowChecks(accountID int64, proxyID *int64) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	streak, ok := s.streaks[accountID]
-	if !ok || proxyID == nil || streak.proxyID != *proxyID || streak.metric != metric {
+	if !ok || proxyID == nil || streak.proxyID != *proxyID {
 		return 0
 	}
 	return streak.count
@@ -311,15 +311,15 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 		return nil
 	}
 	window := time.Duration(cfg.WindowMinutes) * time.Minute
-	stats, err := s.latencyStats(ctx, cfg.Metric, cfg.GroupIDs, currentProxies(eligible), now.Add(-window), now)
+	stats, err := s.latencyStats(ctx, cfg.GroupIDs, currentProxies(eligible), now.Add(-window), now)
 	if err != nil {
-		return fmt.Errorf("%s latency stats: %w", cfg.Metric, err)
+		return fmt.Errorf("usage first token stats: %w", err)
 	}
 	due := make([]proxyAutoSwitchDue, 0)
 	for _, a := range eligible {
 		st := latencyStatFor(stats, a.ID, a.ProxyID)
 		state := proxyAutoSwitchJudge(cfg, st.Samples, st.P50MS)
-		if count := s.recordCheck(a.ID, *a.ProxyID, cfg.Metric, state); state == ProxyAutoSwitchStateSlow && count >= cfg.ConsecutiveChecks {
+		if count := s.recordCheck(a.ID, *a.ProxyID, state); state == ProxyAutoSwitchStateSlow && count >= cfg.ConsecutiveChecks {
 			due = append(due, proxyAutoSwitchDue{account: a, stat: st})
 		}
 	}

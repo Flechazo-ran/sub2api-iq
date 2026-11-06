@@ -29,7 +29,8 @@ func (h *FirstTokenTrendHandler) Get(c *gin.Context) {
 		groupID = v
 	}
 	q, err := service.NormalizeFirstTokenTrendQuery(service.FirstTokenTrendQuery{
-		GroupID: groupID, Range: c.Query("range"), Metric: c.Query("metric"), Dimension: c.Query("dimension"),
+		GroupID: groupID, Range: c.Query("range"), From: c.Query("from"), To: c.Query("to"),
+		Metric: c.Query("metric"), Dimension: c.Query("dimension"),
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

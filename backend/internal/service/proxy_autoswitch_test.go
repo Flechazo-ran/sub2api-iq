@@ -50,7 +50,7 @@ func runChecks(t *testing.T, svc *ProxyAutoSwitchService, w *pasWorld, n int) {
 func TestProxyAutoSwitchDefaultConfigMatchesContract(t *testing.T) {
 	raw, err := json.Marshal(DefaultProxyAutoSwitchConfig())
 	require.NoError(t, err)
-	require.JSONEq(t, `{"enabled":false,"window_minutes":10,"min_samples":10,"metric":"response_headers","threshold_ms":2500,
+	require.JSONEq(t, `{"enabled":false,"window_minutes":10,"min_samples":10,"metric":"usage_first_token","threshold_ms":2500,
 		"consecutive_checks":2,"min_improvement_pct":30,"account_cooldown_minutes":10,
 		"max_switches_per_hour":5,"observe_minutes":10,"min_days_to_expiry":7,
 		"region_policy":"prefer_same","group_ids":[16]}`, string(raw))
@@ -66,8 +66,6 @@ func TestProxyAutoSwitchConfigValidation(t *testing.T) {
 		"samples high":     func(c *ProxyAutoSwitchConfig) { c.MinSamples = 1001 },
 		"threshold low":    func(c *ProxyAutoSwitchConfig) { c.ThresholdMS = 199 },
 		"threshold high":   func(c *ProxyAutoSwitchConfig) { c.ThresholdMS = 120001 },
-		"metric unknown":   func(c *ProxyAutoSwitchConfig) { c.Metric = "first_visible" },
-		"metric empty":     func(c *ProxyAutoSwitchConfig) { c.Metric = "" },
 		"consecutive low":  func(c *ProxyAutoSwitchConfig) { c.ConsecutiveChecks = 0 },
 		"consecutive high": func(c *ProxyAutoSwitchConfig) { c.ConsecutiveChecks = 11 },
 		"improvement low":  func(c *ProxyAutoSwitchConfig) { c.MinImprovementPct = -1 },
@@ -93,13 +91,13 @@ func TestProxyAutoSwitchConfigValidation(t *testing.T) {
 	edges.MinImprovementPct, edges.AccountCooldownMinutes, edges.MaxSwitchesPerHour = 90, 1440, 50
 	edges.ObserveMinutes, edges.MinDaysToExpiry, edges.RegionPolicy = 5, 0, ProxyAutoSwitchRegionAny
 	require.NoError(t, ValidateProxyAutoSwitchConfig(edges))
-	edges.ThresholdMS, edges.Metric = 120000, ProxyAutoSwitchMetricFirstToken
+	edges.ThresholdMS = 120000
 	require.NoError(t, ValidateProxyAutoSwitchConfig(edges))
 	edges.AccountCooldownMinutes = 5
 	require.NoError(t, ValidateProxyAutoSwitchConfig(edges))
 	// 11-06 规则：样本 1 个、冷却 / 观察 / 每小时上限 / 快多少 / 到期天数都可以是 0（0 = 不限）。
 	zero := DefaultProxyAutoSwitchConfig()
-	zero.Metric, zero.MinSamples = ProxyAutoSwitchMetricUsageFirstToken, 1
+	zero.MinSamples = 1
 	zero.ObserveMinutes, zero.AccountCooldownMinutes, zero.MaxSwitchesPerHour = 0, 0, 0
 	zero.MinDaysToExpiry, zero.MinImprovementPct, zero.RegionPolicy = 0, 0, ProxyAutoSwitchRegionAny
 	require.NoError(t, ValidateProxyAutoSwitchConfig(zero))
@@ -184,141 +182,124 @@ func TestProxyAutoSwitchSaveConfigChecksGroupsAndRoundTrips(t *testing.T) {
 	require.Equal(t, 3000, loaded.ThresholdMS)
 	require.Equal(t, 10, loaded.WindowMinutes)
 	require.Equal(t, []int64{16}, loaded.GroupIDs)
-	require.Equal(t, ProxyAutoSwitchMetricResponseHeaders, loaded.Metric, "older stored value: response_headers")
 }
 
-func TestProxyAutoSwitchSaveConfigMetric(t *testing.T) {
+// 判慢只有使用记录首字一种口径：设置里存的旧 metric（任何值，或者没有）都照常读出来，
+// 并固定成 usage_first_token；请求体里带 metric 也直接忽略，存进去的是 usage_first_token。
+func TestProxyAutoSwitchConfigIgnoresStoredMetric(t *testing.T) {
 	w := newPASWorld()
 	svc := w.service()
 	ctx := context.Background()
+	for _, raw := range []string{
+		`{"enabled":true,"metric":"response_headers","threshold_ms":3000}`,
+		`{"enabled":true,"metric":"first_token","threshold_ms":3000}`,
+		`{"enabled":true,"metric":"usage_first_token","threshold_ms":3000}`,
+		`{"enabled":true,"metric":"first_visible","threshold_ms":3000}`,
+		`{"enabled":true,"metric":"","threshold_ms":3000}`,
+		`{"enabled":true,"threshold_ms":3000}`,
+	} {
+		w.settings[proxyAutoSwitchConfigKey] = raw
+		cfg, err := svc.GetConfig(ctx)
+		require.NoError(t, err, raw)
+		require.True(t, cfg.Enabled, raw)
+		require.Equal(t, 3000, cfg.ThresholdMS, raw)
+		require.Equal(t, ProxyAutoSwitchMetricUsageFirstToken, cfg.Metric, raw)
+		require.NoError(t, ValidateProxyAutoSwitchConfig(cfg), raw)
+		out, err := json.Marshal(cfg)
+		require.NoError(t, err)
+		require.Contains(t, string(out), `"metric":"usage_first_token"`, raw)
+		saved, err := svc.SaveConfig(ctx, cfg)
+		require.NoError(t, err, raw)
+		require.Equal(t, cfg, saved)
+		require.Contains(t, w.settings[proxyAutoSwitchConfigKey], `"metric":"usage_first_token"`, raw)
+	}
 
-	cfg := enabledPASConfig()
-	cfg.Metric, cfg.ThresholdMS = ProxyAutoSwitchMetricFirstToken, 10000
-	saved, err := svc.SaveConfig(ctx, cfg)
-	require.NoError(t, err)
-	require.Equal(t, ProxyAutoSwitchMetricFirstToken, saved.Metric)
-	loaded, err := svc.GetConfig(ctx)
-	require.NoError(t, err)
-	require.Equal(t, ProxyAutoSwitchMetricFirstToken, loaded.Metric)
-	require.Equal(t, 10000, loaded.ThresholdMS)
+	var body ProxyAutoSwitchConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"metric":"response_headers","threshold_ms":10000}`), &body))
+	require.Equal(t, 10000, body.ThresholdMS)
+	require.Equal(t, ProxyAutoSwitchMetricUsageFirstToken, body.Metric, "the request body metric is ignored")
+	require.NoError(t, json.Unmarshal([]byte(`{"metric":123,"threshold_ms":10000}`), &body))
+	require.Equal(t, ProxyAutoSwitchMetricUsageFirstToken, body.Metric, "even a non-string metric is ignored")
 
-	// A body without metric (older client) keeps the response-header default.
-	cfg.Metric = ""
-	saved, err = svc.SaveConfig(ctx, cfg)
-	require.NoError(t, err)
-	require.Equal(t, ProxyAutoSwitchMetricResponseHeaders, saved.Metric)
-
+	// 任意 metric 都不再让配置校验失败。
+	cfg := DefaultProxyAutoSwitchConfig()
 	cfg.Metric = "first_visible"
-	_, err = svc.SaveConfig(ctx, cfg)
-	requireBadRequest(t, err, "metric")
-
-	cfg.Metric, cfg.ThresholdMS = ProxyAutoSwitchMetricFirstToken, 120001
-	_, err = svc.SaveConfig(ctx, cfg)
-	requireBadRequest(t, err, "threshold_ms")
+	require.NoError(t, ValidateProxyAutoSwitchConfig(cfg))
 }
 
-// metricStats gives account 65 different p50s per metric on whatever proxy it uses now.
-func metricStats(w *pasWorld, samples int, byMetric map[string]int64) {
-	w.statsFn = func(metric string, ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
-		out := []ProxyAutoSwitchLatencyStat{}
-		for _, id := range ids {
-			if a := w.accounts[id]; a != nil && a.ProxyID != nil {
-				out = append(out, ProxyAutoSwitchLatencyStat{AccountID: id, ProxyID: *a.ProxyID, Samples: samples, P50MS: byMetric[metric]})
+// 设置里存旧 metric（first_token / response_headers / 空字符串）或者没有 metric 字段时，
+// 判慢仍然按使用记录首字：真的能把慢号换到空闲代理上。
+func TestProxyAutoSwitchStoredOldMetricStillJudgesByUsageFirstToken(t *testing.T) {
+	str := func(v string) *string { return &v }
+	for _, tc := range []struct {
+		name   string
+		metric *string
+	}{
+		{"first_token", str("first_token")},
+		{"response_headers", str("response_headers")},
+		{"empty", str("")},
+		{"missing", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := rulesWorld(t)
+			raw, err := jsonMarshalForTest(liveRules1106Config())
+			require.NoError(t, err)
+			var stored map[string]any
+			require.NoError(t, json.Unmarshal([]byte(raw), &stored))
+			if tc.metric == nil {
+				delete(stored, "metric")
+			} else {
+				stored["metric"] = *tc.metric
 			}
-		}
-		return out
+			raw, err = jsonMarshalForTest(stored)
+			require.NoError(t, err)
+			w.settings[proxyAutoSwitchConfigKey] = raw
+			w.addUsage(65, 91, w.now.Add(-time.Minute), 12000)
+			svc := w.service()
+			runChecks(t, svc, w, 2)
+			require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+			e := w.lastEvent()
+			require.NotNil(t, e)
+			require.Equal(t, ProxyAutoSwitchMetricUsageFirstToken, e.Metric)
+			require.Contains(t, e.Reason, "使用记录首字 p50 12000ms")
+			require.NotEmpty(t, w.usageLog, "判慢走的是使用记录首字查询")
+		})
 	}
 }
 
-func TestProxyAutoSwitchJudgesByConfiguredMetric(t *testing.T) {
-	// First token is slow (model thinking + network), response headers are fast.
-	stats := map[string]int64{ProxyAutoSwitchMetricFirstToken: 12000, ProxyAutoSwitchMetricResponseHeaders: 1500}
-
+func TestProxyAutoSwitchJudgesByUsageFirstTokenOnly(t *testing.T) {
 	w := slowWorld(t)
 	cfg := enabledPASConfig()
-	cfg.Metric, cfg.ThresholdMS = ProxyAutoSwitchMetricFirstToken, 10000
-	w.saveConfig(cfg)
-	metricStats(w, 42, stats)
-	svc := w.service()
-	runChecks(t, svc, w, 2)
-	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
-	e := w.lastEvent()
-	require.Equal(t, ProxyAutoSwitchMetricFirstToken, e.Metric)
-	require.Equal(t, int64(12000), *e.BeforeP50MS)
-	require.Contains(t, e.Reason, "最近 10 分钟首字 p50 12000ms（42 个样本），连续 2 次检查超过 10000ms")
-	require.NotContains(t, e.Reason, "响应头")
-	for _, m := range w.statsLog {
-		require.Equal(t, ProxyAutoSwitchMetricFirstToken, m)
-	}
-	w.statsLog = nil
-	_, err := svc.AccountsDiag(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, []string{ProxyAutoSwitchMetricFirstToken}, w.statsLog, "diagnostics use the configured metric too")
-
-	// A slow check by one metric does not count towards a streak by the other.
-	w = slowWorld(t)
-	metricStats(w, 42, map[string]int64{ProxyAutoSwitchMetricFirstToken: 12000, ProxyAutoSwitchMetricResponseHeaders: 3513})
-	svc = w.service()
-	runChecks(t, svc, w, 1) // slow by response headers
 	cfg.ThresholdMS = 10000
 	w.saveConfig(cfg)
-	runChecks(t, svc, w, 1) // slow by first token: first in its streak
-	require.Empty(t, w.updates, "streak restarts when the metric changes")
-	runChecks(t, svc, w, 1)
-	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
-
-	// The same traffic judged by response headers is not slow.
-	w = slowWorld(t)
-	metricStats(w, 42, stats)
-	runChecks(t, w.service(), w, 3)
-	require.Empty(t, w.updates)
-	require.Empty(t, w.events)
-	for _, m := range w.statsLog {
-		require.Equal(t, ProxyAutoSwitchMetricResponseHeaders, m)
-	}
-}
-
-func TestProxyAutoSwitchObservationUsesEventMetric(t *testing.T) {
-	// Switched by first token; the config is changed to response headers while
-	// observing. First token got faster (5000 ≤ 12000 × 0.8), response headers
-	// would say not faster (11000 > 9600): the event's own metric decides.
-	w := slowWorld(t)
-	cfg := enabledPASConfig()
-	cfg.Metric, cfg.ThresholdMS = ProxyAutoSwitchMetricFirstToken, 10000
-	w.saveConfig(cfg)
-	metricStats(w, 42, map[string]int64{ProxyAutoSwitchMetricFirstToken: 12000, ProxyAutoSwitchMetricResponseHeaders: 1500})
+	w.uniform(42, 12000)
 	svc := w.service()
 	runChecks(t, svc, w, 2)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 	e := w.lastEvent()
-	require.Equal(t, ProxyAutoSwitchMetricFirstToken, e.Metric)
-	w.saveConfig(enabledPASConfig())
-	metricStats(w, 37, map[string]int64{ProxyAutoSwitchMetricFirstToken: 5000, ProxyAutoSwitchMetricResponseHeaders: 11000})
-	w.advance(15 * time.Minute)
-	runChecks(t, svc, w, 1)
-	got := w.event(e.ID)
-	require.Equal(t, ProxyAutoSwitchStatusKept, got.Status)
-	require.Equal(t, int64(5000), *got.AfterP50MS)
-	require.Contains(t, got.Reason, "新代理首字 p50 5000ms（37 个样本），换前 12000ms，留下")
-	require.Equal(t, ProxyAutoSwitchMetricFirstToken, got.Metric)
-	require.Contains(t, w.statsLog, ProxyAutoSwitchMetricFirstToken)
+	require.Equal(t, ProxyAutoSwitchMetricUsageFirstToken, e.Metric, "the events.metric column gets usage_first_token")
+	require.Equal(t, int64(12000), *e.BeforeP50MS)
+	require.Contains(t, e.Reason, "最近 10 分钟使用记录首字 p50 12000ms（42 个样本），连续 2 次检查超过 10000ms")
+	require.NotEmpty(t, w.usageLog, "judged on the first-token-trend usage query")
+	w.usageLog = nil
+	_, err := svc.AccountsDiag(context.Background())
+	require.NoError(t, err)
+	require.Len(t, w.usageLog, 1, "diagnostics use the same query")
+}
 
-	// Switched by response headers; the config moves to first token. Response
-	// headers got faster (1300 ≤ 3513 × 0.8), first token would say not faster.
-	w, svc, e = switchedWorld(t)
-	require.Equal(t, ProxyAutoSwitchMetricResponseHeaders, e.Metric)
-	cfg.ThresholdMS = 2500
-	w.saveConfig(cfg)
-	metricStats(w, 37, map[string]int64{ProxyAutoSwitchMetricFirstToken: 20000, ProxyAutoSwitchMetricResponseHeaders: 1300})
-	w.advance(15 * time.Minute)
-	runChecks(t, svc, w, 1)
-	got = w.event(e.ID)
-	require.Equal(t, ProxyAutoSwitchStatusKept, got.Status)
-	require.Contains(t, got.Reason, "新代理响应头 p50 1300ms")
-
-	// Rows written before the metric column existed were judged by response headers.
-	require.Equal(t, ProxyAutoSwitchMetricResponseHeaders, proxyAutoSwitchEventMetric(&ProxyAutoSwitchEvent{}))
-	require.Equal(t, "首字", proxyAutoSwitchMetricLabel(ProxyAutoSwitchMetricFirstToken))
-	require.Equal(t, "响应头", proxyAutoSwitchMetricLabel(ProxyAutoSwitchMetricResponseHeaders))
+// 升级前按旧口径换的、还在观察的记录，换后也按使用记录首字算。
+func TestProxyAutoSwitchObservationOfOldMetricEventUsesUsageFirstToken(t *testing.T) {
+	for _, old := range []string{"response_headers", "first_token", ""} {
+		w, svc, e := switchedWorld(t)
+		w.event(e.ID).Metric = old
+		observeStats(w, 37, 1300) // ≤ 3513 × 0.8
+		w.advance(15 * time.Minute)
+		runChecks(t, svc, w, 1)
+		got := w.event(e.ID)
+		require.Equal(t, ProxyAutoSwitchStatusKept, got.Status, old)
+		require.Contains(t, got.Reason, "新代理使用记录首字 p50 1300ms（37 个样本），换前 3513ms，留下", old)
+		require.Equal(t, old, got.Metric, "the stored column is left as it was")
+	}
 }
 
 func TestProxyAutoSwitchJudge(t *testing.T) {
@@ -698,7 +679,7 @@ func TestProxyAutoSwitchHourlyCap(t *testing.T) {
 		w.setProbe(30+i, 500)
 	}
 	// Old proxies (10..16) are slow, new ones (30..36) are fast.
-	w.statsFn = func(_ string, ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
+	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
 		out := []ProxyAutoSwitchLatencyStat{}
 		for _, id := range ids {
 			p := *w.accounts[id].ProxyID
@@ -732,7 +713,7 @@ func TestProxyAutoSwitchManualChangeThenTwoSlowChecksSwitches(t *testing.T) {
 	w := slowWorld(t)
 	svc := w.service()
 	runChecks(t, svc, w, 1)
-	require.Equal(t, 1, svc.slowChecks(65, autoSwitchInt64(91), enabledPASConfig().Metric))
+	require.Equal(t, 1, svc.slowChecks(65, autoSwitchInt64(91)))
 	// Someone moves the account to another proxy outside this feature.
 	w.addProxy(92, "JP", 30)
 	w.accounts[65].ProxyID = autoSwitchInt64(92)
@@ -741,7 +722,7 @@ func TestProxyAutoSwitchManualChangeThenTwoSlowChecksSwitches(t *testing.T) {
 	runChecks(t, svc, w, 1)
 	require.Empty(t, w.updates, "the streak on the old proxy does not carry over")
 	require.NotNil(t, w.states[65].ExternalChangeAt, "the manual change is still recorded")
-	require.Equal(t, 1, svc.slowChecks(65, autoSwitchInt64(92), enabledPASConfig().Metric))
+	require.Equal(t, 1, svc.slowChecks(65, autoSwitchInt64(92)))
 	diag, err := svc.AccountsDiag(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, ProxyAutoSwitchStateSlow, diag.Items[0].State)
@@ -965,7 +946,7 @@ func switchedWorld(t *testing.T) (*pasWorld, *ProxyAutoSwitchService, *ProxyAuto
 }
 
 func observeStats(w *pasWorld, samples int, p50 int64) {
-	w.statsFn = func(_ string, ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
+	w.statsFn = func(ids []int64, _, _ time.Time) []ProxyAutoSwitchLatencyStat {
 		return []ProxyAutoSwitchLatencyStat{{AccountID: 65, ProxyID: 96, Samples: samples, P50MS: p50}}
 	}
 }
@@ -993,7 +974,7 @@ func TestProxyAutoSwitchObservationNotFasterKeepsNewProxy(t *testing.T) {
 	require.Equal(t, ProxyAutoSwitchStatusNotFaster, got.Status)
 	require.Equal(t, int64(3000), *got.AfterP50MS)
 	require.Equal(t, 37, got.AfterSamples)
-	require.Contains(t, got.Reason, "观察 10 分钟：新代理响应头 p50 3000ms（37 个样本），没有比换前 3513ms 低 20% 以上；不换回，还慢就接着换")
+	require.Contains(t, got.Reason, "观察 10 分钟：新代理使用记录首字 p50 3000ms（37 个样本），没有比换前 3513ms 低 20% 以上；不换回，还慢就接着换")
 	require.Equal(t, [][2]int64{{65, 96}}, w.updates, "no switch back")
 	require.Equal(t, int64(96), *w.accounts[65].ProxyID)
 	require.Nil(t, w.states[65].ExternalChangeAt)
@@ -1223,7 +1204,7 @@ func TestProxyAutoSwitchJSONFieldsMatchContract(t *testing.T) {
 		status to_proxy_id to_proxy_label to_region updated_at`), jsonKeys(t, list.Items[0]))
 	raw, err := json.Marshal(list.Items[0])
 	require.NoError(t, err)
-	require.Contains(t, string(raw), `"metric":"response_headers"`)
+	require.Contains(t, string(raw), `"metric":"usage_first_token"`, "new rows store the fixed metric")
 	require.Equal(t, []string{"error", "label", "probe_ms", "proxy_id", "region"}, jsonKeys(t, list.Items[0].Candidates[0]))
 	require.Equal(t, []string{"items", "next_cursor"}, jsonKeys(t, list))
 
@@ -1259,7 +1240,6 @@ func TestProxyAutoSwitchEventsPagination(t *testing.T) {
 	require.Contains(t, string(raw), `"to_proxy_label":null`)
 	require.Contains(t, string(raw), `"to_region":null`)
 	require.Contains(t, string(raw), `"candidates":[]`)
-	require.Contains(t, string(raw), `"metric":"response_headers"`, "events without a stored metric show response_headers")
 }
 
 func TestProxyAutoSwitchRecentOnlyRealSwitches(t *testing.T) {

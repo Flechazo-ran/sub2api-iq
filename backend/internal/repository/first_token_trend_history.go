@@ -10,12 +10,13 @@ import (
 	"github.com/lib/pq"
 )
 
-// firstTokenTrendTraceSQL：和代理优选判慢（proxyAutoSwitchLatencySQLFirstToken）同口径——
-// 只数 egress 尝试（每个 egress 下面还有一个时间相同的 http 子尝试，两个都数会翻倍），
-// 首字 = first_semantic − request_written；head / upload 要 headers_written，没有就给 NULL。
+// firstTokenTrendTraceSQL：trace 里的 egress 尝试，用来算首字拆段（head / upload / after）
+// 和按代理拆分时把 usage 记录对上出口代理。只数 egress 尝试（每个 egress 下面还有一个时间
+// 相同的 http 子尝试，两个都数会翻倍），首字 = first_semantic − request_written；
+// head / upload 要 headers_written，没有就给 NULL。
 // 事件时间都是相对请求进网关的毫秒偏移，所以 head 直接就是 headers_written。
 // 用 jsonb_path_query 一次取出 egress 尝试，比 jsonb_array_elements + 多次取 detail 少解压几次，
-// 线上 7 天约 11 万条 2.7 秒左右（现在最长只查 2 小时）。
+// 线上 7 天约 11 万条 2.7 秒左右（现在最长只查 12 小时）。
 const firstTokenTrendTraceSQL = `
 SELECT t.started_at,
        (a->>'account_id')::bigint,

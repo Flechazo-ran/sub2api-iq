@@ -47,20 +47,12 @@ func proxyAutoSwitchUsageStats(usage []FirstTokenTrendUsageSample, traces []Firs
 	return out
 }
 
-// latencyStats 取 current 里每个号在给定代理上的判慢数据。usage_first_token 走首字趋势
-// 同一套 usage_logs 查询（按配置的分组），其他口径走 trace 查询。
-func (s *ProxyAutoSwitchService) latencyStats(ctx context.Context, metric string, groupIDs []int64,
+// latencyStats 取 current 里每个号在给定代理上的判慢数据（使用记录首字），走首字趋势
+// 同一套 usage_logs 查询（按配置的分组）。
+func (s *ProxyAutoSwitchService) latencyStats(ctx context.Context, groupIDs []int64,
 	current map[int64]int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error) {
 	if len(current) == 0 {
 		return nil, nil
-	}
-	if metric != ProxyAutoSwitchMetricUsageFirstToken {
-		ids := make([]int64, 0, len(current))
-		for id := range current {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		return s.repo.LatencyStats(ctx, metric, ids, from, to)
 	}
 	usage, traces, err := s.repo.FirstTokenUsage(ctx, groupIDs, from, to, from.Add(-proxyAutoSwitchUsageTracePad))
 	if err != nil {

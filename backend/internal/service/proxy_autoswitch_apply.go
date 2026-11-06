@@ -212,7 +212,7 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 	event := &ProxyAutoSwitchEvent{
 		AccountID:      account.ID,
 		AccountName:    account.Name,
-		Metric:         cfg.Metric,
+		Metric:         ProxyAutoSwitchMetricUsageFirstToken,
 		FromProxyID:    autoSwitchInt64(currentID),
 		FromProxyLabel: proxyAutoSwitchLabel(current),
 		FromRegion:     currentRegion,
@@ -220,8 +220,8 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 		BeforeSamples:  stat.Samples,
 		Candidates:     []ProxyAutoSwitchCandidate{},
 	}
-	base := fmt.Sprintf("最近 %d 分钟%s p50 %dms（%d 个样本），连续 %d 次检查超过 %dms",
-		cfg.WindowMinutes, proxyAutoSwitchMetricLabel(cfg.Metric), stat.P50MS, stat.Samples, cfg.ConsecutiveChecks, cfg.ThresholdMS)
+	base := fmt.Sprintf("最近 %d 分钟使用记录首字 p50 %dms（%d 个样本），连续 %d 次检查超过 %dms",
+		cfg.WindowMinutes, stat.P50MS, stat.Samples, cfg.ConsecutiveChecks, cfg.ThresholdMS)
 	if len(pool.first) == 0 && len(pool.second) == 0 {
 		return false, s.recordMiss(ctx, event, ProxyAutoSwitchStatusNoCandidate, base+"；"+pool.emptyReason)
 	}
@@ -407,14 +407,12 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 	if limit := switchedAt.Add(observe * proxyAutoSwitchObserveExtendFactor); end.After(limit) {
 		end = limit
 	}
-	// Compare with the metric this event was judged by, even if the config
-	// changed meanwhile, so before and after measure the same thing.
-	metric := proxyAutoSwitchEventMetric(event)
-	stats, err := s.latencyStats(ctx, metric, cfg.GroupIDs, map[int64]int64{event.AccountID: *event.ToProxyID}, switchedAt, end)
+	// 换后也按使用记录首字算。旧记录（metric 列是 response_headers / first_token）
+	// 也一样，换前 p50 是旧口径记下的，比出来只作参考。
+	stats, err := s.latencyStats(ctx, cfg.GroupIDs, map[int64]int64{event.AccountID: *event.ToProxyID}, switchedAt, end)
 	if err != nil {
 		return err
 	}
-	label := proxyAutoSwitchMetricLabel(metric)
 	stat := latencyStatFor(stats, event.AccountID, event.ToProxyID)
 	decision := proxyAutoSwitchObservationDecision(cfg, elapsed, event.BeforeP50MS, stat.Samples, stat.P50MS)
 	if decision == proxyAutoSwitchDecisionWait {
@@ -454,14 +452,14 @@ func (s *ProxyAutoSwitchService) finishObservation(ctx context.Context, cfg Prox
 			fresh.Reason += "；观察期间账号代理被改成别的了，没有比较快慢"
 		case decision == proxyAutoSwitchDecisionKeep:
 			fresh.Status = ProxyAutoSwitchStatusKept
-			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），换前 %dms，留下", minutes, label, stat.P50MS, stat.Samples, before)
+			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理使用记录首字 p50 %dms（%d 个样本），换前 %dms，留下", minutes, stat.P50MS, stat.Samples, before)
 		case decision == proxyAutoSwitchDecisionKeepInsufficient:
 			fresh.Status = ProxyAutoSwitchStatusKeptInsufficient
 			fresh.Reason += fmt.Sprintf("；观察 %d 分钟只有 %d 个样本（少于 %d 个），留下", minutes, stat.Samples, cfg.MinSamples)
 		default:
 			fresh.Status = ProxyAutoSwitchStatusNotFaster
-			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理%s p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上；不换回，还慢就接着换",
-				minutes, label, stat.P50MS, stat.Samples, before, proxyAutoSwitchKeepDropPct)
+			fresh.Reason += fmt.Sprintf("；观察 %d 分钟：新代理使用记录首字 p50 %dms（%d 个样本），没有比换前 %dms 低 %d%% 以上；不换回，还慢就接着换",
+				minutes, stat.P50MS, stat.Samples, before, proxyAutoSwitchKeepDropPct)
 		}
 		fresh.Reason = truncateReason(fresh.Reason)
 		finished := s.now()

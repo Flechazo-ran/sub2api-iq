@@ -15,16 +15,50 @@ func TestNormalizeFirstTokenTrendQueryDefaultsAndRejects(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, FirstTokenTrendQuery{GroupID: 16, Range: "2h", Metric: "usage", Dimension: "account"}, q)
 
-	q, err = NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{GroupID: 7, Range: "30m", Metric: "switch", Dimension: "model"})
-	require.NoError(t, err)
-	require.Equal(t, int64(7), q.GroupID)
+	for _, rng := range []string{"30m", "1h", "2h", "6h", "12h"} {
+		q, err = NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{GroupID: 7, Range: rng, Metric: "usage", Dimension: "model"})
+		require.NoError(t, err, rng)
+		require.Equal(t, int64(7), q.GroupID, rng)
+		require.Equal(t, rng, q.Range, rng)
+	}
 
 	for _, bad := range []FirstTokenTrendQuery{
-		{Range: "6h"}, {Range: "24h"}, {Range: "7d"}, {Range: "1d"}, {Metric: "p50"}, {Metric: "USAGE"}, {Dimension: "user"}, {GroupID: -1},
+		{Range: "13h"}, {Range: "24h"}, {Range: "7d"}, {Range: "1d"},
+		{Metric: "switch"}, {Metric: "p50"}, {Metric: "USAGE"}, {Dimension: "user"}, {GroupID: -1},
 	} {
 		_, err := NormalizeFirstTokenTrendQuery(bad)
 		require.Error(t, err, "%+v", bad)
 		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), "%+v", bad)
+	}
+}
+
+func TestNormalizeFirstTokenTrendQueryCustomRange(t *testing.T) {
+	from, to := fttAt(14, 0, 0), fttAt(15, 0, 0)
+	q, err := NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{
+		Range: "24h", // 给了 from/to 就忽略 range，哪怕是非法值
+		From:  from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "custom", q.Range)
+	require.True(t, q.custom)
+	require.True(t, q.from.Equal(from))
+	require.True(t, q.to.Equal(to))
+
+	for name, bad := range map[string]FirstTokenTrendQuery{
+		"only from":  {From: fttAt(15, 0, 0).Format(time.RFC3339)},
+		"only to":    {To: fttAt(15, 0, 0).Format(time.RFC3339)},
+		"bad from":   {From: "2026-11-05 15:00", To: fttAt(15, 0, 0).Format(time.RFC3339)},
+		"bad to":     {From: fttAt(14, 0, 0).Format(time.RFC3339), To: "15:00"},
+		"to equals":  {From: fttAt(15, 0, 0).Format(time.RFC3339), To: fttAt(15, 0, 0).Format(time.RFC3339)},
+		"to before":  {From: fttAt(15, 0, 0).Format(time.RFC3339), To: fttAt(14, 0, 0).Format(time.RFC3339)},
+		"too short":  {From: fttAt(15, 0, 0).Format(time.RFC3339), To: fttAt(15, 9, 59).Format(time.RFC3339)},
+		"too long":   {From: fttAt(3, 0, 0).Format(time.RFC3339), To: fttAt(15, 0, 1).Format(time.RFC3339)},
+		"from no tz": {From: "2026-11-05T15:00:00", To: fttAt(16, 0, 0).Format(time.RFC3339)},
+		"to no tz":   {From: fttAt(15, 0, 0).Format(time.RFC3339), To: "2026-11-05T16:00:00"},
+	} {
+		_, err := NormalizeFirstTokenTrendQuery(bad)
+		require.Error(t, err, name)
+		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), name)
 	}
 }
 
@@ -33,16 +67,20 @@ func TestFirstTokenTrendWindowAlignsToBeijingGrid(t *testing.T) {
 	cases := []struct {
 		rng       string
 		n         int
+		step      time.Duration
 		from      time.Time
 		lastStart time.Time
 	}{
-		{"30m", 30, fttAt(16, 3, 0), fttAt(16, 32, 0)},
-		{"1h", 60, fttAt(15, 33, 0), fttAt(16, 32, 0)},
-		{"2h", 60, fttAt(14, 34, 0), fttAt(16, 32, 0)},
+		{"30m", 30, time.Minute, fttAt(16, 3, 0), fttAt(16, 32, 0)},
+		{"1h", 60, time.Minute, fttAt(15, 33, 0), fttAt(16, 32, 0)},
+		{"2h", 60, 2 * time.Minute, fttAt(14, 34, 0), fttAt(16, 32, 0)},
+		{"6h", 72, 5 * time.Minute, fttAt(10, 35, 0), fttAt(16, 30, 0)},
+		{"12h", 144, 5 * time.Minute, fttAt(4, 35, 0), fttAt(16, 30, 0)},
 	}
 	for _, c := range cases {
 		w := newFirstTokenTrendWindow(now, firstTokenTrendRanges[c.rng])
 		require.Equal(t, c.n, w.n, c.rng)
+		require.Equal(t, c.step, w.step, c.rng)
 		require.True(t, w.from.Equal(c.from), "%s from %s", c.rng, w.from)
 		require.True(t, w.bucketStart(w.n-1).Equal(c.lastStart), c.rng)
 		require.True(t, w.to.Equal(now), "to 是查询截止时间，不对齐整格 %s", c.rng)
@@ -130,8 +168,8 @@ func TestFirstTokenTrendGroupNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, infraerrors.Code(err))
 }
 
-// 拆段都从 trace 算；switch 口径用 trace 的 after；按代理拆时 usage 靠 request_id 对上 trace 的出口代理；
-// 同时在跑 = 桶内每个请求和桶重叠的秒数 ÷ 桶长。
+// 拆段（head / upload / after）保留，从 trace 算，和口径无关；按代理拆时 usage 靠
+// request_id 对上 trace 的出口代理；同时在跑 = 桶内每个请求和桶重叠的秒数 ÷ 桶长。
 func TestFirstTokenTrendSplitInflightAndProxyRows(t *testing.T) {
 	now := fttAt(16, 2, 0)
 	f := func(v float64) *float64 { return &v }
@@ -180,11 +218,205 @@ func TestFirstTokenTrendSplitInflightAndProxyRows(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"77", "121", "0"}, keys)
 
-	res, err = svc.Query(context.Background(), FirstTokenTrendQuery{Range: "1h", Metric: "switch", Dimension: "model"})
+	// 口径只有 usage：按 model 拆也是 usage 样本（非流式的不算），拆段字段照样有。
+	res, err = svc.Query(context.Background(), FirstTokenTrendQuery{Range: "1h", Metric: "usage", Dimension: "model"})
 	require.NoError(t, err)
 	b = res.Buckets[i]
-	require.Equal(t, 3, b.Samples)
-	require.Equal(t, int64(6000), *b.P50MS)
-	require.InDelta(t, 33.3, *b.Over10Pct, 1e-9)
+	require.Equal(t, 2, b.Samples)
+	require.Equal(t, int64(12000), *b.P50MS)
+	require.InDelta(t, 50.0, *b.Over10Pct, 1e-9)
 	require.Equal(t, int64(6000), *b.AfterP50MS)
+	require.Equal(t, "gpt-6-sol", res.Rows[0].Key)
+	require.Equal(t, 2, res.Rows[0].Samples)
+}
+
+// 自定义时间段：桶按北京时间对齐，from/to 原样返回，只统计 [from, to) 内的样本；
+// 粒度按 to − from 选：≤60 分钟 60 秒，≤120 分钟 120 秒，更长 300 秒。
+func TestFirstTokenTrendCustomRange(t *testing.T) {
+	now := fttAt(16, 32, 10)
+	acc := FirstTokenTrendAccount{ID: 98, Name: "x", Status: StatusActive, Schedulable: true, Concurrency: 100,
+		ProxyID: fttI64(121), CreatedAt: fttAt(8, 0, 0)}
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{acc},
+		usage: []FirstTokenTrendUsageSample{
+			fttUsage(fttAt(14, 31, 0), 98, 1000, "m"), // from 之前，不算
+			fttUsage(fttAt(14, 32, 30), 98, 3000, "m"),
+			fttUsage(fttAt(16, 31, 59), 98, 5000, "m"),
+			fttUsage(fttAt(16, 32, 0), 98, 7000, "m"), // to 之后（to 不含），不算
+		},
+	}
+	from, to := fttAt(14, 32, 0), fttAt(16, 32, 0)
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{
+		From: from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "custom", res.Range)
+	require.Equal(t, 120, res.StepSeconds, "2 小时用 120 秒")
+	require.True(t, res.From.Equal(from), "from 原样返回")
+	require.True(t, res.To.Equal(to), "to 原样返回")
+	require.Len(t, res.Buckets, 60, "2 小时 ÷ 120 秒")
+	require.True(t, res.Buckets[0].TS.Equal(from), "起点对齐到 120 秒整格")
+	samples := 0
+	for _, b := range res.Buckets {
+		samples += b.Samples
+	}
+	require.Equal(t, 2, samples, "只算 [from, to) 内的样本")
+	require.Equal(t, 2, res.Rows[0].Samples)
+	require.True(t, repo.usageFrom.Equal(from), "自定义时间段不额外回看 from 之前")
+
+	// 粒度边界：30m / 1h / 2h / 6h / 12h。
+	for _, tc := range []struct {
+		span time.Duration
+		step int
+	}{
+		{30 * time.Minute, 60}, {time.Hour, 60}, {90 * time.Minute, 120}, {2 * time.Hour, 120},
+		{3 * time.Hour, 300}, {6 * time.Hour, 300}, {12 * time.Hour, 300},
+	} {
+		start := now.Add(-tc.span)
+		out, err := newFttService(&fttFakeRepo{accounts: []FirstTokenTrendAccount{acc}}, now).Query(context.Background(),
+			FirstTokenTrendQuery{From: start.Format(time.RFC3339), To: now.Format(time.RFC3339)})
+		require.NoError(t, err, tc.span)
+		require.Equal(t, "custom", out.Range, tc.span)
+		require.Equal(t, tc.step, out.StepSeconds, tc.span)
+	}
+}
+
+// 自定义时间段按代理拆：trace 要往前多查 10 分钟，否则 from 之前开始、from 之后还在跑的
+// 请求，以及开始时间只比 from 晚几毫秒（trace 的 started_at 比 from 早 1 毫秒）的请求，
+// 都会对不上出口代理，被算到假的 "0" 行上。
+func TestFirstTokenTrendCustomRangeProxyTracePad(t *testing.T) {
+	now := fttAt(16, 32, 10)
+	acc := FirstTokenTrendAccount{ID: 98, Name: "x", Status: StatusActive, Schedulable: true, Concurrency: 100,
+		ProxyID: fttI64(121), CreatedAt: fttAt(8, 0, 0)}
+	// A 在 from 之前开始、from 之后还在跑：不是首字样本，但同时在跑要记到代理 77 上。
+	a := FirstTokenTrendUsageSample{StartedAt: fttAt(14, 58, 0), EndedAt: fttAt(15, 2, 0),
+		FirstTokenMS: fttI64(1000), Stream: true, AccountID: 98, Model: "m", RequestID: "a"}
+	// B 的 usage 开始时间在 from 之后，但 trace 的 started_at 比 from 早 1 毫秒：usage 的开始时间
+	// 是 created_at − duration_ms，和 trace 的 started_at 本来就可能差几毫秒。
+	b := FirstTokenTrendUsageSample{StartedAt: fttAt(15, 0, 0).Add(3 * time.Millisecond),
+		EndedAt: fttAt(15, 0, 2).Add(3 * time.Millisecond), FirstTokenMS: fttI64(1000), Stream: true,
+		AccountID: 98, Model: "m", RequestID: "b"}
+	f := func(v float64) *float64 { return &v }
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{acc},
+		usage:    []FirstTokenTrendUsageSample{a, b},
+		traces: []FirstTokenTrendTraceSample{
+			// 这两条 trace 都在 from 之前；特殊的 Head/Upload/After 值用来断言它们没进任何桶。
+			{StartedAt: fttAt(14, 58, 0), AccountID: 98, ProxyID: 77, HeadMS: f(99999), UploadMS: f(99998), AfterMS: 99999, RequestID: "a"},
+			{StartedAt: fttAt(15, 0, 0).Add(-time.Millisecond), AccountID: 98, ProxyID: 77, HeadMS: f(99999), UploadMS: f(99998), AfterMS: 99999, RequestID: "b"},
+		},
+	}
+	from, to := fttAt(15, 0, 0), fttAt(16, 0, 0)
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{
+		From: from.Format(time.RFC3339), To: to.Format(time.RFC3339), Dimension: "proxy",
+	})
+	require.NoError(t, err)
+	byKey := map[string]FirstTokenTrendRow{}
+	for _, r := range res.Rows {
+		byKey[r.Key] = r
+	}
+	require.NotContains(t, byKey, "0", "trace 往回多查 10 分钟后，两条请求都应该对上代理 77")
+	row77, ok := byKey["77"]
+	require.True(t, ok, "代理 77 要有行")
+	require.Equal(t, 1, row77.Samples, "只有 B 是 [from, to) 内的首字样本")
+	require.Greater(t, row77.InflightAvg, 0.0, "A 在 15:00–15:02 的重叠要算到 77 上")
+	for i, bucket := range res.Buckets {
+		for name, p := range map[string]*int64{"head": bucket.HeadP50MS, "upload": bucket.UploadP50MS, "after": bucket.AfterP50MS} {
+			if p == nil {
+				continue
+			}
+			require.NotEqual(t, int64(99999), *p, "第 %d 个桶的 %s 不该含 from 之前的 trace", i, name)
+			require.NotEqual(t, int64(99998), *p, "第 %d 个桶的 %s 不该含 from 之前的 trace", i, name)
+		}
+	}
+}
+
+// 自定义时间段的 to 晚于现在时按现在截到秒：末尾那格只统计已经走完的秒数，后 10 分钟没
+// 过完的变动 p50_after 给 null；粒度仍按请求里的 to − from 选。
+func TestFirstTokenTrendCustomRangeToCappedAtNow(t *testing.T) {
+	// 服务的 now 用 UTC 表示同一时刻：to 被截到「现在」时也要转成北京时间返回。
+	now := fttAt(16, 32, 10).UTC()
+	acc := FirstTokenTrendAccount{ID: 98, Name: "x", Status: StatusActive, Schedulable: true, Concurrency: 100,
+		ProxyID: fttI64(121), CreatedAt: fttAt(10, 0, 0)}
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{acc},
+		// 15:00 是变动前的起点（不在时间段内，不返回），16:22:30 才是这次换代理。
+		audits: []FirstTokenTrendAuditWrite{
+			{CreatedAt: fttAt(15, 0, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":99}`},
+			{CreatedAt: fttAt(16, 22, 30), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":77}`},
+		},
+		usage: []FirstTokenTrendUsageSample{fttUsage(fttAt(16, 25, 0), 98, 5000, "m")},
+	}
+	from := now.Add(-time.Hour)     // 15:32:10
+	to := now.Add(30 * time.Second) // 16:32:40，请求长度 1 小时 30 秒
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{
+		From: from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.True(t, res.To.Equal(now), "to 晚于现在时按现在（16:32:10）截止，实际是 %s", res.To)
+	require.Equal(t, "2026-11-05T16:32:10+08:00", res.To.Format(time.RFC3339), "截到现在时 to 也要是北京时间")
+	require.Equal(t, 120, res.StepSeconds, "粒度按请求里的 1 小时 30 秒选")
+	require.Len(t, res.Events, 1)
+	require.True(t, res.Events[0].At.Equal(fttAt(16, 22, 30)))
+	require.Nil(t, res.Events[0].P50AfterMS, "后 10 分钟到 16:32:30，现在 16:32:10 还没过完")
+}
+
+// 自定义时间段的 from 不对齐整格时，第一个桶从 from 之前开始；样本和同时在跑都只算
+// dataFrom（= from）之后的部分。
+func TestFirstTokenTrendCustomRangeStartNotAligned(t *testing.T) {
+	now := fttAt(16, 32, 10)
+	acc := FirstTokenTrendAccount{ID: 98, Name: "x", Status: StatusActive, Schedulable: true, Concurrency: 100,
+		ProxyID: fttI64(121), CreatedAt: fttAt(8, 0, 0)}
+	// 14:32:30 在第一个桶（14:32–14:34）里，但早于 from，不算首字样本；它的同时在跑从
+	// 14:33:00 才开始算（前 30 秒在 from 之前）。
+	before := FirstTokenTrendUsageSample{StartedAt: fttAt(14, 32, 30), EndedAt: fttAt(14, 33, 30),
+		FirstTokenMS: fttI64(1000), Stream: true, AccountID: 98, Model: "m"}
+	// 14:33:10 是 [from, to) 内的样本，进第 0 个桶。
+	inRange := FirstTokenTrendUsageSample{StartedAt: fttAt(14, 33, 10), EndedAt: fttAt(14, 33, 40),
+		FirstTokenMS: fttI64(1000), Stream: true, AccountID: 98, Model: "m"}
+	// 非流式、只算同时在跑：14:32–14:34 横跨第一个桶，桶里只统计 14:33–14:34 这 60 秒。
+	inflight := FirstTokenTrendUsageSample{StartedAt: fttAt(14, 32, 0), EndedAt: fttAt(14, 34, 0),
+		Stream: false, AccountID: 98, Model: "m"}
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{acc},
+		usage:    []FirstTokenTrendUsageSample{before, inRange, inflight},
+	}
+	from, to := fttAt(14, 33, 0), fttAt(16, 32, 0)
+	res, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{
+		From: from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 120, res.StepSeconds, "1 小时 59 分用 120 秒")
+	require.True(t, res.Buckets[0].TS.Equal(fttAt(14, 32, 0)), "第一个桶对齐到北京时间 2 分钟整格")
+	require.True(t, res.From.Equal(from), "返回的 from 还是请求里的 14:33:00")
+	require.Len(t, res.Buckets, 60, "14:32–16:32 共 2 小时 ÷ 120 秒")
+	require.Equal(t, 1, res.Buckets[0].Samples, "只有 14:33:10 那条算样本")
+	// 第 0 个桶实际统计 14:33:00–14:34:00（60 秒）。同时在跑的重叠：before 从 14:33:00
+	// 算到 14:33:30 = 30 秒；inRange 14:33:10–14:33:40 = 30 秒；inflight 14:33:00–14:34:00
+	// = 60 秒。合计 120 秒 ÷ 60 秒 = 2。
+	require.InDelta(t, 2.0, res.Buckets[0].InflightAvg, 0.01)
+	require.Equal(t, 1, res.Rows[0].Samples)
+}
+
+// 和「现在」比较的边界：from 不能早于 12 小时前（多 1 分钟），to 不能晚于现在 1 分钟。
+func TestFirstTokenTrendCustomRangeNowBounds(t *testing.T) {
+	now := fttAt(16, 32, 10)
+	repo := &fttFakeRepo{accounts: []FirstTokenTrendAccount{{ID: 98, Name: "x", Status: StatusActive, Schedulable: true, Concurrency: 1}}}
+	svc := newFttService(repo, now)
+	query := func(from, to time.Time) error {
+		_, err := svc.Query(context.Background(), FirstTokenTrendQuery{
+			From: from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+		})
+		return err
+	}
+
+	err := query(now.Add(-12*time.Hour-2*time.Minute), now.Add(-time.Hour))
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Contains(t, err.Error(), "from 不能早于 12 小时前")
+	require.NoError(t, query(now.Add(-12*time.Hour-time.Minute), now.Add(-time.Hour)))
+
+	err = query(now.Add(-time.Hour), now.Add(2*time.Minute))
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Contains(t, err.Error(), "to 不能晚于现在 1 分钟")
+	require.NoError(t, query(now.Add(-time.Hour), now.Add(time.Minute)))
 }

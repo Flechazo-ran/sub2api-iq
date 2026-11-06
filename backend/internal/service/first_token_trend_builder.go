@@ -20,7 +20,8 @@ type firstTokenTrendBuilder struct {
 	known    map[int64]bool
 	usage    []FirstTokenTrendUsageSample
 	traces   []FirstTokenTrendTraceSample
-	samples  []firstTokenTrendSample // 所选口径，含 from 前 10 分钟
+	// 使用记录首字样本；range 模式含 from 前 10 分钟，自定义时间段只有 [from, to) 内的。
+	samples []firstTokenTrendSample
 	// 按代理拆时，usage 记录靠 request_id 对上 trace 拿到出口代理。
 	proxies firstTokenUsageProxyIndex
 }
@@ -76,22 +77,14 @@ func newFirstTokenTrendBuilder(w firstTokenTrendWindow, q FirstTokenTrendQuery, 
 	if q.Dimension == FirstTokenTrendDimensionProxy {
 		b.proxies = newFirstTokenUsageProxyIndex(traces)
 	}
-	sampleFrom := w.from.Add(-firstTokenTrendEventWindow)
-	if q.Metric == FirstTokenTrendMetricSwitch {
-		for _, t := range traces {
-			if t.StartedAt.Before(sampleFrom) || !t.StartedAt.Before(w.to) {
-				continue
-			}
-			b.samples = append(b.samples, firstTokenTrendSample{at: t.StartedAt, accountID: t.AccountID, key: b.traceKey(t), ms: t.AfterMS})
+	sampleFrom := w.sampleFrom()
+	// 口径只有使用记录首字；trace 只用来算拆段和按代理拆分时对出口代理。
+	for _, u := range usage {
+		ms, ok := firstTokenUsageValue(u, sampleFrom, w.to)
+		if !ok {
+			continue
 		}
-	} else {
-		for _, u := range usage {
-			ms, ok := firstTokenUsageValue(u, sampleFrom, w.to)
-			if !ok {
-				continue
-			}
-			b.samples = append(b.samples, firstTokenTrendSample{at: u.StartedAt, accountID: u.AccountID, key: b.usageKey(u), ms: ms})
-		}
+		b.samples = append(b.samples, firstTokenTrendSample{at: u.StartedAt, accountID: u.AccountID, key: b.usageKey(u), ms: ms})
 	}
 	return b
 }
@@ -106,25 +99,15 @@ func (b *firstTokenTrendBuilder) usageKey(u FirstTokenTrendUsageSample) string {
 	return strconv.FormatInt(u.AccountID, 10)
 }
 
-func (b *firstTokenTrendBuilder) traceKey(t FirstTokenTrendTraceSample) string {
-	switch b.q.Dimension {
-	case FirstTokenTrendDimensionProxy:
-		return strconv.FormatInt(t.ProxyID, 10)
-	case FirstTokenTrendDimensionModel:
-		return t.Model
-	}
-	return strconv.FormatInt(t.AccountID, 10)
-}
-
 func (b *firstTokenTrendBuilder) inRange(t time.Time) bool {
-	return !t.Before(b.w.from) && t.Before(b.w.to)
+	return !t.Before(b.w.dataFrom) && t.Before(b.w.to)
 }
 
 // addOverlap 把一个请求 [start, end) 和每个桶重叠的秒数加到 sums 上。
 // 只统计已完成（已写 usage_logs）的请求，所以最近一两格会比实际少一点。
 func (b *firstTokenTrendBuilder) addOverlap(sums []float64, start, end time.Time) float64 {
-	if start.Before(b.w.from) {
-		start = b.w.from
+	if start.Before(b.w.dataFrom) {
+		start = b.w.dataFrom
 	}
 	if end.After(b.w.to) {
 		end = b.w.to
@@ -157,8 +140,13 @@ func (b *firstTokenTrendBuilder) addOverlap(sums []float64, start, end time.Time
 	return total
 }
 
+// bucketSeconds 是桶里实际统计的秒数：自定义时间段第一个桶从 dataFrom 算，最后一格截到 to。
 func (b *firstTokenTrendBuilder) bucketSeconds(i int) float64 {
-	return b.w.bucketEnd(i).Sub(b.w.bucketStart(i)).Seconds()
+	start := b.w.bucketStart(i)
+	if start.Before(b.w.dataFrom) {
+		start = b.w.dataFrom
+	}
+	return b.w.bucketEnd(i).Sub(start).Seconds()
 }
 
 // proxyIDs 是行标签要查名字的代理（按代理拆时）。
@@ -194,7 +182,8 @@ func (b *firstTokenTrendBuilder) unknownAccountIDs() []int64 {
 	return uniqueInt64(out)
 }
 
-// accountSeries 是每个号所选口径的样本（含 from 前 10 分钟），给变动前后 p50 用。
+// accountSeries 是每个号的样本，给变动前后 p50 用。range 模式含 from 前 10 分钟；
+// 自定义时间段严格只有 [from, to) 内的样本。
 func (b *firstTokenTrendBuilder) accountSeries() map[int64]*firstTokenTrendSeries {
 	sb := firstTokenTrendSeriesBuilder{}
 	for _, s := range b.samples {

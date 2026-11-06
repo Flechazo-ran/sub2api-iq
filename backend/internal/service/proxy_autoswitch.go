@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// 代理优选：OpenAI OAuth 号的首字或响应头时间（按配置选口径）持续偏慢时，自动换到
+// 代理优选：OpenAI OAuth 号的使用记录首字（和使用记录页、首字趋势一致）持续偏慢时，自动换到
 // 更快的空闲代理。换完观察一段时间，只记录有没有变快，不换回；还慢就接着换
 // （冷却、观察期、每小时上限配 0 就不拦）。只在后台页面记录，不推送消息。
 const (
@@ -44,12 +44,10 @@ const (
 	ProxyAutoSwitchStateInsufficient = "insufficient"
 	ProxyAutoSwitchStateSkipped      = "skipped"
 
-	// 判慢指标 response_headers / first_token：同一个 egress 尝试里
-	// events.<指标> − events.request_written（毫秒），即上游时间，不含上传请求体。
-	ProxyAutoSwitchMetricResponseHeaders = "response_headers"
-	ProxyAutoSwitchMetricFirstToken      = "first_token"
-	// usage_first_token：usage_logs.first_token_ms，和使用记录页、首字趋势看板同一个口径
-	// （从请求进网关算，含上传请求体），取样和 p50 算法都和首字趋势共用（11-06 起线上用这个）。
+	// 判慢只看使用记录首字：usage_logs.first_token_ms，和使用记录页、首字趋势看板同一个口径
+	// （从请求进网关算，含上传请求体），取样和 p50 算法都和首字趋势共用。
+	// 它同时是配置里的 metric（只为兼容前端显示保留）和新写入 proxy_autoswitch_events.metric
+	// 列的值（列和 CHECK 留着，旧记录里的 response_headers / first_token 不动）。
 	ProxyAutoSwitchMetricUsageFirstToken = "usage_first_token"
 
 	proxyAutoSwitchConfigKey = "proxy_autoswitch_config"
@@ -119,9 +117,12 @@ var proxyAutoSwitchRecentStatuses = []string{
 }
 
 type ProxyAutoSwitchConfig struct {
-	Enabled           bool   `json:"enabled"`
-	WindowMinutes     int    `json:"window_minutes"`
-	MinSamples        int    `json:"min_samples"`
+	Enabled       bool `json:"enabled"`
+	WindowMinutes int  `json:"window_minutes"`
+	MinSamples    int  `json:"min_samples"`
+	// Metric 只为兼容前端显示保留，值固定是 usage_first_token：读设置 / PUT 时不管传的是
+	// response_headers、first_token、别的值还是没有这个字段，都按使用记录首字处理，
+	// 不报错（见 UnmarshalJSON、normalizeProxyAutoSwitchConfig）。
 	Metric            string `json:"metric"`
 	ThresholdMS       int    `json:"threshold_ms"`
 	ConsecutiveChecks int    `json:"consecutive_checks"`
@@ -145,7 +146,7 @@ func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
 		Enabled:                false,
 		WindowMinutes:          10,
 		MinSamples:             10,
-		Metric:                 ProxyAutoSwitchMetricResponseHeaders,
+		Metric:                 ProxyAutoSwitchMetricUsageFirstToken,
 		ThresholdMS:            2500,
 		ConsecutiveChecks:      2,
 		MinImprovementPct:      30,
@@ -168,6 +169,8 @@ func (c *ProxyAutoSwitchConfig) UnmarshalJSON(data []byte) error {
 		// Shallower than plain's field with the same name, so this one gets the value.
 		AccountCooldownMinutes *int `json:"account_cooldown_minutes"`
 		AccountCooldownHours   *int `json:"account_cooldown_hours"`
+		// metric 不接触具体类型：旧的 / 老页面带的任何值都忽略，不因为类型不对返回 400。
+		Metric json.RawMessage `json:"metric"`
 	}{plain: (*plain)(c)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -178,6 +181,8 @@ func (c *ProxyAutoSwitchConfig) UnmarshalJSON(data []byte) error {
 	case aux.AccountCooldownHours != nil:
 		c.AccountCooldownMinutes = proxyAutoSwitchCooldownMinutesFromHours(*aux.AccountCooldownHours)
 	}
+	// 判慢口径只有使用记录首字：存的 / 传上来的 metric（任何值或缺失）都忽略。
+	c.Metric = ProxyAutoSwitchMetricUsageFirstToken
 	return nil
 }
 
@@ -198,14 +203,11 @@ func proxyAutoSwitchCooldown(cfg ProxyAutoSwitchConfig) time.Duration {
 	return time.Duration(cfg.AccountCooldownMinutes) * time.Minute
 }
 
-// normalizeProxyAutoSwitchConfig treats a missing metric (older saved values
-// and older clients) as response_headers.
+// normalizeProxyAutoSwitchConfig forces the fixed metric, trims the region
+// policy and sorts and de-duplicates the group ids.
 func normalizeProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) ProxyAutoSwitchConfig {
+	cfg.Metric = ProxyAutoSwitchMetricUsageFirstToken
 	cfg.RegionPolicy = strings.TrimSpace(cfg.RegionPolicy)
-	cfg.Metric = strings.TrimSpace(cfg.Metric)
-	if cfg.Metric == "" {
-		cfg.Metric = ProxyAutoSwitchMetricResponseHeaders
-	}
 	seen := make(map[int64]struct{}, len(cfg.GroupIDs))
 	ids := make([]int64, 0, len(cfg.GroupIDs))
 	for _, id := range cfg.GroupIDs {
@@ -243,9 +245,6 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 			return fmt.Errorf("%s 必须在 %d 到 %d 之间", r.name, r.min, r.max)
 		}
 	}
-	if !proxyAutoSwitchValidMetric(cfg.Metric) {
-		return errors.New("metric 只能是 response_headers、first_token 或 usage_first_token")
-	}
 	switch cfg.RegionPolicy {
 	case ProxyAutoSwitchRegionPreferSame, ProxyAutoSwitchRegionSameOnly, ProxyAutoSwitchRegionAny:
 	default:
@@ -259,34 +258,6 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 	return nil
 }
 
-func proxyAutoSwitchValidMetric(metric string) bool {
-	switch metric {
-	case ProxyAutoSwitchMetricResponseHeaders, ProxyAutoSwitchMetricFirstToken, ProxyAutoSwitchMetricUsageFirstToken:
-		return true
-	}
-	return false
-}
-
-// proxyAutoSwitchMetricLabel is the word used in reason texts.
-func proxyAutoSwitchMetricLabel(metric string) string {
-	switch metric {
-	case ProxyAutoSwitchMetricFirstToken:
-		return "首字"
-	case ProxyAutoSwitchMetricUsageFirstToken:
-		return "使用记录首字"
-	}
-	return "响应头"
-}
-
-// proxyAutoSwitchEventMetric is the metric an event was judged by. Rows from
-// before the metric column existed were all judged by response headers.
-func proxyAutoSwitchEventMetric(e *ProxyAutoSwitchEvent) string {
-	if e != nil && proxyAutoSwitchValidMetric(e.Metric) {
-		return e.Metric
-	}
-	return ProxyAutoSwitchMetricResponseHeaders
-}
-
 type ProxyAutoSwitchCandidate struct {
 	ProxyID int64  `json:"proxy_id"`
 	Label   string `json:"label"`
@@ -296,12 +267,15 @@ type ProxyAutoSwitchCandidate struct {
 }
 
 type ProxyAutoSwitchEvent struct {
-	ID               int64                      `json:"id"`
-	CreatedAt        time.Time                  `json:"created_at"`
-	UpdatedAt        time.Time                  `json:"updated_at"`
-	AccountID        int64                      `json:"account_id"`
-	AccountName      string                     `json:"account_name"`
-	Status           string                     `json:"status"`
+	ID          int64     `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	AccountID   int64     `json:"account_id"`
+	AccountName string    `json:"account_name"`
+	Status      string    `json:"status"`
+	// Metric 是 proxy_autoswitch_events.metric 列：新记录写
+	// ProxyAutoSwitchMetricUsageFirstToken，旧记录可能是 response_headers / first_token。
+	// 列表接口原样返回历史值，不做校验或改写。
 	Metric           string                     `json:"metric"`
 	Reason           string                     `json:"reason"`
 	FromProxyID      *int64                     `json:"from_proxy_id"`
@@ -377,9 +351,8 @@ type ProxyAutoSwitchAccount struct {
 	CreatedAt time.Time
 }
 
-// ProxyAutoSwitchLatencyStat is the upstream latency of egress attempts for one
-// metric: events.response_headers or events.first_semantic (first token),
-// minus events.request_written.
+// ProxyAutoSwitchLatencyStat is the usage-log first token (usage_logs.first_token_ms)
+// of one account on one proxy: sample count and p50.
 type ProxyAutoSwitchLatencyStat struct {
 	AccountID int64
 	ProxyID   int64
@@ -415,13 +388,10 @@ type ProxyAutoSwitchAuditWrite struct {
 type ProxyAutoSwitchRepository interface {
 	ListGroupAccounts(ctx context.Context, groupIDs []int64) ([]ProxyAutoSwitchAccount, error)
 	GetAccount(ctx context.Context, id int64) (*ProxyAutoSwitchAccount, error)
-	// LatencyStats returns p50 per (account, proxy) for metric, which must be
-	// ProxyAutoSwitchMetricResponseHeaders or ProxyAutoSwitchMetricFirstToken.
-	LatencyStats(ctx context.Context, metric string, accountIDs []int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error)
 	// FirstTokenUsage runs the first-token-trend usage query (usage_logs of the
 	// groups overlapping [from, to)) and trace query (egress attempts started in
-	// [traceFrom, to), with request ids) for each group, so usage_first_token is
-	// judged on exactly the samples the trend board shows.
+	// [traceFrom, to), with request ids) for each group, so the switcher
+	// judges on exactly the samples the trend board shows.
 	FirstTokenUsage(ctx context.Context, groupIDs []int64, from, to, traceFrom time.Time) ([]FirstTokenTrendUsageSample, []FirstTokenTrendTraceSample, error)
 	InsertEvent(ctx context.Context, event *ProxyAutoSwitchEvent) error
 	// UpdateEventIfStatus updates mutable fields only while the row still has
@@ -483,7 +453,6 @@ type proxyAutoSwitchSettings interface {
 
 type proxyAutoSwitchStreak struct {
 	proxyID int64
-	metric  string
 	count   int
 }
 

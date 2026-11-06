@@ -15,12 +15,18 @@ func (b *firstTokenTrendBuilder) buckets() []FirstTokenTrendBucket {
 	uploads := make([][]float64, n)
 	afters := make([][]float64, n)
 	for _, s := range b.samples {
+		if s.at.Before(b.w.dataFrom) {
+			continue
+		}
 		if i := b.w.bucketIndex(s.at); i >= 0 && s.at.Before(b.w.to) {
 			values[i] = append(values[i], s.ms)
 		}
 	}
-	// 拆段不受口径影响，都从 trace 算。
+	// 拆段是单独的统计（head / upload / after，从 trace 算），不受口径影响。
 	for _, t := range b.traces {
+		if t.StartedAt.Before(b.w.dataFrom) {
+			continue
+		}
 		i := b.w.bucketIndex(t.StartedAt)
 		if i < 0 || !t.StartedAt.Before(b.w.to) {
 			continue
@@ -83,6 +89,9 @@ func (b *firstTokenTrendBuilder) rows(proxyNames, extraAccountNames map[int64]st
 		}
 	}
 	for _, s := range b.samples {
+		if s.at.Before(b.w.dataFrom) {
+			continue
+		}
 		i := b.w.bucketIndex(s.at)
 		if i < 0 || !s.at.Before(b.w.to) {
 			continue
@@ -97,7 +106,7 @@ func (b *firstTokenTrendBuilder) rows(proxyNames, extraAccountNames map[int64]st
 			get(b.usageKey(u)).overlap += sec
 		}
 	}
-	span := b.w.to.Sub(b.w.from).Seconds()
+	span := b.w.to.Sub(b.w.dataFrom).Seconds()
 	out := make([]FirstTokenTrendRow, 0, len(accs))
 	for _, a := range accs {
 		st := computeFirstTokenTrendStats(a.values)
