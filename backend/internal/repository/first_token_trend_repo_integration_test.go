@@ -25,7 +25,12 @@ func TestFirstTokenTrendRepositoryIntegration(t *testing.T) {
 	proxy := mustCreateProxy(t, client, &service.Proxy{Name: "ftt-p-" + suffix})
 	acc := mustCreateAccount(t, client, &service.Account{Name: "ftt-a-" + suffix, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, ProxyID: &proxy.ID, Concurrency: 7})
 	other := mustCreateAccount(t, client, &service.Account{Name: "ftt-o-" + suffix, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth})
+	// 已删除的号也绑在同一个分组里，验证 ListGroupAccounts 的 a.deleted_at IS NULL 真的排除它。
+	deleted := mustCreateAccount(t, client, &service.Account{Name: "ftt-d-" + suffix, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth})
 	mustBindAccountToGroup(t, client, acc.ID, group.ID, 50)
+	mustBindAccountToGroup(t, client, deleted.ID, group.ID, 50)
+	_, err := integrationDB.ExecContext(ctx, `UPDATE accounts SET deleted_at = NOW() WHERE id = $1`, deleted.ID)
+	require.NoError(t, err, "soft delete account")
 	user := mustCreateUser(t, client, &service.User{Email: "ftt-" + suffix + "@example.com"})
 	key := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, GroupID: &group.ID, Key: "sk-ftt-" + uuid.NewString()})
 	marker := "ftt-" + suffix
@@ -36,8 +41,8 @@ func TestFirstTokenTrendRepositoryIntegration(t *testing.T) {
 		_, _ = integrationDB.Exec(`DELETE FROM ops_system_logs WHERE account_id = $1`, acc.ID)
 		_, _ = integrationDB.Exec(`DELETE FROM api_keys WHERE id = $1`, key.ID)
 		_, _ = integrationDB.Exec(`DELETE FROM users WHERE id = $1`, user.ID)
-		_, _ = integrationDB.Exec(`DELETE FROM account_groups WHERE account_id = ANY($1)`, pq.Array([]int64{acc.ID, other.ID}))
-		_, _ = integrationDB.Exec(`DELETE FROM accounts WHERE id = ANY($1)`, pq.Array([]int64{acc.ID, other.ID}))
+		_, _ = integrationDB.Exec(`DELETE FROM account_groups WHERE account_id = ANY($1)`, pq.Array([]int64{acc.ID, other.ID, deleted.ID}))
+		_, _ = integrationDB.Exec(`DELETE FROM accounts WHERE id = ANY($1)`, pq.Array([]int64{acc.ID, other.ID, deleted.ID}))
 		_, _ = integrationDB.Exec(`DELETE FROM proxies WHERE id = $1`, proxy.ID)
 		_, _ = integrationDB.Exec(`DELETE FROM groups WHERE id = $1`, group.ID)
 	})
@@ -49,6 +54,11 @@ func TestFirstTokenTrendRepositoryIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, accounts, 1)
 	require.Equal(t, acc.ID, accounts[0].ID)
+	ids := make([]int64, 0, len(accounts))
+	for _, a := range accounts {
+		ids = append(ids, a.ID)
+	}
+	require.NotContains(t, ids, deleted.ID, "已删除的号不能出现在 ListGroupAccounts 结果里")
 	require.Equal(t, 7, accounts[0].Concurrency)
 	require.Equal(t, proxy.ID, *accounts[0].ProxyID)
 	g, err := repo.GetGroup(ctx, group.ID)

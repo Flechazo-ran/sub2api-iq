@@ -28,8 +28,17 @@ func (h *FirstTokenTrendHandler) Get(c *gin.Context) {
 		}
 		groupID = v
 	}
+	var accountID *int64
+	if raw := strings.TrimSpace(c.Query("account_id")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			response.BadRequest(c, "account_id 必须是正整数")
+			return
+		}
+		accountID = &v
+	}
 	q, err := service.NormalizeFirstTokenTrendQuery(service.FirstTokenTrendQuery{
-		GroupID: groupID, Range: c.Query("range"), From: c.Query("from"), To: c.Query("to"),
+		GroupID: groupID, AccountID: accountID, Range: c.Query("range"), From: c.Query("from"), To: c.Query("to"),
 		Metric: c.Query("metric"), Dimension: c.Query("dimension"),
 	})
 	if err != nil {

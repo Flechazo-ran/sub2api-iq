@@ -76,7 +76,9 @@ func firstTokenTrendCustomStep(span time.Duration) time.Duration {
 }
 
 type FirstTokenTrendQuery struct {
-	GroupID   int64
+	GroupID int64
+	// AccountID 可选：只看这个号。nil = 整个分组所有号合在一起（现有行为）。
+	AccountID *int64
 	Range     string
 	From      string // RFC3339，可选；和 To 一起给时忽略 Range
 	To        string // RFC3339，可选
@@ -93,18 +95,29 @@ type FirstTokenTrendGroup struct {
 	Name string `json:"name"`
 }
 
+// FirstTokenTrendAccountOption 是返回给前端做账号下拉的选项：这个分组里所有未删除的号，
+// 不管请求有没有按账号筛选都给全量。label 和按号拆行时的 label 一样。
+type FirstTokenTrendAccountOption struct {
+	ID          int64  `json:"id"`
+	Label       string `json:"label"`
+	Status      string `json:"status"`
+	Schedulable bool   `json:"schedulable"`
+}
+
 type FirstTokenTrendResult struct {
-	Group          FirstTokenTrendGroup    `json:"group"`
-	Range          string                  `json:"range"`
-	StepSeconds    int                     `json:"step_seconds"`
-	Metric         string                  `json:"metric"`
-	Dimension      string                  `json:"dimension"`
-	From           time.Time               `json:"from"`
-	To             time.Time               `json:"to"`
-	LimitIsCurrent bool                    `json:"limit_is_current"`
-	Buckets        []FirstTokenTrendBucket `json:"buckets"`
-	Rows           []FirstTokenTrendRow    `json:"rows"`
-	Events         []FirstTokenTrendEvent  `json:"events"`
+	Group          FirstTokenTrendGroup           `json:"group"`
+	AccountID      *int64                         `json:"account_id"`
+	Accounts       []FirstTokenTrendAccountOption `json:"accounts"`
+	Range          string                         `json:"range"`
+	StepSeconds    int                            `json:"step_seconds"`
+	Metric         string                         `json:"metric"`
+	Dimension      string                         `json:"dimension"`
+	From           time.Time                      `json:"from"`
+	To             time.Time                      `json:"to"`
+	LimitIsCurrent bool                           `json:"limit_is_current"`
+	Buckets        []FirstTokenTrendBucket        `json:"buckets"`
+	Rows           []FirstTokenTrendRow           `json:"rows"`
+	Events         []FirstTokenTrendEvent         `json:"events"`
 }
 
 // FirstTokenTrendBucket：samples=0 时首字相关字段都是 null。inflight_avg 和
@@ -273,6 +286,9 @@ func NormalizeFirstTokenTrendQuery(q FirstTokenTrendQuery) (FirstTokenTrendQuery
 	}
 	if q.GroupID < 0 {
 		return q, infraerrors.BadRequest("FIRST_TOKEN_TREND_INVALID", "group_id 必须是正整数")
+	}
+	if q.AccountID != nil && *q.AccountID <= 0 {
+		return q, infraerrors.BadRequest("FIRST_TOKEN_TREND_INVALID", "account_id 必须是正整数")
 	}
 	if q.Metric == "" {
 		q.Metric = FirstTokenTrendMetricUsage
@@ -445,14 +461,31 @@ func (s *FirstTokenTrendService) Query(ctx context.Context, q FirstTokenTrendQue
 	if err != nil {
 		return nil, err
 	}
+	// accounts 是下拉用的全量（这个分组里所有未删除的号，不管筛不筛）；
+	// scopedAccounts 是这次统计真正要算的号。
+	scopedAccounts := accounts
+	if q.AccountID != nil {
+		scopedAccounts = nil
+		for _, a := range accounts {
+			if a.ID == *q.AccountID {
+				scopedAccounts = []FirstTokenTrendAccount{a}
+				break
+			}
+		}
+		// ListGroupAccounts 只返回这个分组里未删除的号，找不到就是不在分组里或已删除。
+		if len(scopedAccounts) == 0 {
+			return nil, infraerrors.BadRequest("FIRST_TOKEN_TREND_INVALID",
+				fmt.Sprintf("账号 %d 不在分组 %d 里，或已被删除", *q.AccountID, q.GroupID))
+		}
+	}
 	sampleFrom := w.sampleFrom()
 	// trace 的起点一律是第一个桶（按整格对齐后）再往前 10 分钟：range 模式下就是 sampleFrom，
 	// 自定义时间段则比 from 早，用来接住 from 之前开始、from 之后还在跑的请求，以及开始时间
 	// 和 trace 的 started_at 差几毫秒、trace 落在 from 前的请求（按代理拆时靠它拿出口代理）。
 	traceFrom := w.from.Add(-firstTokenTrendEventWindow)
 	withIDs := q.Dimension == FirstTokenTrendDimensionProxy
-	accountIDs := make([]int64, 0, len(accounts))
-	for _, a := range accounts {
+	accountIDs := make([]int64, 0, len(scopedAccounts))
+	for _, a := range scopedAccounts {
 		accountIDs = append(accountIDs, a.ID)
 	}
 
@@ -498,9 +531,15 @@ func (s *FirstTokenTrendService) Query(ctx context.Context, q FirstTokenTrendQue
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
+	// 仓储按分组取样本（代理优选也复用这套查询，不改它的签名）；按账号筛选在 service
+	// 层做，这样 buckets、拆段、同时在跑、rows 都只算这个号。
+	if q.AccountID != nil {
+		usage = filterFirstTokenTrendUsageByAccount(usage, *q.AccountID)
+		traces = filterFirstTokenTrendTraceByAccount(traces, *q.AccountID)
+	}
 
-	b := newFirstTokenTrendBuilder(w, q, accounts, usage, traces)
-	timeline := buildFirstTokenTrendTimeline(accounts, audits, switches, logs, timers)
+	b := newFirstTokenTrendBuilder(w, q, scopedAccounts, usage, traces)
+	timeline := buildFirstTokenTrendTimeline(scopedAccounts, audits, switches, logs, timers)
 
 	proxyIDs := b.proxyIDs()
 	proxyIDs = append(proxyIDs, timeline.proxyIDs()...)
@@ -518,6 +557,8 @@ func (s *FirstTokenTrendService) Query(ctx context.Context, q FirstTokenTrendQue
 
 	out := &FirstTokenTrendResult{
 		Group:       *group,
+		AccountID:   q.AccountID,
+		Accounts:    firstTokenTrendAccountOptions(accounts),
 		Range:       q.Range,
 		StepSeconds: int(w.step / time.Second),
 		Metric:      q.Metric,
@@ -529,11 +570,45 @@ func (s *FirstTokenTrendService) Query(ctx context.Context, q FirstTokenTrendQue
 	}
 	out.Buckets = b.buckets()
 	for i := range out.Buckets {
-		out.Buckets[i].ConcurrencyLimitSum = timeline.limitSum(accounts, w.bucketEnd(i))
+		out.Buckets[i].ConcurrencyLimitSum = timeline.limitSum(scopedAccounts, w.bucketEnd(i))
 	}
 	out.Rows = b.rows(proxyNames, extraNames)
-	out.Events = timeline.events(w, accounts, proxyNames, b.accountSeries())
+	out.Events = timeline.events(w, scopedAccounts, proxyNames, b.accountSeries())
 	return out, nil
+}
+
+// firstTokenTrendAccountOptions 是账号下拉的全量列表（这个分组里所有未删除的号）。
+func firstTokenTrendAccountOptions(accounts []FirstTokenTrendAccount) []FirstTokenTrendAccountOption {
+	out := make([]FirstTokenTrendAccountOption, 0, len(accounts))
+	for _, a := range accounts {
+		out = append(out, FirstTokenTrendAccountOption{
+			ID:          a.ID,
+			Label:       firstTokenTrendAccountLabel(a),
+			Status:      a.Status,
+			Schedulable: a.Schedulable,
+		})
+	}
+	return out
+}
+
+func filterFirstTokenTrendUsageByAccount(usage []FirstTokenTrendUsageSample, accountID int64) []FirstTokenTrendUsageSample {
+	out := make([]FirstTokenTrendUsageSample, 0, len(usage))
+	for _, u := range usage {
+		if u.AccountID == accountID {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func filterFirstTokenTrendTraceByAccount(traces []FirstTokenTrendTraceSample, accountID int64) []FirstTokenTrendTraceSample {
+	out := make([]FirstTokenTrendTraceSample, 0, len(traces))
+	for _, t := range traces {
+		if t.AccountID == accountID {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func uniqueInt64(ids []int64) []int64 {
