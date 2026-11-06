@@ -13,118 +13,151 @@
         <div v-if="configError" role="alert" class="panel-error" data-testid="pas-config-error">{{ configError }}<button :disabled="configLoading" @click="loadConfig">{{ t('proxyAutoSwitch.retry') }}</button></div>
         <div v-if="!saved && configLoading" class="settings-body skeleton-stack" :aria-label="t('proxyAutoSwitch.loading')"><span v-for="n in 3" :key="n" class="cell-skeleton" /></div>
         <form v-else-if="saved" class="settings-body" novalidate data-testid="pas-settings" @submit.prevent="save">
-          <div class="mode-row">
-            <span class="field-label">{{ t('proxyAutoSwitch.mode') }}</span>
-            <div class="mode-switch" role="radiogroup" :aria-label="t('proxyAutoSwitch.mode')">
-              <button v-for="option in modes" :key="option.id" type="button" role="radio" :aria-checked="draft.enabled === option.value" :class="{ on: draft.enabled === option.value }" :data-testid="`pas-mode-${option.id}`" @click="draft.enabled = option.value">{{ t(option.label) }}</button>
+          <div class="settings-row">
+            <div class="inline-field">
+              <span class="field-label">{{ t('proxyAutoSwitch.enabled') }}</span>
+              <button type="button" role="switch" class="switch-chip" :class="{ on: draft.enabled }" :aria-checked="draft.enabled" data-testid="pas-enabled" @click="draft.enabled = !draft.enabled"><span class="switch-dot" />{{ draft.enabled ? t('proxyAutoSwitch.on') : t('proxyAutoSwitch.off') }}</button>
             </div>
-          </div>
-          <div class="field-grid">
-            <div class="field metric-note-field">
-              <span class="metric-note" data-testid="pas-metric-note">{{ t('proxyAutoSwitch.metricFixed') }}</span>
-            </div>
-            <div v-for="card in cards" :key="card.id" class="field">
-              <label class="field-label" :for="`pas-${card.primary.key}`">{{ t(card.label) }}</label>
-              <span class="field-input"><span v-if="card.prefix">{{ t(card.prefix) }}</span><input :id="`pas-${card.primary.key}`" v-model.number="draft[card.primary.key]" type="number" class="input num-input" :min="ranges[card.primary.key].min" :max="ranges[card.primary.key].max" :step="card.primary.step ?? 1" :aria-invalid="fieldError(card.primary.key) ? 'true' : undefined" :data-testid="`pas-${card.primary.key}`" /><span>{{ t(card.primary.unit) }}</span></span>
-              <span v-if="fieldError(card.primary.key)" class="field-error">{{ fieldError(card.primary.key) }}</span>
-              <template v-if="card.sub">
-                <label class="sub-field" :for="`pas-${card.sub.key}`"><span>{{ t(card.sub.label) }}</span><span class="field-input"><input :id="`pas-${card.sub.key}`" v-model.number="draft[card.sub.key]" type="number" class="input num-input" :min="ranges[card.sub.key].min" :max="ranges[card.sub.key].max" step="1" :aria-invalid="fieldError(card.sub.key) ? 'true' : undefined" :data-testid="`pas-${card.sub.key}`" /><span>{{ t(card.sub.unit) }}</span></span></label>
-                <span v-if="fieldError(card.sub.key)" class="field-error">{{ fieldError(card.sub.key) }}</span>
-              </template>
-              <span v-if="card.hint" class="field-hint" :data-testid="`pas-hint-${card.id}`">{{ t(hintKey(card)) }}</span>
-            </div>
-          </div>
-          <div class="field-grid field-grid-wide">
-            <fieldset class="field">
-              <legend class="field-label">{{ t('proxyAutoSwitch.groups') }}</legend>
+            <div class="inline-field groups-field">
+              <span class="field-label">{{ t('proxyAutoSwitch.groups') }}</span>
               <div class="chips" data-testid="pas-groups">
                 <label v-for="group in groupOptions" :key="group.id" class="chip" :class="{ on: draft.group_ids.includes(group.id) }" :data-group-id="group.id"><input v-model="draft.group_ids" type="checkbox" class="sr-only" :value="group.id" />{{ group.name }}</label>
                 <span v-if="groupsLoaded && !groupOptions.length" class="field-hint">{{ t('proxyAutoSwitch.noGroups') }}</span>
               </div>
-              <span v-if="groupsError" class="field-hint text-amber-600 dark:text-amber-400" data-testid="pas-groups-error">{{ t('proxyAutoSwitch.groupsLoadFailed') }}</span>
-              <span v-if="!draft.group_ids.length" class="field-hint text-amber-600 dark:text-amber-400">{{ t('proxyAutoSwitch.noGroupSelected') }}</span>
+              <span v-if="groupsError" class="field-hint field-warn" data-testid="pas-groups-error">{{ t('proxyAutoSwitch.groupsLoadFailed') }}</span>
+              <span v-if="!draft.group_ids.length" class="field-hint field-warn">{{ t('proxyAutoSwitch.noGroupSelected') }}</span>
               <span class="field-hint">{{ t('proxyAutoSwitch.groupsHint') }}</span>
-            </fieldset>
-            <div class="field">
-              <span class="field-label">{{ t('proxyAutoSwitch.candidates') }}</span>
-              <div class="chips"><span class="chip on is-fixed">{{ t('proxyAutoSwitch.idleOnly') }}</span></div>
-              <label class="sub-field" for="pas-min_days_to_expiry"><span>{{ t('proxyAutoSwitch.expiryDays') }}</span><span class="field-input"><input id="pas-min_days_to_expiry" v-model.number="draft.min_days_to_expiry" type="number" class="input num-input" :min="ranges.min_days_to_expiry.min" :max="ranges.min_days_to_expiry.max" step="1" :aria-invalid="fieldError('min_days_to_expiry') ? 'true' : undefined" data-testid="pas-min_days_to_expiry" /><span>{{ t('proxyAutoSwitch.unit.days') }}</span></span></label>
-              <span v-if="fieldError('min_days_to_expiry')" class="field-error">{{ fieldError('min_days_to_expiry') }}</span>
-              <label class="sub-field" for="pas-region"><span>{{ t('proxyAutoSwitch.regionPolicy') }}</span><select id="pas-region" v-model="draft.region_policy" class="input region-select" data-testid="pas-region"><option v-for="policy in regionPolicies" :key="policy" :value="policy">{{ t(`proxyAutoSwitch.region.${policy}`) }}</option></select></label>
             </div>
           </div>
+
+          <div class="threshold-row">
+            <label class="inline-field" for="pas-window_minutes"><span class="field-label">{{ t('proxyAutoSwitch.window') }}</span><input id="pas-window_minutes" v-model.number="draft.window_minutes" type="number" class="input num-input" min="1" max="60" step="1" :aria-invalid="fieldError('window_minutes') ? 'true' : undefined" data-testid="pas-window_minutes" /><span>{{ t('proxyAutoSwitch.unit.minutes') }}</span><span v-if="fieldError('window_minutes')" class="field-error">{{ fieldError('window_minutes') }}</span></label>
+            <label class="inline-field" for="pas-min_samples"><span class="field-label">{{ t('proxyAutoSwitch.minSamples') }}</span><input id="pas-min_samples" v-model.number="draft.min_samples" type="number" class="input num-input" min="1" max="100000" step="1" :aria-invalid="fieldError('min_samples') ? 'true' : undefined" data-testid="pas-min_samples" /><span>{{ t('proxyAutoSwitch.unit.requests') }}</span><span v-if="fieldError('min_samples')" class="field-error">{{ fieldError('min_samples') }}</span></label>
+            <label class="inline-field" for="pas-p60_threshold_s"><span class="field-label">{{ t('proxyAutoSwitch.p60Threshold') }}</span><input id="pas-p60_threshold_s" v-model.number="draft.p60_threshold_s" type="number" class="input num-input" min="0.001" max="600" step="any" :aria-invalid="fieldError('p60_threshold_s') ? 'true' : undefined" data-testid="pas-p60_threshold_s" /><span>{{ t('proxyAutoSwitch.unit.seconds') }}</span><span v-if="fieldError('p60_threshold_s')" class="field-error">{{ fieldError('p60_threshold_s') }}</span></label>
+            <label class="inline-field" for="pas-mean_threshold_s"><span class="field-label">{{ t('proxyAutoSwitch.meanThreshold') }}</span><input id="pas-mean_threshold_s" v-model.number="draft.mean_threshold_s" type="number" class="input num-input" min="0.001" max="600" step="any" :aria-invalid="fieldError('mean_threshold_s') ? 'true' : undefined" data-testid="pas-mean_threshold_s" /><span>{{ t('proxyAutoSwitch.unit.seconds') }}</span><span v-if="fieldError('mean_threshold_s')" class="field-error">{{ fieldError('mean_threshold_s') }}</span></label>
+          </div>
+
+          <p class="rule" data-testid="pas-rule">{{ ruleText }}</p>
+
+          <div class="subsection-heading">
+            <div><h4>{{ t('proxyAutoSwitch.candidatePool') }}</h4><p class="field-hint">{{ t('proxyAutoSwitch.candidatePoolHint') }}</p></div>
+          </div>
+          <div v-if="proxiesError" role="alert" class="inline-error" data-testid="pas-proxies-error">{{ proxiesError }}<button :disabled="proxiesLoading" @click="loadProxies">{{ t('proxyAutoSwitch.retry') }}</button></div>
+          <div class="table-scroll">
+            <table class="data-table proxy-table" data-testid="pas-proxies">
+              <thead><tr><th class="cell-left">{{ t('proxyAutoSwitch.colSelect') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colRegion') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colExpires') }}</th><th>{{ t('proxyAutoSwitch.colAccountCount') }}</th></tr></thead>
+              <tbody v-if="!proxiesLoaded && proxiesLoading"><tr v-for="n in 3" :key="`proxy-loading-${n}`" class="loading-row"><td v-for="c in 5" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
+              <tbody v-else>
+                <tr v-for="proxy in proxies" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': isExpired(proxy) }">
+                  <td class="cell-left"><input type="checkbox" class="proxy-checkbox" :checked="isSelected(proxy.id)" :aria-label="proxyLabel(proxy)" :data-testid="`pas-proxy-checkbox-${proxy.id}`" @change="toggleProxy(proxy.id)" /></td>
+                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="isExpired(proxy)" class="expired-tag" data-testid="pas-proxy-expired">{{ t('proxyAutoSwitch.expired') }}</span></td>
+                  <td class="cell-left">{{ proxy.region || '—' }}</td>
+                  <td class="cell-left tabular-nums">{{ monthDay(proxy.expires_at) }}</td>
+                  <td class="tabular-nums">{{ proxy.account_count }}</td>
+                </tr>
+                <tr v-if="!proxies.length"><td colspan="5" class="table-empty" data-testid="pas-proxies-empty">{{ t('proxyAutoSwitch.proxiesEmpty') }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pool-order">
+            <div class="pool-order-head"><span class="field-label">{{ t('proxyAutoSwitch.poolOrder') }}</span><span class="field-hint">{{ t('proxyAutoSwitch.poolOrderHint') }}</span></div>
+            <ol v-if="selectedProxies.length" class="pool-order-list" data-testid="pas-pool-order">
+              <li v-for="(proxy, index) in selectedProxies" :key="proxy.id" class="pool-order-item" :data-pool-proxy-id="proxy.id">
+                <span class="pool-order-name">{{ proxyLabel(proxy) }}</span>
+                <span v-if="proxy.region" class="region-tag">{{ proxy.region }}</span>
+                <span class="order-actions">
+                  <button type="button" class="order-button" :disabled="index === 0" :aria-label="t('proxyAutoSwitch.moveUp')" :data-testid="`pas-pool-up-${proxy.id}`" @click="moveProxy(index, -1)">↑</button>
+                  <button type="button" class="order-button" :disabled="index === selectedProxies.length - 1" :aria-label="t('proxyAutoSwitch.moveDown')" :data-testid="`pas-pool-down-${proxy.id}`" @click="moveProxy(index, 1)">↓</button>
+                </span>
+              </li>
+            </ol>
+            <p v-else class="field-hint" data-testid="pas-pool-empty">{{ t('proxyAutoSwitch.poolEmpty') }}</p>
+          </div>
+
+          <div class="settings-row">
+            <span class="field-label">{{ t('proxyAutoSwitch.strategy') }}</span>
+            <div class="strategy-group" role="radiogroup" :aria-label="t('proxyAutoSwitch.strategy')">
+              <button v-for="option in strategies" :key="option" type="button" role="radio" :aria-checked="draft.strategy === option" :class="{ on: draft.strategy === option }" :data-testid="`pas-strategy-${option}`" @click="draft.strategy = option">{{ t(`proxyAutoSwitch.strategyLabel.${option}`) }}</button>
+            </div>
+          </div>
+
           <footer class="settings-footer">
             <span v-if="invalidCount" class="footer-state is-error" data-testid="pas-invalid">{{ t('proxyAutoSwitch.invalidCount', { count: invalidCount }) }}</span>
             <span v-else-if="dirty" class="footer-state" data-testid="pas-dirty">{{ t('proxyAutoSwitch.dirty') }}</span>
             <span v-else />
-            <div class="footer-actions"><button type="button" class="btn btn-secondary" :disabled="!dirty || saving" data-testid="pas-discard" @click="discard">{{ t('proxyAutoSwitch.discard') }}</button><button type="submit" class="btn btn-primary" :disabled="!dirty || saving || invalidCount > 0" data-testid="pas-save">{{ saving ? t('proxyAutoSwitch.saving') : t('proxyAutoSwitch.save') }}</button></div>
+            <div class="footer-actions"><button type="button" class="btn btn-secondary" :disabled="!dirty || saving" data-testid="pas-discard" @click="discard">{{ t('proxyAutoSwitch.discard') }}</button><button type="submit" class="btn btn-primary" :disabled="saving || invalidCount > 0 || !dirty" data-testid="pas-save">{{ saving ? t('proxyAutoSwitch.saving') : t('proxyAutoSwitch.save') }}</button></div>
           </footer>
           <p v-if="saveError" role="alert" class="form-error" data-testid="pas-save-error">{{ saveError }}</p>
         </form>
       </section>
 
+      <section class="workspace-panel" aria-labelledby="pas-accounts-heading">
+        <header class="panel-heading"><div><h3 id="pas-accounts-heading">{{ t('proxyAutoSwitch.accountMonitor') }}</h3><p data-testid="pas-account-window">{{ t('proxyAutoSwitch.accountWindowHint', { minutes: monitorWindow }) }}</p></div></header>
+        <div v-if="accountsError" role="alert" class="panel-error" data-testid="pas-accounts-error">{{ accountsError }}<button :disabled="accountsLoading" @click="loadAccounts">{{ t('proxyAutoSwitch.retry') }}</button></div>
+        <div class="table-scroll">
+          <table class="data-table accounts-table" data-testid="pas-accounts">
+            <thead><tr><th class="cell-left">{{ t('proxyAutoSwitch.colAccount') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colCurrentProxy') }}</th><th>{{ t('proxyAutoSwitch.colSamples') }}</th><th>{{ t('proxyAutoSwitch.colP60') }}</th><th>{{ t('proxyAutoSwitch.colMean') }}</th><th>{{ t('proxyAutoSwitch.colDuration') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colState') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colLastSwitch') }}</th></tr></thead>
+            <tbody v-if="!accountsLoaded && accountsLoading"><tr v-for="n in 3" :key="`account-loading-${n}`" class="loading-row"><td v-for="c in 8" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
+            <tbody v-else>
+              <tr v-for="account in accounts" :key="account.account_id" :data-account-id="account.account_id">
+                <td class="cell-left account-name"><strong>#{{ account.account_id }}</strong><span>{{ account.account_name }}</span></td>
+                <td class="cell-left" data-testid="pas-account-proxy"><span>{{ account.proxy_id == null ? '—' : `#${account.proxy_id} ${account.proxy_label || ''}`.trim() }}</span><span v-if="account.region" class="region-tag">{{ account.region }}</span></td>
+                <td class="tabular-nums" data-testid="pas-account-samples">{{ account.samples }}</td>
+                <td class="tabular-nums" data-testid="pas-account-p60">{{ seconds(account.p60_ms) }}</td>
+                <td class="tabular-nums" data-testid="pas-account-mean">{{ seconds(account.mean_ms) }}</td>
+                <td class="tabular-nums" data-testid="pas-account-duration">{{ seconds(account.duration_mean_ms) }}</td>
+                <td class="cell-left"><span class="state-pill" :class="accountStateTone(account.state)" :data-state="account.state" data-testid="pas-account-state">{{ accountStateLabel(account) }}</span><span v-if="account.note" class="cell-note">{{ account.note }}</span></td>
+                <td class="cell-left tabular-nums" data-testid="pas-account-last-switch">{{ lastSwitch(account.last_switch_at) }}</td>
+              </tr>
+              <tr v-if="!accounts.length"><td colspan="8" class="table-empty" data-testid="pas-accounts-empty">{{ t('proxyAutoSwitch.accountsEmpty') }}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="workspace-panel" aria-labelledby="pas-events-heading">
         <header class="panel-heading"><div><h3 id="pas-events-heading">{{ t('proxyAutoSwitch.events') }}<span class="count-label">{{ events.length }}</span></h3><p>{{ t('proxyAutoSwitch.eventsHint') }}</p></div><button class="icon-button" :disabled="eventsLoading" :aria-label="t('proxyAutoSwitch.refresh')" data-testid="pas-refresh-events" @click="loadEvents"><Icon name="refresh" size="sm" :class="{ 'animate-spin': eventsLoading }" /></button></header>
         <div v-if="eventsError" role="alert" class="panel-error" data-testid="pas-events-error">{{ eventsError }}<button @click="retryEvents">{{ t('proxyAutoSwitch.retry') }}</button></div>
-        <div class="events-scroll" :aria-busy="eventsLoading">
-          <table class="events-table">
-            <thead><tr><th>{{ t('proxyAutoSwitch.colTime') }}</th><th>{{ t('proxyAutoSwitch.colAccount') }}</th><th>{{ t('proxyAutoSwitch.colProxy') }}</th><th>{{ t('proxyAutoSwitch.colLatency') }}</th><th>{{ t('proxyAutoSwitch.colResult') }}</th><th><span class="sr-only">{{ t('proxyAutoSwitch.colActions') }}</span></th></tr></thead>
-            <tbody v-if="!eventsLoaded && eventsLoading"><tr v-for="n in 4" :key="`loading-${n}`" class="loading-row"><td v-for="c in 6" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
-            <tbody v-for="event in events" :key="event.id" class="event-group" :data-event-id="event.id">
-              <tr class="event-row" :class="{ expanded: isExpanded(event.id) }" data-testid="pas-event-row" @click="toggle(event.id)">
-                <td class="time-cell" :data-label="t('proxyAutoSwitch.colTime')"><strong :title="fullTime(event.created_at)">{{ clock(event.created_at) }}</strong><span>{{ day(event.created_at) }}</span></td>
-                <td class="account-cell"><strong :title="event.account_name">{{ event.account_name || `#${event.account_id}` }}</strong><span>#{{ event.account_id }}</span></td>
-                <td class="proxy-cell" :data-label="t('proxyAutoSwitch.colProxy')" data-testid="pas-proxy">
-                  <span class="proxy-name">{{ proxyText(event.from_proxy_id, event.from_proxy_label) }}<span v-if="event.from_region" class="region-tag">{{ event.from_region }}</span></span>
-                  <template v-if="event.to_proxy_id != null"><span class="proxy-arrow" aria-hidden="true">→</span><span class="proxy-name">{{ proxyText(event.to_proxy_id, event.to_proxy_label) }}<span v-if="event.to_region" class="region-tag">{{ event.to_region }}</span></span></template>
+        <div class="table-scroll" :aria-busy="eventsLoading">
+          <table class="data-table events-table" data-testid="pas-events">
+            <thead>
+              <tr class="group-row"><th class="cell-left" colspan="4" /><th class="cell-left" colspan="3">{{ t('proxyAutoSwitch.beforeWindow', { minutes: configWindow }) }}</th><th class="cell-left" colspan="3">{{ t('proxyAutoSwitch.afterWindow') }}</th><th class="cell-left" colspan="2">{{ t('proxyAutoSwitch.change') }}</th><th class="cell-left" colspan="2">{{ t('proxyAutoSwitch.proxyProbe') }}</th></tr>
+              <tr><th class="cell-left">{{ t('proxyAutoSwitch.colTime') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colAccount') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colStrategy') }}</th><th>{{ t('proxyAutoSwitch.colSamplesShort') }}</th><th>{{ t('proxyAutoSwitch.p60Short') }}</th><th>{{ t('proxyAutoSwitch.meanShort') }}</th><th>{{ t('proxyAutoSwitch.colSamplesShort') }}</th><th>{{ t('proxyAutoSwitch.p60Short') }}</th><th>{{ t('proxyAutoSwitch.meanShort') }}</th><th>{{ t('proxyAutoSwitch.p60Short') }}</th><th>{{ t('proxyAutoSwitch.meanShort') }}</th><th>{{ t('proxyAutoSwitch.colProbeOld') }}</th><th>{{ t('proxyAutoSwitch.colProbeNew') }}</th></tr>
+            </thead>
+            <tbody v-if="!eventsLoaded && eventsLoading"><tr v-for="n in 4" :key="`loading-${n}`" class="loading-row"><td v-for="c in 14" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
+            <tbody v-else>
+              <tr v-for="event in events" :key="event.id" class="event-row" :data-event-id="event.id" data-testid="pas-event-row">
+                <td class="cell-left time-cell"><strong :title="fullTime(eventAt(event))">{{ clock(eventAt(event)) }}</strong><span>{{ day(eventAt(event)) }}</span></td>
+                <td class="cell-left account-cell"><strong>#{{ event.account_id }}</strong><span v-if="event.account_name">{{ event.account_name }}</span><span class="status-badge" :class="statusTone(event.status)" :data-status="event.status" data-testid="pas-status">{{ statusLabel(event.status) }}</span></td>
+                <td class="cell-left proxy-cell" data-testid="pas-proxy">
+                  <span class="proxy-line"><span class="proxy-name">{{ proxyText(event.from_proxy_id, event.from_proxy_label) }}</span><span v-if="event.from_region" class="region-tag">{{ event.from_region }}</span><template v-if="event.to_proxy_id != null"><span class="proxy-arrow" aria-hidden="true">→</span><span class="proxy-name">{{ proxyText(event.to_proxy_id, event.to_proxy_label) }}</span><span v-if="event.to_region" class="region-tag">{{ event.to_region }}</span></template></span>
+                  <span v-if="event.reason" class="reason-text" :title="event.reason">{{ event.reason }}</span>
                 </td>
-                <td class="latency-cell" :data-label="t('proxyAutoSwitch.colLatency')" data-testid="pas-latency">
-                  <span class="latency"><span class="metric-tag" data-testid="pas-metric-tag">{{ t(`proxyAutoSwitch.metricTag.${eventMetric(event)}`) }}</span>{{ seconds(event.before_p50_ms) }}<template v-if="event.candidate_probe_ms != null"> → <strong>{{ seconds(event.candidate_probe_ms) }}</strong></template></span>
-                  <span v-if="event.current_probe_ms != null" class="cell-secondary">{{ t('proxyAutoSwitch.currentProbe', { value: seconds(event.current_probe_ms) }) }}</span>
-                  <span v-if="event.before_samples != null" class="cell-secondary">{{ t('proxyAutoSwitch.beforeSamples', { count: event.before_samples }) }}</span>
-                </td>
-                <td class="result-cell" :data-label="t('proxyAutoSwitch.colResult')">
-                  <span class="outcome-badge" :class="tone(event.status)" :data-status="event.status" data-testid="pas-status"><span />{{ statusLabel(event.status) }}</span>
-                  <span v-if="event.after_p50_ms != null" class="cell-secondary">{{ t('proxyAutoSwitch.after', { value: seconds(event.after_p50_ms), count: event.after_samples ?? 0 }) }}</span>
-                  <span v-if="event.reason" class="cell-secondary reason-text" :title="event.reason">{{ event.reason }}</span>
-                </td>
-                <td class="action-cell">
-                  <div class="row-actions">
-                    <button v-if="canRevert(event)" type="button" class="btn btn-secondary btn-sm" data-testid="pas-revert" @click.stop="askRevert(event)">{{ t('proxyAutoSwitch.revert') }}</button>
-                    <button type="button" class="detail-button" :aria-expanded="isExpanded(event.id) ? 'true' : 'false'" :aria-controls="`pas-detail-${event.id}`" data-testid="pas-toggle" @click.stop="toggle(event.id)">{{ isExpanded(event.id) ? t('proxyAutoSwitch.hideDetails') : t('proxyAutoSwitch.details') }}<Icon name="chevronDown" size="xs" class="transition-transform" :class="{ 'rotate-180': isExpanded(event.id) }" /></button>
-                  </div>
-                </td>
+                <td class="cell-left" data-testid="pas-strategy">{{ strategyLabel(event.strategy) }}</td>
+                <td class="tabular-nums" data-testid="pas-before-samples">{{ event.before?.samples ?? '—' }}</td>
+                <td class="tabular-nums" data-testid="pas-before-p60">{{ seconds(event.before?.p60_ms) }}</td>
+                <td class="tabular-nums" data-testid="pas-before-mean">{{ seconds(event.before?.mean_ms) }}</td>
+                <td class="tabular-nums" data-testid="pas-after-samples">{{ event.after?.samples ?? '—' }}</td>
+                <td class="tabular-nums" data-testid="pas-after-p60">{{ seconds(event.after?.p60_ms) }}</td>
+                <td class="tabular-nums" data-testid="pas-after-mean">{{ seconds(event.after?.mean_ms) }}</td>
+                <template v-if="event.status === 'measuring'">
+                  <td class="cell-left measuring-cell" colspan="2" data-testid="pas-measuring">{{ t('proxyAutoSwitch.measuringNote') }}</td>
+                </template>
+                <template v-else>
+                  <td class="tabular-nums" :class="changeFor(event, 'p60_ms').tone" data-testid="pas-change-p60">{{ changeFor(event, 'p60_ms').text }}</td>
+                  <td class="tabular-nums" :class="changeFor(event, 'mean_ms').tone" data-testid="pas-change-mean">{{ changeFor(event, 'mean_ms').text }}</td>
+                </template>
+                <td class="tabular-nums" data-testid="pas-probe-old">{{ probeText(event.from_probe_ms, event) }}</td>
+                <td class="tabular-nums" data-testid="pas-probe-new">{{ probeText(event.to_probe_ms, event) }}</td>
               </tr>
-              <tr v-if="isExpanded(event.id)" :id="`pas-detail-${event.id}`" class="detail-row" data-testid="pas-detail">
-                <td colspan="6">
-                  <div class="detail-panel">
-                    <div class="detail-head"><h4>{{ t('proxyAutoSwitch.candidateTitle') }}</h4><span>{{ t('proxyAutoSwitch.currentProxy') }} {{ proxyText(event.from_proxy_id, event.from_proxy_label) }} · {{ seconds(event.current_probe_ms) }}</span></div>
-                    <p class="detail-metric" data-testid="pas-detail-metric">{{ t('proxyAutoSwitch.detailMetric', { metric: t(`proxyAutoSwitch.metricName.${eventMetric(event)}`), before: seconds(event.before_p50_ms), count: event.before_samples ?? 0 }) }}</p>
-                    <p v-if="event.reason" class="detail-reason"><span>{{ t('proxyAutoSwitch.reason') }}</span>{{ event.reason }}</p>
-                    <table v-if="event.candidates?.length" class="candidate-table">
-                      <thead><tr><th>{{ t('proxyAutoSwitch.candidateProxy') }}</th><th>{{ t('proxyAutoSwitch.candidateRegion') }}</th><th>{{ t('proxyAutoSwitch.candidateProbe') }}</th><th>{{ t('proxyAutoSwitch.candidateNote') }}</th></tr></thead>
-                      <tbody><tr v-for="candidate in sortedCandidates(event)" :key="candidate.proxy_id" :class="{ chosen: candidate.proxy_id === event.to_proxy_id }" data-testid="pas-candidate"><td>{{ proxyText(candidate.proxy_id, candidate.label) }}<span v-if="candidate.proxy_id === event.to_proxy_id" class="chosen-tag">{{ t('proxyAutoSwitch.chosen') }}</span></td><td>{{ candidate.region || '—' }}</td><td class="tabular-nums">{{ seconds(candidate.probe_ms) }}</td><td class="candidate-note">{{ candidate.error || '' }}</td></tr></tbody>
-                    </table>
-                    <p v-else class="detail-empty">{{ t('proxyAutoSwitch.noCandidates') }}</p>
-                  </div>
-                </td>
-              </tr>
+              <tr v-if="!events.length"><td colspan="14" class="table-empty" data-testid="pas-events-empty">{{ t('proxyAutoSwitch.empty') }}<span>{{ t('proxyAutoSwitch.emptyHint') }}</span></td></tr>
             </tbody>
           </table>
-          <div v-if="eventsLoaded && !events.length" class="panel-empty" data-testid="pas-events-empty"><Icon name="document" size="lg" /><h4>{{ t('proxyAutoSwitch.empty') }}</h4><p>{{ t('proxyAutoSwitch.emptyHint') }}</p></div>
         </div>
         <footer class="operations-footer"><span>{{ t('proxyAutoSwitch.loadedCount', { count: events.length }) }}</span><button v-if="cursor" type="button" :disabled="moreLoading || eventsLoading" data-testid="pas-load-more" @click="loadMore">{{ moreLoading ? t('proxyAutoSwitch.loading') : t('proxyAutoSwitch.loadMore') }}<Icon name="arrowDown" size="xs" /></button><span v-else-if="eventsLoaded && events.length">{{ t('proxyAutoSwitch.loadedEnd') }}</span></footer>
       </section>
     </div>
-
-    <BaseDialog :show="!!revertTarget" :title="t('proxyAutoSwitch.revertTitle')" width="narrow" :close-on-escape="!reverting" :show-close-button="!reverting" @close="closeRevert">
-      <template v-if="revertTarget">
-        <p class="text-sm leading-6 text-gray-700 dark:text-gray-200" data-testid="pas-revert-message">{{ t('proxyAutoSwitch.revertConfirm', { account: revertTarget.account_name || `#${revertTarget.account_id}`, to: proxyText(revertTarget.to_proxy_id, revertTarget.to_proxy_label), from: proxyText(revertTarget.from_proxy_id, revertTarget.from_proxy_label) }) }}</p>
-        <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">{{ t('proxyAutoSwitch.revertHint') }}</p>
-        <p v-if="revertError" role="alert" class="form-error mt-3" data-testid="pas-revert-error">{{ revertError }}</p>
-      </template>
-      <template #footer><div class="flex justify-end gap-2"><button type="button" class="btn btn-secondary" :disabled="reverting" data-testid="pas-revert-cancel" @click="closeRevert">{{ t('proxyAutoSwitch.cancel') }}</button><button type="button" class="btn btn-primary" :disabled="reverting" data-testid="pas-revert-confirm" @click="confirmRevert">{{ reverting ? t('proxyAutoSwitch.reverting') : t('proxyAutoSwitch.confirmRevert') }}</button></div></template>
-    </BaseDialog>
   </AppLayout>
 </template>
 
@@ -133,102 +166,145 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import RoutingNav from '@/components/admin/operations/RoutingNav.vue'
-import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { getAll as getAllGroups } from '@/api/admin/groups'
-import { proxyAutoSwitchAPI, type ProxyAutoSwitchConfig, type ProxyAutoSwitchEvent, type ProxyAutoSwitchMetric, type ProxyAutoSwitchRegionPolicy, type ProxyAutoSwitchStatus, type ProxyAutoSwitchUpdate } from '@/api/admin/proxyAutoSwitch'
+import {
+  proxyAutoSwitchAPI,
+  type ProxyAutoSwitchAccount,
+  type ProxyAutoSwitchConfig,
+  type ProxyAutoSwitchEvent,
+  type ProxyAutoSwitchProxy,
+  type ProxyAutoSwitchStatus,
+  type ProxyAutoSwitchStrategy,
+  type ProxyAutoSwitchUpdate,
+} from '@/api/admin/proxyAutoSwitch'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 const { t, te } = useI18n()
 const PAGE_SIZE = 50
+const strategies: ProxyAutoSwitchStrategy[] = ['random', 'sequential', 'region']
 
-// 表单里阈值按秒填，提交时换回 threshold_ms；其余字段与后端同名。
-type NumericKey = 'window_minutes' | 'min_samples' | 'threshold_s' | 'consecutive_checks' | 'min_improvement_pct' | 'account_cooldown_minutes' | 'max_switches_per_hour' | 'observe_minutes' | 'min_days_to_expiry'
-type Draft = Record<NumericKey, number | string> & { enabled: boolean; region_policy: ProxyAutoSwitchRegionPolicy; group_ids: number[] }
-interface NumberSpec { key: NumericKey; unit: string; step?: number }
-// hintZero：主输入填 0（不限）时换成这条说明。
-interface FieldCard { id: string; label: string; prefix?: string; primary: NumberSpec; sub?: NumberSpec & { label: string }; hint?: string; hintZero?: string }
-
-// 与后端 PUT /config 的校验范围一致；快多少、冷却、每小时上限、观察、到期天数填 0 = 不限。
-const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }> = {
-  window_minutes: { min: 5, max: 60, integer: true },
-  min_samples: { min: 1, max: 1000, integer: true },
-  threshold_s: { min: 0.2, max: 120, integer: false },
-  consecutive_checks: { min: 1, max: 10, integer: true },
-  min_improvement_pct: { min: 0, max: 90, integer: true },
-  account_cooldown_minutes: { min: 0, max: 1440, integer: true },
-  max_switches_per_hour: { min: 0, max: 50, integer: true },
-  observe_minutes: { min: 0, max: 60, integer: true },
-  min_days_to_expiry: { min: 0, max: 90, integer: true },
+type NumericKey = 'window_minutes' | 'min_samples' | 'p60_threshold_s' | 'mean_threshold_s'
+interface Draft {
+  enabled: boolean
+  group_ids: number[]
+  window_minutes: number | string
+  min_samples: number | string
+  p60_threshold_s: number | string
+  mean_threshold_s: number | string
+  candidate_proxy_ids: number[]
+  strategy: ProxyAutoSwitchStrategy
 }
-const cards: FieldCard[] = [
-  { id: 'window', label: 'proxyAutoSwitch.window', prefix: 'proxyAutoSwitch.windowPrefix', primary: { key: 'window_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'min_samples', label: 'proxyAutoSwitch.minSamples', unit: 'proxyAutoSwitch.unit.requests' } },
-  { id: 'threshold', label: 'proxyAutoSwitch.threshold', primary: { key: 'threshold_s', unit: 'proxyAutoSwitch.unit.seconds', step: 0.1 }, sub: { key: 'consecutive_checks', label: 'proxyAutoSwitch.consecutive', unit: 'proxyAutoSwitch.unit.times' }, hint: 'proxyAutoSwitch.thresholdHint' },
-  { id: 'improvement', label: 'proxyAutoSwitch.improvement', primary: { key: 'min_improvement_pct', unit: 'proxyAutoSwitch.unit.percent' }, hint: 'proxyAutoSwitch.improvementHint', hintZero: 'proxyAutoSwitch.improvementHintZero' },
-  { id: 'cooldown', label: 'proxyAutoSwitch.cooldown', primary: { key: 'account_cooldown_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, sub: { key: 'max_switches_per_hour', label: 'proxyAutoSwitch.maxPerHour', unit: 'proxyAutoSwitch.unit.accounts' }, hint: 'proxyAutoSwitch.cooldownHint', hintZero: 'proxyAutoSwitch.cooldownHintZero' },
-  { id: 'observe', label: 'proxyAutoSwitch.observe', primary: { key: 'observe_minutes', unit: 'proxyAutoSwitch.unit.minutes' }, hint: 'proxyAutoSwitch.observeHint', hintZero: 'proxyAutoSwitch.observeHintZero' },
-]
-const modes = [{ id: 'off', value: false, label: 'proxyAutoSwitch.modeOff' }, { id: 'auto', value: true, label: 'proxyAutoSwitch.modeAuto' }]
-const regionPolicies: ProxyAutoSwitchRegionPolicy[] = ['prefer_same', 'same_only', 'any']
-// 判慢口径固定用使用记录首字；旧记录的 metric 只用来在日志里标一下当时按什么判的。
-const metrics: ProxyAutoSwitchMetric[] = ['usage_first_token', 'first_token', 'response_headers']
-// 后端没给或给了不认识的值（旧版本），按响应头算。
-function metricOf(value: string | null | undefined): ProxyAutoSwitchMetric { return metrics.find(metric => metric === value) ?? 'response_headers' }
-// 换完不再自动换回；账号还在新代理上的记录（含「没变快」）都能手动换回。
-const revertableStatuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'not_faster']
-const tones: Record<ProxyAutoSwitchStatus, string> = { observing: 'tone-info', kept: 'tone-success', kept_insufficient: 'tone-success', not_faster: 'tone-warning', reverted: 'tone-warning', revert_skipped: 'tone-warning', no_candidate: 'tone-neutral', failed: 'tone-danger', manual_revert: 'tone-muted' }
 
-function toDraft(config: ProxyAutoSwitchConfig): Draft {
+// 与后端 PUT /config 的校验范围一致：窗口 1–60 分钟、样本 1–100000、两个阈值 1–600000 毫秒。
+const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }> = {
+  window_minutes: { min: 1, max: 60, integer: true },
+  min_samples: { min: 1, max: 100000, integer: true },
+  p60_threshold_s: { min: 0.001, max: 600, integer: false },
+  mean_threshold_s: { min: 0.001, max: 600, integer: false },
+}
+const numericKeys = Object.keys(ranges) as NumericKey[]
+
+const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, candidate_proxy_ids: [], strategy: 'random' }
+
+function finiteNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+function normalizeStrategy(value: unknown): ProxyAutoSwitchStrategy {
+  return strategies.includes(value as ProxyAutoSwitchStrategy) ? (value as ProxyAutoSwitchStrategy) : 'random'
+}
+// 兼容老配置：缺的新字段用默认值，老字段忽略。
+function normalizeConfig(raw: Partial<ProxyAutoSwitchConfig> | null | undefined): ProxyAutoSwitchConfig {
   return {
-    enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, threshold_s: config.threshold_ms / 1000,
-    consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_minutes: config.account_cooldown_minutes,
-    max_switches_per_hour: config.max_switches_per_hour, observe_minutes: config.observe_minutes, min_days_to_expiry: config.min_days_to_expiry,
-    region_policy: config.region_policy, group_ids: [...(config.group_ids ?? [])],
+    enabled: !!raw?.enabled,
+    group_ids: Array.isArray(raw?.group_ids) ? raw.group_ids.map(Number).filter(Number.isFinite) : [],
+    window_minutes: finiteNumber(raw?.window_minutes, defaultConfig.window_minutes),
+    min_samples: finiteNumber(raw?.min_samples, defaultConfig.min_samples),
+    p60_threshold_ms: finiteNumber(raw?.p60_threshold_ms, defaultConfig.p60_threshold_ms),
+    mean_threshold_ms: finiteNumber(raw?.mean_threshold_ms, defaultConfig.mean_threshold_ms),
+    candidate_proxy_ids: Array.isArray(raw?.candidate_proxy_ids) ? [...new Set(raw.candidate_proxy_ids.map(Number).filter(Number.isFinite))] : [],
+    strategy: normalizeStrategy(raw?.strategy),
   }
 }
-// 固定键顺序、分组去重排序，方便比对是否改过；保存时不再带 metric。
+function toDraft(config: ProxyAutoSwitchConfig): Draft {
+  return {
+    enabled: config.enabled,
+    group_ids: [...config.group_ids],
+    window_minutes: config.window_minutes,
+    min_samples: config.min_samples,
+    p60_threshold_s: config.p60_threshold_ms / 1000,
+    mean_threshold_s: config.mean_threshold_ms / 1000,
+    candidate_proxy_ids: [...config.candidate_proxy_ids],
+    strategy: config.strategy,
+  }
+}
+// 固定键顺序、分组去重排序，方便比对是否改过；候选池保持用户给的顺序。
 function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchUpdate {
   return {
-    enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, threshold_ms: config.threshold_ms,
-    consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_minutes: config.account_cooldown_minutes,
-    max_switches_per_hour: config.max_switches_per_hour, observe_minutes: config.observe_minutes, min_days_to_expiry: config.min_days_to_expiry,
-    region_policy: config.region_policy, group_ids: [...new Set(config.group_ids ?? [])].sort((a, b) => a - b),
+    enabled: config.enabled,
+    group_ids: [...new Set(config.group_ids)].sort((a, b) => a - b),
+    window_minutes: config.window_minutes,
+    min_samples: config.min_samples,
+    p60_threshold_ms: config.p60_threshold_ms,
+    mean_threshold_ms: config.mean_threshold_ms,
+    candidate_proxy_ids: [...config.candidate_proxy_ids],
+    strategy: config.strategy,
   }
 }
 function toPayload(): ProxyAutoSwitchUpdate {
   return canonical({
-    enabled: draft.enabled, window_minutes: Number(draft.window_minutes), min_samples: Number(draft.min_samples), threshold_ms: Math.round(Number(draft.threshold_s) * 1000),
-    consecutive_checks: Number(draft.consecutive_checks), min_improvement_pct: Number(draft.min_improvement_pct), account_cooldown_minutes: Number(draft.account_cooldown_minutes),
-    max_switches_per_hour: Number(draft.max_switches_per_hour), observe_minutes: Number(draft.observe_minutes), min_days_to_expiry: Number(draft.min_days_to_expiry),
-    region_policy: draft.region_policy, group_ids: draft.group_ids,
+    enabled: draft.enabled,
+    group_ids: draft.group_ids,
+    window_minutes: Number(draft.window_minutes),
+    min_samples: Number(draft.min_samples),
+    p60_threshold_ms: Math.round(Number(draft.p60_threshold_s) * 1000),
+    mean_threshold_ms: Math.round(Number(draft.mean_threshold_s) * 1000),
+    candidate_proxy_ids: [...draft.candidate_proxy_ids],
+    strategy: draft.strategy,
   })
 }
 
 const saved = ref<ProxyAutoSwitchConfig | null>(null)
-// 「没找到快 N% 的代理」跟着已保存的「至少快」走，没加载到配置时按默认 30。
-const savedImprovementPct = computed(() => saved.value?.min_improvement_pct ?? 30)
-const draft = reactive<Draft>(toDraft({ enabled: false, window_minutes: 10, min_samples: 10, threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_minutes: 10, max_switches_per_hour: 5, observe_minutes: 10, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [] }))
+const draft = reactive<Draft>(toDraft(defaultConfig))
+const dirty = computed(() => !!saved.value && JSON.stringify(toPayload()) !== JSON.stringify(canonical(saved.value)))
 const configLoading = ref(false), configError = ref(''), saving = ref(false), saveError = ref(''), notice = ref('')
 const groups = ref<{ id: number; name: string }[]>([]), groupsLoaded = ref(false), groupsError = ref(false)
 let disposed = false
 
 function fieldError(key: NumericKey): string {
-  const value = draft[key], range = ranges[key]
-  const valid = typeof value === 'number' && Number.isFinite(value) && value >= range.min && value <= range.max && (!range.integer || Number.isInteger(value))
-  return valid ? '' : t(range.integer ? 'proxyAutoSwitch.integerError' : 'proxyAutoSwitch.rangeError', { min: range.min, max: range.max })
+  const raw = draft[key]
+  const value = Number(raw)
+  const range = ranges[key]
+  const empty = typeof raw === 'string' && raw.trim() === ''
+  if (empty || !Number.isFinite(value)) return t(range.integer ? 'proxyAutoSwitch.integerError' : 'proxyAutoSwitch.rangeError', range)
+  if (range.integer) {
+    const valid = Number.isInteger(value) && value >= range.min && value <= range.max
+    return valid ? '' : t('proxyAutoSwitch.integerError', range)
+  }
+  const ms = Math.round(value * 1000)
+  return ms >= 1 && ms <= 600000 ? '' : t('proxyAutoSwitch.rangeError', range)
 }
-const invalidCount = computed(() => (Object.keys(ranges) as NumericKey[]).filter(key => fieldError(key)).length)
-function hintKey(card: FieldCard) { return card.hintZero && Number(draft[card.primary.key]) === 0 && !fieldError(card.primary.key) ? card.hintZero : card.hint ?? '' }
-const dirty = computed(() => !!saved.value && JSON.stringify(toPayload()) !== JSON.stringify(canonical(saved.value)))
-// 已选但不在 OpenAI 分组列表里的编号（停用的分组或列表没拉到）也留着显示，免得保存时被悄悄丢掉。
+const invalidCount = computed(() => numericKeys.filter(key => fieldError(key)).length)
+const ruleText = computed(() => t('proxyAutoSwitch.rule', {
+  window: displayNumber(draft.window_minutes),
+  samples: displayNumber(draft.min_samples),
+  p60: displayNumber(draft.p60_threshold_s),
+  mean: displayNumber(draft.mean_threshold_s),
+}))
+function displayNumber(value: number | string): string {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? String(parsed) : '—'
+}
+const configWindow = computed(() => saved.value?.window_minutes ?? defaultConfig.window_minutes)
 const groupOptions = computed(() => {
   const known = new Set(groups.value.map(group => group.id))
   const extra = [...new Set([...(saved.value?.group_ids ?? []), ...draft.group_ids])].filter(id => !known.has(id)).map(id => ({ id, name: `#${id}` }))
   return [...groups.value, ...extra]
 })
 
-function applyConfig(config: ProxyAutoSwitchConfig) {
-  saved.value = canonical(config)
+function applyConfig(raw: ProxyAutoSwitchConfig) {
+  saved.value = canonical(normalizeConfig(raw))
   Object.assign(draft, toDraft(saved.value))
 }
 async function loadConfig() {
@@ -252,11 +328,14 @@ async function loadGroups() {
 async function save() {
   if (!saved.value || saving.value || invalidCount.value || !dirty.value) return
   saving.value = true; saveError.value = ''; notice.value = ''
-  const payload = toPayload()
+  const payload = payloadForSave()
   try {
     const config = await proxyAutoSwitchAPI.updateConfig(payload)
+    if (disposed) return
     applyConfig(config ?? payload)
     notice.value = t('proxyAutoSwitch.saved')
+    // 窗口和监控状态都以服务端为准：保存成功后重拉监控和代理列表，失败时不重拉。
+    await Promise.all([loadAccounts(), loadProxies()])
   } catch (err) {
     saveError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.saveFailed'))
   } finally { saving.value = false }
@@ -266,9 +345,84 @@ function discard() {
   saveError.value = ''
 }
 
+// 候选代理池：勾选顺序就是 candidate_proxy_ids 的顺序。
+const proxies = ref<ProxyAutoSwitchProxy[]>([]), proxiesLoading = ref(false), proxiesLoaded = ref(false), proxiesError = ref('')
+const proxyById = computed(() => new Map(proxies.value.map(proxy => [proxy.id, proxy])))
+const selectedProxies = computed(() => draft.candidate_proxy_ids.map(id => proxyById.value.get(id)).filter((proxy): proxy is ProxyAutoSwitchProxy => !!proxy))
+function isSelected(id: number) { return draft.candidate_proxy_ids.includes(id) }
+function toggleProxy(id: number) {
+  if (isSelected(id)) draft.candidate_proxy_ids = draft.candidate_proxy_ids.filter(candidate => candidate !== id)
+  else draft.candidate_proxy_ids = [...draft.candidate_proxy_ids, id]
+}
+function moveProxy(index: number, delta: number) {
+  // 跟页面上能看到的相邻项交换；已删除、页面上不显示的 id 留在原位，避免点了像没反应。
+  const id = selectedProxies.value[index]?.id
+  const neighbor = selectedProxies.value[index + delta]?.id
+  if (id == null || neighbor == null) return
+  const ids = [...draft.candidate_proxy_ids]
+  const from = ids.indexOf(id)
+  const target = ids.indexOf(neighbor)
+  if (from < 0 || target < 0) return
+  ids[from] = neighbor
+  ids[target] = id
+  draft.candidate_proxy_ids = ids
+}
+function isExpired(proxy: ProxyAutoSwitchProxy) {
+  if (proxy.expired) return true
+  const date = validDate(proxy.expires_at)
+  return !!date && date.getTime() < Date.now()
+}
+function proxyLabel(proxy: ProxyAutoSwitchProxy) { return proxy.name ? `#${proxy.id} ${proxy.name}` : `#${proxy.id}` }
+async function loadProxies() {
+  proxiesLoading.value = true; proxiesError.value = ''
+  try {
+    const items = await proxyAutoSwitchAPI.listProxies()
+    if (!disposed) {
+      proxies.value = items
+      proxiesLoaded.value = true
+    }
+  } catch (err) {
+    if (!disposed) proxiesError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.proxiesLoadFailed'))
+  } finally { proxiesLoading.value = false }
+}
+
+// 保存时才去掉代理列表里已不存在的 id；列表没加载成功就原样带上，别把用户的池子清空。
+function payloadForSave(): ProxyAutoSwitchUpdate {
+  const payload = toPayload()
+  if (proxiesLoaded.value) {
+    const known = new Set(proxies.value.map(proxy => proxy.id))
+    payload.candidate_proxy_ids = payload.candidate_proxy_ids.filter(id => known.has(id))
+  }
+  return payload
+}
+
+// 账号监控：窗口以接口返回为准，没返回时退回已保存配置。
+const accounts = ref<ProxyAutoSwitchAccount[]>([]), accountsWindow = ref(0)
+const accountsLoading = ref(false), accountsLoaded = ref(false), accountsError = ref('')
+const monitorWindow = computed(() => accountsWindow.value || configWindow.value)
+const monitorMinSamples = computed(() => saved.value?.min_samples ?? defaultConfig.min_samples)
+const accountTones: Record<string, string> = { ok: 'state-good', insufficient: 'state-muted', slow: 'state-bad', unavailable: 'state-muted', no_proxy: 'state-warn' }
+function accountStateTone(state: string) { return accountTones[state] ?? 'state-muted' }
+function accountStateLabel(account: ProxyAutoSwitchAccount) {
+  const key = `proxyAutoSwitch.monitorState.${account.state}`
+  return te(key) ? t(key, { samples: monitorMinSamples.value }) : account.state
+}
+async function loadAccounts() {
+  accountsLoading.value = true; accountsError.value = ''
+  try {
+    const page = await proxyAutoSwitchAPI.listAccounts()
+    if (disposed) return
+    accounts.value = page.items ?? []
+    accountsWindow.value = page.window_minutes || 0
+    accountsLoaded.value = true
+  } catch (err) {
+    if (!disposed) accountsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.accountsLoadFailed'))
+  } finally { accountsLoading.value = false }
+}
+
+// 换代理记录：分页和刷新沿用原来的 cursor 做法。
 const events = ref<ProxyAutoSwitchEvent[]>([]), cursor = ref(0)
 const eventsLoading = ref(false), eventsLoaded = ref(false), moreLoading = ref(false), eventsError = ref(''), lastEventsFailure = ref<'list' | 'more'>('list')
-const expanded = ref<number[]>([])
 let eventsSeq = 0
 
 async function loadEvents() {
@@ -279,7 +433,7 @@ async function loadEvents() {
     if (seq !== eventsSeq || disposed) return
     events.value = page.items; cursor.value = page.next_cursor; eventsLoaded.value = true
   } catch (err) {
-    if (seq === eventsSeq && !disposed) { eventsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.loadFailed')); lastEventsFailure.value = 'list' }
+    if (seq === eventsSeq && !disposed) { eventsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.eventsLoadFailed')); lastEventsFailure.value = 'list' }
   } finally { if (seq === eventsSeq) eventsLoading.value = false }
 }
 async function loadMore() {
@@ -293,55 +447,52 @@ async function loadMore() {
     events.value.push(...page.items.filter(event => !seen.has(event.id)))
     cursor.value = page.next_cursor
   } catch (err) {
-    if (seq === eventsSeq && !disposed) { eventsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.loadFailed')); lastEventsFailure.value = 'more' }
+    if (seq === eventsSeq && !disposed) { eventsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.eventsLoadFailed')); lastEventsFailure.value = 'more' }
   } finally { if (seq === eventsSeq) moreLoading.value = false }
 }
 function retryEvents() { return lastEventsFailure.value === 'more' && events.value.length ? loadMore() : loadEvents() }
-function isExpanded(id: number) { return expanded.value.includes(id) }
-function toggle(id: number) { expanded.value = isExpanded(id) ? expanded.value.filter(item => item !== id) : [...expanded.value, id] }
-function canRevert(event: ProxyAutoSwitchEvent) { return revertableStatuses.includes(event.status) }
-function eventMetric(event: ProxyAutoSwitchEvent) { return metricOf(event.metric) }
-// 「至少快」设成 0 时没有「快 N%」这回事，没换成就是没有能用的空闲代理（没有或测速都失败）。
-function statusLabel(status: string) {
-  const key = status === 'no_candidate' && savedImprovementPct.value === 0 ? 'proxyAutoSwitch.status.no_candidate_any' : `proxyAutoSwitch.status.${status}`
-  return te(key) ? t(key, { pct: savedImprovementPct.value }) : status
+
+const legacyStatuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'not_faster', 'reverted', 'revert_skipped', 'manual_revert']
+const statusTones: Record<string, string> = { measuring: 'tone-info', done: 'tone-success', no_candidate: 'tone-neutral', failed: 'tone-danger', observing: 'tone-info', kept: 'tone-success', kept_insufficient: 'tone-success', not_faster: 'tone-warning', reverted: 'tone-warning', revert_skipped: 'tone-warning', manual_revert: 'tone-muted' }
+function isLegacy(event: ProxyAutoSwitchEvent) { return legacyStatuses.includes(event.status) }
+function statusTone(status: ProxyAutoSwitchStatus) { return statusTones[status] ?? 'tone-neutral' }
+function statusLabel(status: ProxyAutoSwitchStatus) {
+  const key = `proxyAutoSwitch.status.${status}`
+  return te(key) ? t(key) : status
 }
-function tone(status: ProxyAutoSwitchStatus) { return tones[status] ?? 'tone-neutral' }
-function sortedCandidates(event: ProxyAutoSwitchEvent) {
-  const rank = (ms: number | null) => (ms == null || !Number.isFinite(ms) ? Number.POSITIVE_INFINITY : ms)
-  return [...(event.candidates ?? [])].sort((a, b) => rank(a.probe_ms) - rank(b.probe_ms))
+function strategyLabel(strategy: ProxyAutoSwitchStrategy | null) {
+  if (!strategy) return '—'
+  const key = `proxyAutoSwitch.strategyLabel.${strategy}`
+  return te(key) ? t(key) : '—'
 }
-function proxyText(id: number | null | undefined, label: string | null | undefined) {
+function eventAt(event: ProxyAutoSwitchEvent) { return event.switched_at || event.created_at }
+function changeFor(event: ProxyAutoSwitchEvent, key: 'p60_ms' | 'mean_ms') {
+  const before = event.before?.[key] ?? null
+  const after = event.after?.[key] ?? null
+  if (before == null || after == null) return { text: '—', tone: '' }
+  const diff = before - after
+  if (diff === 0) return { text: '—', tone: '' }
+  return { text: `${diff > 0 ? '↓' : '↑'} ${seconds(Math.abs(diff))}`, tone: diff > 0 ? 'change-good' : 'change-bad' }
+}
+function probeText(ms: number | null, event: ProxyAutoSwitchEvent) {
+  // no_candidate 从来没换、也没测过速，null 不代表测不通。
+  if (ms == null) return isLegacy(event) || event.status === 'no_candidate' ? '—' : t('proxyAutoSwitch.probeUnreachable')
+  return `${Math.round(ms)}ms`
+}
+function proxyText(id: number | null, label: string | null) {
   if (id == null) return label || '—'
   return label ? `#${id} ${label}` : `#${id}`
 }
-function seconds(ms: number | null | undefined) { return ms == null || !Number.isFinite(ms) ? '—' : `${(ms / 1000).toFixed(2)} s` }
+function seconds(ms: number | null | undefined) { return ms == null || !Number.isFinite(ms) ? '—' : `${(ms / 1000).toFixed(1)}s` }
 function validDate(value: string | null | undefined) { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.getTime()) ? date : null }
-function clock(value: string) { return validDate(value)?.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false }) ?? '—' }
-function day(value: string) { return validDate(value)?.toLocaleDateString(undefined, { month: '2-digit', day: '2-digit' }) ?? '' }
+function pad(value: number) { return String(value).padStart(2, '0') }
+function clock(value: string) { const date = validDate(value); return date ? date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '—' }
+function day(value: string) { const date = validDate(value); return date ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())}` : '' }
+function monthDay(value: string | null | undefined) { const date = validDate(value); return date ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())}` : '—' }
+function lastSwitch(value: string | null | undefined) { const date = validDate(value); return date ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}` : '—' }
 function fullTime(value: string) { return validDate(value)?.toLocaleString() ?? '' }
 
-const revertTarget = ref<ProxyAutoSwitchEvent | null>(null), reverting = ref(false), revertError = ref('')
-function askRevert(event: ProxyAutoSwitchEvent) { revertTarget.value = event; revertError.value = '' }
-function closeRevert() { if (reverting.value) return; revertTarget.value = null; revertError.value = '' }
-async function confirmRevert() {
-  const target = revertTarget.value
-  if (!target || reverting.value) return
-  reverting.value = true; revertError.value = ''
-  try {
-    const updated = await proxyAutoSwitchAPI.revertEvent(target.id)
-    if (disposed) return
-    const index = events.value.findIndex(event => event.id === target.id)
-    if (updated && updated.id === target.id && index >= 0) events.value.splice(index, 1, updated)
-    else void loadEvents()
-    revertTarget.value = null
-    notice.value = t('proxyAutoSwitch.revertDone', { account: target.account_name || `#${target.account_id}` })
-  } catch (err) {
-    if (!disposed) revertError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.revertFailed'))
-  } finally { reverting.value = false }
-}
-
-onMounted(() => { void loadConfig(); void loadGroups(); void loadEvents() })
+onMounted(() => { void loadConfig(); void loadGroups(); void loadProxies(); void loadAccounts(); void loadEvents() })
 onUnmounted(() => { disposed = true })
 </script>
 
@@ -368,111 +519,100 @@ onUnmounted(() => { disposed = true })
 .icon-button { @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 dark:border-dark-700 dark:text-gray-400 dark:hover:bg-dark-800; }
 .panel-error { @apply mx-5 mb-4 flex items-center justify-between gap-3 rounded-lg bg-red-50 p-3 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300; overflow-wrap: anywhere; }
 .panel-error button { @apply shrink-0 underline; }
-.panel-empty { @apply flex min-h-44 flex-col items-center justify-center gap-3 p-6 text-center text-sm text-gray-400; }
-.panel-empty p { @apply max-w-sm text-xs leading-relaxed; }
+.inline-error { @apply flex items-center justify-between gap-3 rounded-lg bg-red-50 p-3 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300; overflow-wrap: anywhere; }
+.inline-error button { @apply shrink-0 underline; }
 .skeleton-stack { @apply space-y-3; }
 .cell-skeleton { @apply block h-3 rounded bg-gray-100 dark:bg-dark-700; animation: proxy-pulse 1.7s ease-in-out infinite; }
 
 .settings-body { @apply space-y-4 border-t border-gray-100 px-5 py-5 dark:border-dark-700; }
-.mode-row { @apply flex flex-wrap items-center gap-3; }
-.mode-switch { @apply inline-flex max-w-full flex-wrap gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1 dark:border-dark-700 dark:bg-dark-800; }
-.mode-switch button { @apply rounded-lg px-4 py-2 text-sm text-gray-500 transition-colors hover:bg-white dark:text-gray-400 dark:hover:bg-dark-700; }
-.mode-switch button.on { @apply bg-gray-900 font-medium text-white hover:bg-gray-900 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-100; }
-.field-grid { @apply grid gap-3 sm:grid-cols-2 xl:grid-cols-3; }
-.field-grid-wide { @apply xl:grid-cols-2; }
-.field { @apply flex min-w-0 flex-col gap-2 rounded-xl border border-gray-200 bg-gray-50/60 p-4 dark:border-dark-700 dark:bg-dark-800/50; }
-fieldset.field { @apply m-0; }
+.settings-row { @apply flex flex-wrap items-start gap-x-6 gap-y-3; }
+.inline-field { @apply flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-300; }
+.inline-field > .field-error { @apply w-full; }
+.groups-field { @apply min-w-0 flex-1 flex-col items-start; }
+.threshold-row { @apply flex flex-wrap items-center gap-x-5 gap-y-3; }
 .field-label { @apply text-xs font-medium text-gray-500 dark:text-gray-400; }
-fieldset.field > legend { @apply float-left mb-2 w-full p-0; }
-.metric-note-field { @apply justify-center; }
-.metric-note { @apply text-sm leading-6 text-gray-700 dark:text-gray-200; }
-.field-input { @apply inline-flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-300; }
+.field-hint { @apply text-xs leading-5 text-gray-400 dark:text-gray-500; }
+.field-warn { @apply text-amber-600 dark:text-amber-400; }
+.field-error { @apply text-xs text-red-600 dark:text-red-400; }
 .num-input { width: 6.5rem; @apply rounded-lg px-3 py-1.5 text-base font-semibold tabular-nums; }
 .num-input[aria-invalid='true'] { @apply border-red-400 focus:border-red-500 focus:ring-red-500/30 dark:border-red-700; }
-.region-select { @apply w-auto max-w-full rounded-lg px-3 py-1.5; }
-.sub-field { @apply flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-gray-500 dark:text-gray-400; }
-.sub-field .num-input { width: 5.5rem; @apply text-sm; }
-.field-hint { @apply text-xs leading-5 text-gray-400 dark:text-gray-500; }
-.field-error { @apply text-xs text-red-600 dark:text-red-400; }
+.switch-chip { @apply inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 transition-colors dark:border-dark-600 dark:bg-dark-900 dark:text-gray-300; }
+.switch-chip.on { @apply border-primary-300 bg-primary-50 text-primary-700 dark:border-primary-700 dark:bg-primary-950/40 dark:text-primary-300; }
+.switch-dot { @apply h-1.5 w-1.5 rounded-full bg-current; }
 .chips { @apply flex flex-wrap gap-2; }
 .chip { @apply inline-flex max-w-full cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600 transition-colors hover:border-gray-300 dark:border-dark-600 dark:bg-dark-900 dark:text-gray-300 dark:hover:border-dark-500; overflow-wrap: anywhere; }
 .chip.on { @apply border-primary-300 bg-primary-50 font-medium text-primary-700 dark:border-primary-700 dark:bg-primary-950/40 dark:text-primary-300; }
-.chip.is-fixed { @apply cursor-default; }
 .chip:focus-within { @apply ring-2 ring-primary-400 ring-offset-2 dark:ring-offset-dark-900; }
+.rule { @apply rounded-lg border border-dashed border-gray-200 bg-gray-50/70 px-3 py-2 text-[13px] leading-6 text-gray-600 dark:border-dark-600 dark:bg-dark-800/50 dark:text-gray-300; }
+.subsection-heading h4 { @apply text-sm font-semibold; }
+
+.table-scroll { @apply min-w-0 overflow-x-auto border-t border-gray-100 dark:border-dark-700; }
+.data-table { @apply w-full border-collapse text-left text-xs; }
+.data-table th { @apply whitespace-nowrap border-b border-gray-100 px-3 py-2.5 font-medium text-gray-400 dark:border-dark-800 dark:text-gray-500; }
+.data-table td { @apply border-b border-gray-100 px-3 py-3 align-middle dark:border-dark-800; }
+.data-table .tabular-nums { @apply text-right; font-variant-numeric: tabular-nums; }
+.data-table th:not(.cell-left) { @apply text-right; }
+.data-table .cell-left { @apply text-left; }
+.data-table .group-row th { @apply border-b-0 pb-1 text-left text-[11px] text-gray-500 dark:text-gray-400; }
+.proxy-table td, .accounts-table td, .events-table td { @apply whitespace-nowrap; }
+.proxy-name-cell { @apply font-mono text-[11px]; }
+.proxy-checkbox { @apply h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500; }
+.row-expired td { @apply bg-gray-50/60 text-gray-400 dark:bg-dark-800/30 dark:text-gray-500; }
+.expired-tag { @apply ml-2 rounded bg-gray-100 px-1.5 py-0.5 font-sans text-[10px] text-gray-500 dark:bg-dark-800 dark:text-gray-400; }
+.table-empty { @apply py-8 text-center text-gray-400 dark:text-gray-500; }
+.table-empty span { @apply mt-1 block text-[11px]; }
+.pool-order { @apply rounded-xl border border-gray-200 bg-gray-50/60 p-3 dark:border-dark-700 dark:bg-dark-800/50; }
+.pool-order-head { @apply flex flex-wrap items-baseline gap-2; }
+.pool-order-list { @apply mt-2 flex flex-wrap gap-2; }
+.pool-order-item { @apply inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs dark:border-dark-600 dark:bg-dark-900; }
+.pool-order-name { @apply font-mono text-[11px]; }
+.order-actions { @apply flex items-center gap-1; }
+.order-button { @apply flex h-6 w-6 items-center justify-center rounded border border-gray-200 text-gray-500 hover:bg-gray-50 dark:border-dark-600 dark:text-gray-400 dark:hover:bg-dark-800; }
+.strategy-group { @apply inline-flex flex-wrap gap-1 rounded-xl border border-gray-200 bg-gray-50 p-1 dark:border-dark-700 dark:bg-dark-800; }
+.strategy-group button { @apply rounded-lg px-3 py-1.5 text-xs text-gray-500 transition-colors hover:bg-white dark:text-gray-400 dark:hover:bg-dark-700; }
+.strategy-group button.on { @apply bg-gray-900 font-medium text-white hover:bg-gray-900 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-100; }
 .settings-footer { @apply flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 pt-4 dark:border-dark-700; }
+.footer-actions { @apply ml-auto flex flex-wrap items-center gap-2; }
 .footer-state { @apply text-xs text-amber-600 dark:text-amber-400; }
 .footer-state.is-error { @apply text-red-600 dark:text-red-400; }
-.footer-actions { @apply ml-auto flex flex-wrap items-center gap-2; }
 .form-error { @apply rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300; overflow-wrap: anywhere; }
 
-.events-scroll { @apply min-w-0 overflow-x-auto border-t border-gray-100 dark:border-dark-700; }
-.events-table { @apply w-full text-left text-xs; min-width: 760px; }
-.events-table thead { @apply bg-white text-gray-400 dark:bg-dark-900; box-shadow: 0 1px 0 rgb(148 163 184 / .15); }
-.events-table th { @apply whitespace-nowrap px-4 py-3 font-medium; }
-.event-row > td { @apply border-b border-gray-100 px-4 py-4 align-middle dark:border-dark-800; }
-.event-row { @apply cursor-pointer; }
-.event-row:hover, .event-row.expanded { @apply bg-slate-50/80 dark:bg-dark-800/70; }
-.time-cell { @apply whitespace-nowrap tabular-nums; }
+.accounts-table, .events-table { min-width: 980px; }
+.events-table { min-width: 1280px; }
+.account-name strong { @apply block text-xs font-medium; }
+.account-name span { @apply mt-1 block max-w-[220px] truncate text-[10px] text-gray-400; }
+.region-tag { @apply ml-1 rounded bg-sky-50 px-1 py-0.5 font-sans text-[10px] font-medium text-sky-700 dark:bg-sky-950/40 dark:text-sky-300; }
+.state-pill { @apply inline-flex items-center rounded-full border border-current px-2 py-0.5 text-[11px] font-medium; }
+.state-good { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300; }
+.state-bad { @apply bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-300; }
+.state-warn { @apply bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300; }
+.state-muted { @apply bg-gray-100 text-gray-500 dark:bg-dark-800 dark:text-gray-400; }
+.cell-note { @apply mt-1 block max-w-[220px] whitespace-normal text-[10px] text-gray-400; }
 .time-cell strong { @apply block text-xs font-medium; }
-.time-cell > span, .account-cell > span { @apply mt-1 block text-[10px] text-gray-400; }
-.account-cell { max-width: 220px; }
-.account-cell strong { @apply block truncate font-medium; max-width: 200px; }
-.proxy-cell { @apply font-mono text-[11px]; }
-.proxy-name { @apply inline-flex items-center gap-1.5; overflow-wrap: anywhere; }
+.time-cell > span { @apply mt-1 block text-[10px] text-gray-400; }
+.account-cell { @apply max-w-[220px]; }
+.account-cell strong { @apply block text-xs font-medium; }
+.account-cell > span:not(.status-badge) { @apply mt-1 block max-w-[200px] truncate text-[10px] text-gray-400; }
+.proxy-cell { @apply whitespace-normal font-mono text-[11px]; }
+.proxy-line { @apply inline-flex flex-wrap items-center gap-1.5; }
 .proxy-arrow { @apply mx-1.5 text-gray-400; }
-.region-tag { @apply rounded bg-sky-50 px-1 py-0.5 font-sans text-[10px] font-medium text-sky-700 dark:bg-sky-950/40 dark:text-sky-300; }
-.latency { @apply whitespace-nowrap font-mono tabular-nums; }
-.latency strong { @apply font-semibold text-emerald-600 dark:text-emerald-400; }
-.metric-tag { @apply mr-1.5 rounded bg-slate-100 px-1 py-0.5 font-sans text-[10px] font-medium text-slate-600 dark:bg-dark-700 dark:text-gray-300; }
-.cell-secondary { @apply mt-1.5 block text-[10px] text-gray-400; }
-.reason-text { @apply truncate; max-width: 220px; }
-.outcome-badge { @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium; }
-.outcome-badge > span { @apply h-1.5 w-1.5 shrink-0 rounded-full bg-current; }
+.reason-text { @apply mt-1 block max-w-[420px] whitespace-normal text-[10px] text-gray-400; }
+.status-badge { @apply mt-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium; }
 .tone-success { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300; }
 .tone-warning { @apply bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300; }
 .tone-info { @apply bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300; }
-.tone-muted { @apply bg-slate-100 text-slate-600 dark:bg-dark-700 dark:text-gray-300; }
-.tone-neutral { @apply bg-gray-100 text-gray-500 dark:bg-dark-800 dark:text-gray-400; }
+.tone-muted, .tone-neutral { @apply bg-gray-100 text-gray-500 dark:bg-dark-800 dark:text-gray-400; }
 .tone-danger { @apply bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-300; }
-.row-actions { @apply flex items-center justify-end gap-2; }
-.detail-button { @apply inline-flex min-h-8 items-center gap-1 whitespace-nowrap rounded-md px-1 text-xs text-gray-400 hover:text-primary-600 dark:hover:text-primary-400; }
-.detail-row > td { @apply border-b border-gray-100 bg-slate-50/60 px-4 pb-4 pt-0 dark:border-dark-800 dark:bg-dark-800/40; }
-.detail-panel { @apply rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900; }
-.detail-head { @apply mb-3 flex flex-wrap items-baseline justify-between gap-2; }
-.detail-head h4 { @apply text-sm font-semibold; }
-.detail-head span { @apply font-mono text-[11px] text-gray-500 dark:text-gray-400; overflow-wrap: anywhere; }
-.detail-metric { @apply mb-2 text-xs leading-5 text-gray-600 dark:text-gray-300; }
-.detail-reason { @apply mb-3 text-xs leading-5 text-gray-600 dark:text-gray-300; overflow-wrap: anywhere; }
-.detail-reason span { @apply mr-2 text-gray-400; }
-.candidate-table { @apply w-full table-fixed text-left text-xs; }
-.candidate-table th { @apply py-2 pr-3 font-normal text-gray-500 dark:text-gray-400; }
-.candidate-table td { @apply border-t border-gray-100 py-2 pr-3 align-top dark:border-dark-700; overflow-wrap: anywhere; }
-.candidate-table th:first-child { width: 40%; }
-.candidate-table tr.chosen td { @apply font-medium text-emerald-700 dark:text-emerald-300; }
-.chosen-tag { @apply ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300; }
-.candidate-note { @apply text-rose-600 dark:text-rose-400; }
-.detail-empty { @apply text-xs text-gray-400; }
+.change-good { @apply font-medium text-emerald-600 dark:text-emerald-400; }
+.change-bad { @apply font-medium text-rose-600 dark:text-rose-400; }
+.measuring-cell { @apply text-left text-gray-500 dark:text-gray-400; }
 .operations-footer { @apply flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-3 border-t border-gray-100 px-5 py-3 text-[11px] text-gray-400 dark:border-dark-700; }
 .operations-footer button { @apply inline-flex items-center gap-1.5 text-primary-600 dark:text-primary-400; }
 button:disabled { @apply cursor-not-allowed opacity-40; }
 button:focus-visible, input:focus-visible, select:focus-visible { @apply outline-none ring-2 ring-primary-400 ring-offset-2 dark:ring-offset-dark-900; }
 @keyframes proxy-pulse { 50% { opacity: .45; } }
 
-/* 手机宽度：表格改成卡片，不横向滚动。 */
 @media (max-width: 767px) {
-  .events-scroll { overflow-x: visible; }
-  .events-table { display: block; min-width: 0; }
-  .events-table thead { @apply sr-only; }
-  .events-table tbody { display: block; }
-  .event-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 16px; @apply border-b border-gray-100 dark:border-dark-800; }
-  .event-row > td { min-width: 0; max-width: none; padding: 0; border: 0; }
-  .event-row > td[data-label]::before { content: attr(data-label); @apply mb-1.5 block font-sans text-[10px] text-gray-400; }
-  .event-row .account-cell { grid-column: 1 / -1; grid-row: 1; }
-  .event-row .account-cell strong { max-width: none; white-space: normal; overflow-wrap: anywhere; }
-  .event-row .proxy-cell, .event-row .result-cell, .event-row .action-cell { grid-column: 1 / -1; }
-  .event-row .reason-text { max-width: 100%; white-space: normal; }
-  .detail-row { display: block; }
-  .detail-row > td { display: block; padding: 0 16px 16px; }
   .panel-heading, .settings-body, .operations-footer { @apply px-4; }
   .panel-error { @apply mx-4; }
 }
