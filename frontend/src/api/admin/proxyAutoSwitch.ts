@@ -5,14 +5,15 @@ const base = '/admin/proxy-autoswitch'
 
 export type ProxyAutoSwitchRegionPolicy = 'prefer_same' | 'same_only' | 'any'
 // 判慢指标：usage_first_token = 使用记录首字（usage_logs.first_token_ms，和使用记录页、首字趋势一致，含上传）；
-// first_token = 上游首字（first_semantic − request_written）；response_headers = 响应头。
+// first_token / response_headers 只用于展示旧记录。配置的判慢口径已固定为 usage_first_token。
 export type ProxyAutoSwitchMetric = 'usage_first_token' | 'response_headers' | 'first_token'
 
 export interface ProxyAutoSwitchConfig {
   enabled: boolean
   window_minutes: number
   min_samples: number
-  metric: ProxyAutoSwitchMetric
+  // 后端固定返回 usage_first_token；PUT 不再传这个字段（传了也会被忽略）。
+  metric?: ProxyAutoSwitchMetric
   threshold_ms: number
   consecutive_checks: number
   // 0 = 不比当前代理，直接挑测速最快的空闲代理。
@@ -27,6 +28,9 @@ export interface ProxyAutoSwitchConfig {
   region_policy: ProxyAutoSwitchRegionPolicy
   group_ids: number[]
 }
+
+// 保存配置时不带 metric。
+export type ProxyAutoSwitchUpdate = Omit<ProxyAutoSwitchConfig, 'metric'>
 
 export type ProxyAutoSwitchStatus =
   | 'observing'
@@ -94,7 +98,7 @@ export async function getConfig(): Promise<ProxyAutoSwitchConfig> {
   return data
 }
 
-export async function updateConfig(config: ProxyAutoSwitchConfig): Promise<ProxyAutoSwitchConfig> {
+export async function updateConfig(config: ProxyAutoSwitchUpdate): Promise<ProxyAutoSwitchConfig> {
   const { data } = await apiClient.put<ProxyAutoSwitchConfig>(`${base}/config`, config)
   return data
 }

@@ -3,7 +3,7 @@ import { createI18n } from 'vue-i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import FirstTokenTrendView from '../FirstTokenTrendView.vue'
 import zhFirstTokenTrend from '@/i18n/locales/zh/firstTokenTrend'
-import type { FirstTokenTrendBucket, FirstTokenTrendData } from '@/api/admin/firstTokenTrend'
+import type { FirstTokenTrendBucket, FirstTokenTrendData, FirstTokenTrendRange } from '@/api/admin/firstTokenTrend'
 
 const { api } = vi.hoisted(() => ({ api: { getTrend: vi.fn(), listGroups: vi.fn() } }))
 vi.mock('@/api/admin/firstTokenTrend', () => ({ firstTokenTrendAPI: api, default: api }))
@@ -40,6 +40,26 @@ function trend(overrides: Partial<FirstTokenTrendData> = {}): FirstTokenTrendDat
     ...overrides,
   }
 }
+// 生成一整段连续桶，用来验证 12 小时 / 6 小时的刻度密度。
+function rangeTrend(range: FirstTokenTrendRange, stepSeconds: number, count: number, from: string, to: string): FirstTokenTrendData {
+  const start = new Date(from).getTime()
+  const buckets = Array.from({ length: count }, (_, index) => bucket(new Date(start + index * stepSeconds * 1000).toISOString(), {
+    avg_ms: 6000, p50_ms: 5000, p80_ms: 7000, over10_pct: 0, head_p50_ms: 1000, upload_p50_ms: 2000, after_p50_ms: 2000, inflight_avg: 2, samples: 10,
+  }))
+  return trend({ range, step_seconds: stepSeconds, from, to, buckets })
+}
+// 10 个点里放一个 96 秒的 p80 尖峰，其余都在 5–8 秒。
+function spikeTrend(withSpike: boolean): FirstTokenTrendData {
+  const start = new Date('2026-11-05T07:00:00Z').getTime()
+  const buckets = Array.from({ length: 10 }, (_, index) => bucket(new Date(start + index * 60000).toISOString(), {
+    avg_ms: 6000 + index * 100,
+    p50_ms: 5500 + index * 100,
+    p80_ms: withSpike && index === 5 ? 96000 : 6500 + index * 100,
+    over10_pct: withSpike && index === 5 ? 100 : 0,
+    samples: 100,
+  }))
+  return trend({ range: '30m', step_seconds: 60, from: '2026-11-05T07:00:00Z', to: '2026-11-05T07:10:00Z', buckets })
+}
 
 function mountView() {
   const i18n = createI18n({ legacy: false, locale: 'zh', missingWarn: false, fallbackWarn: false, messages: { zh: { firstTokenTrend: zhFirstTokenTrend, nav: { routing: '线路优化' } } } })
@@ -48,6 +68,19 @@ function mountView() {
 let wrapper: ReturnType<typeof mountView>
 const lastQuery = () => api.getTrend.mock.calls.at(-1)?.[0]
 const charts = (name: 'Line' | 'Bar') => wrapper.findAllComponents({ name })
+// 总览条在 jsdom 里没有布局，给它一个 1000px 宽的矩形，方便按比例拖。
+function dragOverview(fromX: number, toX: number) {
+  const overview = wrapper.get('[data-testid="ftt-overview"]')
+  overview.element.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 1000, height: 70, right: 1000, bottom: 70, x: 0, y: 0, toJSON: () => ({}),
+  })
+  const fire = (type: string, clientX: number) => {
+    overview.element.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX, button: 0 }))
+  }
+  fire('pointerdown', fromX)
+  fire('pointermove', toX)
+  fire('pointerup', toX)
+}
 
 beforeEach(() => {
   localStorage.clear()
@@ -57,10 +90,11 @@ beforeEach(() => {
 afterEach(() => wrapper?.unmount())
 
 describe('FirstTokenTrendView', () => {
-  it('loads group 16, 2h, usage, by account and renders the latest complete bucket', async () => {
+  it('loads group 16, 2h, by account and renders the latest complete bucket', async () => {
     wrapper = mountView(); await flushPromises()
     expect(api.getTrend).toHaveBeenCalledTimes(1)
-    expect(lastQuery()).toEqual({ group_id: 16, range: '2h', metric: 'usage', dimension: 'account' })
+    expect(lastQuery()).toEqual({ group_id: 16, range: '2h', dimension: 'account' })
+    expect(lastQuery()).not.toHaveProperty('metric')
     expect((wrapper.get('[data-testid="ftt-group"]').element as HTMLSelectElement).value).toBe('16')
     expect(wrapper.get('[data-testid="ftt-range-2h"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('2 分钟一格')
@@ -73,7 +107,7 @@ describe('FirstTokenTrendView', () => {
     expect(wrapper.get('[data-testid="ftt-kpi-over10"] .v').text()).toBe('32%')
     expect(wrapper.get('[data-testid="ftt-kpi-inflight"] .d').classes()).not.toContain('down')
     expect(wrapper.get('[data-testid="ftt-kpi-samples"] .v').text()).toBe('527')
-    expect(wrapper.get('[data-testid="ftt-metric-hint"]').text()).toBe('和使用记录页的首字一致，从请求进网关算，含上传请求体的时间')
+    expect(wrapper.get('[data-testid="ftt-metric-hint"]').text()).toBe('首字和使用记录页一致，从请求进网关算，含上传请求体的时间')
   })
 
   it('draws three lines plus the 10 s line, in-flight vs limit, and the stacked split, in seconds', async () => {
@@ -133,14 +167,15 @@ describe('FirstTokenTrendView', () => {
     expect(wrapper.find('[data-testid="ftt-metric-usage"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="ftt-metric-switch"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('代理优选首字')
+    expect(wrapper.text()).not.toContain('不含上传')
     await wrapper.get('[data-testid="ftt-range-30m"]').trigger('click'); await flushPromises()
-    expect(lastQuery()).toMatchObject({ metric: 'usage', range: '30m' })
+    expect(lastQuery()).toEqual({ group_id: 16, range: '30m', dimension: 'account' })
   })
 
   it('reloads when the breakdown dimension or range changes', async () => {
     wrapper = mountView(); await flushPromises()
     await wrapper.get('[data-testid="ftt-dim-proxy"]').trigger('click'); await flushPromises()
-    expect(lastQuery()).toMatchObject({ dimension: 'proxy', metric: 'usage' })
+    expect(lastQuery()).toMatchObject({ dimension: 'proxy' })
     expect(wrapper.get('[data-testid="ftt-dim-proxy"]').attributes('aria-checked')).toBe('true')
     await wrapper.get('[data-testid="ftt-range-30m"]').trigger('click'); await flushPromises()
     expect(lastQuery()).toMatchObject({ range: '30m', dimension: 'proxy' })
@@ -168,19 +203,165 @@ describe('FirstTokenTrendView', () => {
     expect(wrapper.find('[data-testid="ftt-kpis"]').exists()).toBe(true)
   })
 
-  it('offers only 30 min / 1 h / 2 h and labels about every 5 minutes on short ranges', async () => {
+  it('offers 30 min through 12 hours and labels long ranges about hourly / half-hourly', async () => {
     wrapper = mountView(); await flushPromises()
-    expect(wrapper.findAll('[data-testid^="ftt-range-"]').map(button => button.text())).toEqual(['30 分钟', '1 小时', '2 小时'])
-    api.getTrend.mockResolvedValue(trend({ range: '1h', step_seconds: 60, buckets: ['07:54', '07:55', '07:56', '07:57'].map(hm => bucket(`2026-11-05T${hm}:00Z`)) }))
+    expect(wrapper.findAll('[data-testid^="ftt-range-"]').map(button => button.text())).toEqual(['30 分钟', '1 小时', '2 小时', '6 小时', '12 小时'])
+    expect(wrapper.get('[data-testid="ftt-range-2h"]').attributes('aria-checked')).toBe('true')
+
+    api.getTrend.mockResolvedValue(rangeTrend('12h', 300, 144, '2026-11-05T07:00:00Z', '2026-11-05T19:00:00Z'))
+    await wrapper.get('[data-testid="ftt-range-12h"]').trigger('click'); await flushPromises()
+    expect(lastQuery()).toMatchObject({ range: '12h' })
+    expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('5 分钟一格')
+    const ticks12 = charts('Line')[0].props('options').scales.x.ticks
+    const labels12 = Array.from({ length: 144 }, (_, index) => ticks12.callback(0, index)).filter(Boolean)
+    expect(labels12).toHaveLength(12)
+    expect(labels12[0]).toBe('15:00')
+
+    api.getTrend.mockResolvedValue(rangeTrend('6h', 300, 72, '2026-11-05T07:00:00Z', '2026-11-05T13:00:00Z'))
+    await wrapper.get('[data-testid="ftt-range-6h"]').trigger('click'); await flushPromises()
+    const ticks6 = charts('Line')[0].props('options').scales.x.ticks
+    const labels6 = Array.from({ length: 72 }, (_, index) => ticks6.callback(0, index)).filter(Boolean)
+    expect(labels6).toHaveLength(12)
+    expect(labels6[0]).toBe('15:00')
+
+    api.getTrend.mockResolvedValue(trend({ range: '1h', step_seconds: 60, from: '2026-11-05T06:54:00Z', to: '2026-11-05T07:54:00Z', buckets: ['07:54', '07:55', '07:56', '07:57'].map(hm => bucket(`2026-11-05T${hm}:00Z`)) }))
     await wrapper.get('[data-testid="ftt-range-1h"]').trigger('click'); await flushPromises()
     expect(lastQuery()).toMatchObject({ range: '1h' })
     expect(wrapper.get('[data-testid="ftt-step"]').text()).toBe('1 分钟一格')
     expect([0, 1, 2, 3].map(i => charts('Line')[0].props('options').scales.x.ticks.callback(0, i))).toEqual(['', '15:55', '', ''])
   })
 
+  it('selects a >=10 min window on the overview, reloads by from/to, then cancels back to the range', async () => {
+    wrapper = mountView(); await flushPromises()
+    const before = wrapper.findAll('[data-testid="ftt-overview-line"]').map(line => line.attributes('points'))
+    expect(before.length).toBeGreaterThan(0)
+
+    dragOverview(100, 400)
+    await flushPromises()
+    expect(api.getTrend).toHaveBeenCalledTimes(2)
+    const query = lastQuery()
+    expect(query).toEqual({ group_id: 16, dimension: 'account', from: expect.any(String), to: expect.any(String) })
+    expect(query).not.toHaveProperty('range')
+    expect(query).not.toHaveProperty('metric')
+    expect(wrapper.get('[data-testid="ftt-selection-label"]').text()).toMatch(/^已框选 \d{2}:\d{2}–\d{2}:\d{2}$/)
+    expect(wrapper.find('[data-testid="ftt-overview-selection"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="ftt-range-2h"]').attributes('aria-checked')).toBe('false')
+    // 总览条仍是框选前那次请求的整段 buckets
+    expect(wrapper.findAll('[data-testid="ftt-overview-line"]').map(line => line.attributes('points'))).toEqual(before)
+
+    await wrapper.get('[data-testid="ftt-clear-selection"]').trigger('click'); await flushPromises()
+    expect(api.getTrend).toHaveBeenCalledTimes(3)
+    expect(lastQuery()).toEqual({ group_id: 16, range: '2h', dimension: 'account' })
+    expect(wrapper.find('[data-testid="ftt-selection-label"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="ftt-overview-selection"]').exists()).toBe(false)
+  })
+
+  it('accepts a selection of exactly 10 minutes', async () => {
+    wrapper = mountView(); await flushPromises()
+    // 2 小时范围约 119 分钟，1000px 里 85px 正好是 10 分钟出头。
+    dragOverview(0, 85)
+    await flushPromises()
+    expect(api.getTrend).toHaveBeenCalledTimes(2)
+    expect(lastQuery()).not.toHaveProperty('range')
+  })
+
+  it('does not request anything when the dragged window is under 10 minutes', async () => {
+    wrapper = mountView(); await flushPromises()
+    dragOverview(100, 120)
+    await flushPromises()
+    expect(api.getTrend).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-testid="ftt-selection-label"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="ftt-overview-selection"]').exists()).toBe(false)
+  })
+
+  it('keeps the overview and its highlight when the selected window has no samples', async () => {
+    wrapper = mountView(); await flushPromises()
+    const empty = trend()
+    api.getTrend.mockResolvedValue({
+      ...empty,
+      buckets: empty.buckets.map(item => ({ ...item, samples: 0, avg_ms: null, p50_ms: null, p80_ms: null, over10_pct: null })),
+      rows: [],
+      events: [],
+    })
+    dragOverview(100, 400); await flushPromises()
+    expect(wrapper.find('[data-testid="ftt-overview"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="ftt-overview-selection"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="ftt-selection-label"]').text()).toContain('已框选')
+  })
+
+  it('clears an active selection when a range button is clicked', async () => {
+    wrapper = mountView(); await flushPromises()
+    dragOverview(100, 400); await flushPromises()
+    await wrapper.get('[data-testid="ftt-range-6h"]').trigger('click'); await flushPromises()
+    expect(lastQuery()).toEqual({ group_id: 16, range: '6h', dimension: 'account' })
+    expect(wrapper.find('[data-testid="ftt-selection-label"]').exists()).toBe(false)
+  })
+
+  it('caps a 96 s spike at 20 s with a ▲ marker and shows the full range when capping is off', async () => {
+    api.getTrend.mockResolvedValue(spikeTrend(true))
+    wrapper = mountView(); await flushPromises()
+    const chart = () => charts('Line')[0]
+    expect(chart().props('options').scales.y.max).toBe(20)
+    expect(wrapper.get('[data-testid="ftt-trend-spike"]').text()).toContain('▲')
+    expect(wrapper.get('[data-testid="ftt-cap-spikes"]').attributes('aria-checked')).toBe('true')
+
+    await wrapper.get('[data-testid="ftt-cap-spikes"]').trigger('click'); await flushPromises()
+    expect(chart().props('options').scales.y.max).toBeGreaterThanOrEqual(96)
+    expect(wrapper.find('[data-testid="ftt-trend-spike"]').exists()).toBe(false)
+    expect(localStorage.getItem('ftt.capSpikes')).toBe('false')
+  })
+
+  it('leaves flat data unmarked at the 20 s floor', async () => {
+    api.getTrend.mockResolvedValue(spikeTrend(false))
+    wrapper = mountView(); await flushPromises()
+    expect(charts('Line')[0].props('options').scales.y.max).toBe(20)
+    expect(wrapper.find('[data-testid="ftt-trend-spike"]').exists()).toBe(false)
+  })
+
+  it('remembers the cap-spikes switch in localStorage and falls back to on when storage fails', async () => {
+    localStorage.setItem('ftt.capSpikes', 'false')
+    api.getTrend.mockResolvedValue(spikeTrend(true))
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.get('[data-testid="ftt-cap-spikes"]').attributes('aria-checked')).toBe('false')
+    expect(charts('Line')[0].props('options').scales.y.max).toBeGreaterThanOrEqual(96)
+
+    wrapper.unmount()
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
+    api.getTrend.mockResolvedValue(spikeTrend(true))
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.get('[data-testid="ftt-cap-spikes"]').attributes('aria-checked')).toBe('true')
+    getItem.mockRestore()
+  })
+
   it('notes when the concurrency limit is only the current value', async () => {
     api.getTrend.mockResolvedValue(trend({ limit_is_current: true }))
     wrapper = mountView(); await flushPromises()
     expect(wrapper.get('[data-testid="ftt-limit-current"]').text()).toBe(zhFirstTokenTrend.concurrency.limitIsCurrent)
+  })
+
+  it('pauses auto refresh while a window is selected and resumes after cancelling', async () => {
+    // 只假定时器，不假 setTimeout / setImmediate，否则 flushPromises 会卡住。
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      wrapper = mountView(); await flushPromises()
+      expect(api.getTrend).toHaveBeenCalledTimes(1)
+
+      dragOverview(100, 400); await flushPromises()
+      expect(api.getTrend).toHaveBeenCalledTimes(2)
+      expect(wrapper.find('[data-testid="ftt-selection-label"]').exists()).toBe(true)
+
+      // 框选期间过了两个刷新周期也不该发请求。
+      vi.advanceTimersByTime(130000); await flushPromises()
+      expect(api.getTrend).toHaveBeenCalledTimes(2)
+
+      await wrapper.get('[data-testid="ftt-clear-selection"]').trigger('click'); await flushPromises()
+      expect(api.getTrend).toHaveBeenCalledTimes(3)
+
+      // 取消框选后自动刷新恢复。
+      vi.advanceTimersByTime(130000); await flushPromises()
+      expect(api.getTrend.mock.calls.length).toBeGreaterThan(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

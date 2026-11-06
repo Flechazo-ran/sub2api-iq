@@ -21,13 +21,24 @@ export default {
     '30m': '30 分钟',
     '1h': '1 小时',
     '2h': '2 小时',
+    '6h': '6 小时',
+    '12h': '12 小时',
   },
   step: {
     minutes: '{n} 分钟一格',
     hours: '{n} 小时一格',
     seconds: '{n} 秒一格',
   },
-  metricHint: '和使用记录页的首字一致，从请求进网关算，含上传请求体的时间',
+  metricHint: '首字和使用记录页一致，从请求进网关算，含上传请求体的时间',
+  capSpikes: '压住尖峰',
+  selection: {
+    label: '已框选 {from}–{to}',
+    clear: '取消框选',
+  },
+  overview: {
+    title: '总览',
+    hint: '当前范围的 p50；按住拖动框选一段时间，上面的图只显示这一段',
+  },
   series: {
     avg: '平均',
     p50: 'p50',
@@ -50,7 +61,7 @@ export default {
     concurrency: '并发上限变动',
     status: '号状态变动',
     threshold: '10 秒判慢线',
-    thresholdShort: '10 秒判慢线',
+    spike: '{count} 个点超出纵轴',
   },
   concurrency: {
     title: '同时在跑的请求数',

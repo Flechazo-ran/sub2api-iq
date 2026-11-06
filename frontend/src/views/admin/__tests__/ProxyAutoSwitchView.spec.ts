@@ -3,7 +3,7 @@ import { createI18n } from 'vue-i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProxyAutoSwitchView from '../ProxyAutoSwitchView.vue'
 import zhProxyAutoSwitch from '@/i18n/locales/zh/proxyAutoSwitch'
-import type { ProxyAutoSwitchConfig, ProxyAutoSwitchEvent, ProxyAutoSwitchStatus } from '@/api/admin/proxyAutoSwitch'
+import type { ProxyAutoSwitchConfig, ProxyAutoSwitchEvent, ProxyAutoSwitchStatus, ProxyAutoSwitchUpdate } from '@/api/admin/proxyAutoSwitch'
 
 const { api, getAllGroups } = vi.hoisted(() => ({
   api: { getConfig: vi.fn(), updateConfig: vi.fn(), listEvents: vi.fn(), revertEvent: vi.fn(), listRecent: vi.fn() },
@@ -19,6 +19,12 @@ const statusText: Record<string, string> = Object.fromEntries(Object.entries(zhP
 
 function config(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitchConfig {
   return { enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_minutes: 10, max_switches_per_hour: 5, observe_minutes: 10, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [16], ...overrides }
+}
+// PUT 不再带 metric。
+function updateExpectation(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitchUpdate {
+  const value: ProxyAutoSwitchConfig = config(overrides)
+  delete value.metric
+  return value
 }
 function event(id: number, status: ProxyAutoSwitchStatus, overrides: Partial<ProxyAutoSwitchEvent> = {}): ProxyAutoSwitchEvent {
   const switched = status !== 'no_candidate' && status !== 'failed'
@@ -58,7 +64,7 @@ beforeEach(() => {
 afterEach(() => wrapper?.unmount())
 
 describe('ProxyAutoSwitchView settings', () => {
-  it('loads the saved config with two modes, the metric choice and only OpenAI groups', async () => {
+  it('loads the saved config with two modes and only OpenAI groups, without a metric choice', async () => {
     wrapper = mountView(); await flushPromises()
     expect(api.getConfig).toHaveBeenCalledTimes(1)
     expect(getAllGroups).toHaveBeenCalledWith('openai')
@@ -66,12 +72,9 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.find('[role="radiogroup"]').findAll('button').map(button => button.text())).toEqual(['关闭', '自动换代理'])
     expect(wrapper.get('[data-testid="pas-mode-off"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.text()).not.toContain('只记录建议')
-    const metric = wrapper.get('[data-testid="pas-metric"]')
-    expect(metric.findAll('button').map(button => button.text())).toEqual(['使用记录首字', '上游首字', '响应头时间'])
-    expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('false')
-    expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toBe(zhProxyAutoSwitch.metricHint.response_headers)
-    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里响应头时间的中位数')
+    expect(wrapper.find('[data-testid="pas-metric"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pas-metric-note"]').text()).toBe('判慢用使用记录首字（和使用记录页一致，含上传请求体的时间）')
+    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里使用记录首字的中位数')
     expect((wrapper.get('[data-testid="pas-threshold_s"]').element as HTMLInputElement).value).toBe('2.5')
     expect((wrapper.get('[data-testid="pas-window_minutes"]').element as HTMLInputElement).value).toBe('10')
     const chips = wrapper.findAll('[data-testid="pas-groups"] label')
@@ -112,7 +115,8 @@ describe('ProxyAutoSwitchView settings', () => {
     await flushPromises()
     expect(api.updateConfig).toHaveBeenCalledTimes(1)
     const payload = api.updateConfig.mock.calls[0][0] as Record<string, unknown>
-    expect(payload).toEqual(config({ account_cooldown_minutes: 15 }))
+    expect(payload).toEqual(updateExpectation({ account_cooldown_minutes: 15 }))
+    expect(payload).not.toHaveProperty('metric')
     expect(payload).not.toHaveProperty('account_cooldown_hours')
     expect((wrapper.get('[data-testid="pas-account_cooldown_minutes"]').element as HTMLInputElement).value).toBe('15')
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
@@ -137,24 +141,18 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-dirty"]').text()).toBe('有未保存的修改')
     await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
     await flushPromises()
-    expect(api.updateConfig).toHaveBeenCalledWith(config({ enabled: true, threshold_ms: 3000, observe_minutes: 20, group_ids: [16, 20], region_policy: 'same_only' }))
+    expect(api.updateConfig).toHaveBeenCalledWith(updateExpectation({ enabled: true, threshold_ms: 3000, observe_minutes: 20, group_ids: [16, 20], region_policy: 'same_only' }))
     expect(wrapper.get('[data-testid="pas-state"]').text()).toBe('运行中 · 自动换代理')
     expect(wrapper.get('[data-testid="pas-notice"]').text()).toContain('设置已保存')
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
   })
 
-  it('switches the metric to first token with a threshold in seconds and saves both', async () => {
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+  it('saves without a metric and still validates the threshold range', async () => {
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchUpdate) => body)
     wrapper = mountView(); await flushPromises()
-    await wrapper.get('[data-testid="pas-metric-first_token"]').trigger('click')
-    expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('false')
-    const hint = wrapper.get('[data-testid="pas-metric-hint"]').text()
-    expect(hint).toContain('含模型思考时间')
-    expect(hint).toContain('不含上传时间')
-    expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里上游首字时间的中位数')
-    expect(wrapper.get('[data-testid="pas-hint-observe"]').text()).toContain('上游首字时间中位数降到换前的 80% 及以下记「变快了」')
+    expect(wrapper.find('[data-testid="pas-metric"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pas-metric-usage_first_token"]').exists()).toBe(false)
 
     // Up to 120 s is allowed now; above that is blocked.
     await wrapper.get('[data-testid="pas-threshold_s"]').setValue('121')
@@ -164,18 +162,14 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-dirty"]').text()).toBe('有未保存的修改')
     await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
     await flushPromises()
-    expect(api.updateConfig).toHaveBeenCalledWith(config({ metric: 'first_token', threshold_ms: 10000 }))
+    const payload = api.updateConfig.mock.calls[0][0] as Record<string, unknown>
+    expect(payload).not.toHaveProperty('metric')
+    expect(payload).toEqual(updateExpectation({ threshold_ms: 10000 }))
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
-
-    // Discarding goes back to the saved metric.
-    await wrapper.get('[data-testid="pas-metric-response_headers"]').trigger('click')
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
-    await wrapper.get('[data-testid="pas-discard"]').trigger('click')
-    expect(wrapper.get('[data-testid="pas-metric-first_token"]').attributes('aria-checked')).toBe('true')
   })
 
   it('edits the 11-06 rules: usage-log first token, any region and 0 = no limit', async () => {
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchUpdate) => body)
     wrapper = mountView(); await flushPromises()
     for (const [key, label] of [
       ['max_switches_per_hour', '每小时上限（0 = 不限）'],
@@ -190,8 +184,7 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.text()).not.toContain('快 20%')
 
     await wrapper.get('[data-testid="pas-mode-auto"]').trigger('click')
-    await wrapper.get('[data-testid="pas-metric-usage_first_token"]').trigger('click')
-    expect(wrapper.get('[data-testid="pas-metric-hint"]').text()).toBe('和使用记录页、首字趋势的首字一致：从请求进网关算，含上传请求体的时间和模型思考时间。')
+    expect(wrapper.get('[data-testid="pas-metric-note"]').text()).toBe('判慢用使用记录首字（和使用记录页一致，含上传请求体的时间）')
     expect(wrapper.get('[data-testid="pas-hint-threshold"]').text()).toBe('看窗口里使用记录首字的中位数')
     await wrapper.get('[data-testid="pas-window_minutes"]').setValue('5')
     await wrapper.get('[data-testid="pas-min_samples"]').setValue('1')
@@ -207,11 +200,12 @@ describe('ProxyAutoSwitchView settings', () => {
     await wrapper.get('[data-testid="pas-region"]').setValue('any')
     await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
     await flushPromises()
-    expect(api.updateConfig).toHaveBeenCalledWith(config({
-      enabled: true, metric: 'usage_first_token', window_minutes: 5, min_samples: 1, threshold_ms: 10000, consecutive_checks: 2,
+    expect(api.updateConfig).toHaveBeenCalledWith(updateExpectation({
+      enabled: true, window_minutes: 5, min_samples: 1, threshold_ms: 10000, consecutive_checks: 2,
       min_improvement_pct: 0, account_cooldown_minutes: 0, max_switches_per_hour: 0, observe_minutes: 0, min_days_to_expiry: 0, region_policy: 'any',
     }))
-    expect((wrapper.get('[data-testid="pas-metric-usage_first_token"]').attributes('aria-checked'))).toBe('true')
+    expect((api.updateConfig.mock.calls[0][0] as Record<string, unknown>)).not.toHaveProperty('metric')
+    expect(wrapper.get('[data-testid="pas-mode-auto"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
 
     // Negative values are still out of range.
@@ -226,18 +220,17 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(rowFor(2).get('[data-testid="pas-status"]').text()).toBe('没找到能用的空闲代理')
   })
 
-  it('treats a config without metric (older backend) as response headers', async () => {
-    const legacy: Partial<ProxyAutoSwitchConfig> = config()
-    delete legacy.metric
-    api.getConfig.mockResolvedValue(legacy)
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+  it('ignores the saved metric and always saves without it', async () => {
+    api.getConfig.mockResolvedValue(config({ metric: 'first_token' }))
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchUpdate) => body)
     wrapper = mountView(); await flushPromises()
-    expect(wrapper.get('[data-testid="pas-metric-response_headers"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('[data-testid="pas-metric"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
     await wrapper.get('[data-testid="pas-min_samples"]').setValue('20')
     await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
     await flushPromises()
-    expect(api.updateConfig).toHaveBeenCalledWith(config({ min_samples: 20 }))
+    expect(api.updateConfig).toHaveBeenCalledWith(updateExpectation({ min_samples: 20 }))
+    expect(api.updateConfig.mock.calls[0][0]).not.toHaveProperty('metric')
   })
 
   it('shows the backend message when saving fails and keeps the edits', async () => {

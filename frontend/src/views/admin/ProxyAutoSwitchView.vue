@@ -20,12 +20,8 @@
             </div>
           </div>
           <div class="field-grid">
-            <div class="field">
-              <span id="pas-metric-label" class="field-label">{{ t('proxyAutoSwitch.slowMetric') }}</span>
-              <div class="mode-switch metric-switch" role="radiogroup" aria-labelledby="pas-metric-label" data-testid="pas-metric">
-                <button v-for="metric in metrics" :key="metric" type="button" role="radio" :aria-checked="draft.metric === metric" :class="{ on: draft.metric === metric }" :data-testid="`pas-metric-${metric}`" @click="draft.metric = metric">{{ t(`proxyAutoSwitch.metric.${metric}`) }}</button>
-              </div>
-              <span class="field-hint" data-testid="pas-metric-hint">{{ t(`proxyAutoSwitch.metricHint.${draft.metric}`) }}</span>
+            <div class="field metric-note-field">
+              <span class="metric-note" data-testid="pas-metric-note">{{ t('proxyAutoSwitch.metricFixed') }}</span>
             </div>
             <div v-for="card in cards" :key="card.id" class="field">
               <label class="field-label" :for="`pas-${card.primary.key}`">{{ t(card.label) }}</label>
@@ -35,7 +31,7 @@
                 <label class="sub-field" :for="`pas-${card.sub.key}`"><span>{{ t(card.sub.label) }}</span><span class="field-input"><input :id="`pas-${card.sub.key}`" v-model.number="draft[card.sub.key]" type="number" class="input num-input" :min="ranges[card.sub.key].min" :max="ranges[card.sub.key].max" step="1" :aria-invalid="fieldError(card.sub.key) ? 'true' : undefined" :data-testid="`pas-${card.sub.key}`" /><span>{{ t(card.sub.unit) }}</span></span></label>
                 <span v-if="fieldError(card.sub.key)" class="field-error">{{ fieldError(card.sub.key) }}</span>
               </template>
-              <span v-if="card.hint" class="field-hint" :data-testid="`pas-hint-${card.id}`">{{ t(hintKey(card), { metric: t(`proxyAutoSwitch.metricName.${draft.metric}`) }) }}</span>
+              <span v-if="card.hint" class="field-hint" :data-testid="`pas-hint-${card.id}`">{{ t(hintKey(card)) }}</span>
             </div>
           </div>
           <div class="field-grid field-grid-wide">
@@ -140,7 +136,7 @@ import RoutingNav from '@/components/admin/operations/RoutingNav.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { getAll as getAllGroups } from '@/api/admin/groups'
-import { proxyAutoSwitchAPI, type ProxyAutoSwitchConfig, type ProxyAutoSwitchEvent, type ProxyAutoSwitchMetric, type ProxyAutoSwitchRegionPolicy, type ProxyAutoSwitchStatus } from '@/api/admin/proxyAutoSwitch'
+import { proxyAutoSwitchAPI, type ProxyAutoSwitchConfig, type ProxyAutoSwitchEvent, type ProxyAutoSwitchMetric, type ProxyAutoSwitchRegionPolicy, type ProxyAutoSwitchStatus, type ProxyAutoSwitchUpdate } from '@/api/admin/proxyAutoSwitch'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 const { t, te } = useI18n()
@@ -148,7 +144,7 @@ const PAGE_SIZE = 50
 
 // 表单里阈值按秒填，提交时换回 threshold_ms；其余字段与后端同名。
 type NumericKey = 'window_minutes' | 'min_samples' | 'threshold_s' | 'consecutive_checks' | 'min_improvement_pct' | 'account_cooldown_minutes' | 'max_switches_per_hour' | 'observe_minutes' | 'min_days_to_expiry'
-type Draft = Record<NumericKey, number | string> & { enabled: boolean; metric: ProxyAutoSwitchMetric; region_policy: ProxyAutoSwitchRegionPolicy; group_ids: number[] }
+type Draft = Record<NumericKey, number | string> & { enabled: boolean; region_policy: ProxyAutoSwitchRegionPolicy; group_ids: number[] }
 interface NumberSpec { key: NumericKey; unit: string; step?: number }
 // hintZero：主输入填 0（不限）时换成这条说明。
 interface FieldCard { id: string; label: string; prefix?: string; primary: NumberSpec; sub?: NumberSpec & { label: string }; hint?: string; hintZero?: string }
@@ -174,6 +170,7 @@ const cards: FieldCard[] = [
 ]
 const modes = [{ id: 'off', value: false, label: 'proxyAutoSwitch.modeOff' }, { id: 'auto', value: true, label: 'proxyAutoSwitch.modeAuto' }]
 const regionPolicies: ProxyAutoSwitchRegionPolicy[] = ['prefer_same', 'same_only', 'any']
+// 判慢口径固定用使用记录首字；旧记录的 metric 只用来在日志里标一下当时按什么判的。
 const metrics: ProxyAutoSwitchMetric[] = ['usage_first_token', 'first_token', 'response_headers']
 // 后端没给或给了不认识的值（旧版本），按响应头算。
 function metricOf(value: string | null | undefined): ProxyAutoSwitchMetric { return metrics.find(metric => metric === value) ?? 'response_headers' }
@@ -183,24 +180,24 @@ const tones: Record<ProxyAutoSwitchStatus, string> = { observing: 'tone-info', k
 
 function toDraft(config: ProxyAutoSwitchConfig): Draft {
   return {
-    enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, metric: metricOf(config.metric), threshold_s: config.threshold_ms / 1000,
+    enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, threshold_s: config.threshold_ms / 1000,
     consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_minutes: config.account_cooldown_minutes,
     max_switches_per_hour: config.max_switches_per_hour, observe_minutes: config.observe_minutes, min_days_to_expiry: config.min_days_to_expiry,
     region_policy: config.region_policy, group_ids: [...(config.group_ids ?? [])],
   }
 }
-// 固定键顺序、分组去重排序，方便比对是否改过。
-function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchConfig {
+// 固定键顺序、分组去重排序，方便比对是否改过；保存时不再带 metric。
+function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchUpdate {
   return {
-    enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, metric: metricOf(config.metric), threshold_ms: config.threshold_ms,
+    enabled: config.enabled, window_minutes: config.window_minutes, min_samples: config.min_samples, threshold_ms: config.threshold_ms,
     consecutive_checks: config.consecutive_checks, min_improvement_pct: config.min_improvement_pct, account_cooldown_minutes: config.account_cooldown_minutes,
     max_switches_per_hour: config.max_switches_per_hour, observe_minutes: config.observe_minutes, min_days_to_expiry: config.min_days_to_expiry,
     region_policy: config.region_policy, group_ids: [...new Set(config.group_ids ?? [])].sort((a, b) => a - b),
   }
 }
-function toPayload(): ProxyAutoSwitchConfig {
+function toPayload(): ProxyAutoSwitchUpdate {
   return canonical({
-    enabled: draft.enabled, window_minutes: Number(draft.window_minutes), min_samples: Number(draft.min_samples), metric: draft.metric, threshold_ms: Math.round(Number(draft.threshold_s) * 1000),
+    enabled: draft.enabled, window_minutes: Number(draft.window_minutes), min_samples: Number(draft.min_samples), threshold_ms: Math.round(Number(draft.threshold_s) * 1000),
     consecutive_checks: Number(draft.consecutive_checks), min_improvement_pct: Number(draft.min_improvement_pct), account_cooldown_minutes: Number(draft.account_cooldown_minutes),
     max_switches_per_hour: Number(draft.max_switches_per_hour), observe_minutes: Number(draft.observe_minutes), min_days_to_expiry: Number(draft.min_days_to_expiry),
     region_policy: draft.region_policy, group_ids: draft.group_ids,
@@ -210,7 +207,7 @@ function toPayload(): ProxyAutoSwitchConfig {
 const saved = ref<ProxyAutoSwitchConfig | null>(null)
 // 「没找到快 N% 的代理」跟着已保存的「至少快」走，没加载到配置时按默认 30。
 const savedImprovementPct = computed(() => saved.value?.min_improvement_pct ?? 30)
-const draft = reactive<Draft>(toDraft({ enabled: false, window_minutes: 10, min_samples: 10, metric: 'response_headers', threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_minutes: 10, max_switches_per_hour: 5, observe_minutes: 10, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [] }))
+const draft = reactive<Draft>(toDraft({ enabled: false, window_minutes: 10, min_samples: 10, threshold_ms: 2500, consecutive_checks: 2, min_improvement_pct: 30, account_cooldown_minutes: 10, max_switches_per_hour: 5, observe_minutes: 10, min_days_to_expiry: 7, region_policy: 'prefer_same', group_ids: [] }))
 const configLoading = ref(false), configError = ref(''), saving = ref(false), saveError = ref(''), notice = ref('')
 const groups = ref<{ id: number; name: string }[]>([]), groupsLoaded = ref(false), groupsError = ref(false)
 let disposed = false
@@ -387,7 +384,8 @@ onUnmounted(() => { disposed = true })
 fieldset.field { @apply m-0; }
 .field-label { @apply text-xs font-medium text-gray-500 dark:text-gray-400; }
 fieldset.field > legend { @apply float-left mb-2 w-full p-0; }
-.metric-switch { @apply self-start; }
+.metric-note-field { @apply justify-center; }
+.metric-note { @apply text-sm leading-6 text-gray-700 dark:text-gray-200; }
 .field-input { @apply inline-flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-300; }
 .num-input { width: 6.5rem; @apply rounded-lg px-3 py-1.5 text-base font-semibold tabular-nums; }
 .num-input[aria-invalid='true'] { @apply border-red-400 focus:border-red-500 focus:ring-red-500/30 dark:border-red-700; }
