@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -27,10 +29,17 @@ func TestProxyAutoSwitchAdminRoutesRegistered(t *testing.T) {
 		"GET /api/v1/admin/proxy-autoswitch/config",
 		"PUT /api/v1/admin/proxy-autoswitch/config",
 		"GET /api/v1/admin/proxy-autoswitch/events",
-		"POST /api/v1/admin/proxy-autoswitch/events/:id/revert",
 		"GET /api/v1/admin/proxy-autoswitch/recent",
 		"GET /api/v1/admin/proxy-autoswitch/accounts",
+		"GET /api/v1/admin/proxy-autoswitch/proxies",
 	} {
 		require.True(t, registered[want], want)
 	}
+	require.False(t, registered["POST /api/v1/admin/proxy-autoswitch/events/:id/revert"])
+
+	// 换回接口已经删掉，请求它返回 404。
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/proxy-autoswitch/events/12/revert", nil)
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }

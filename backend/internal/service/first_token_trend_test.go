@@ -22,9 +22,16 @@ func TestNormalizeFirstTokenTrendQueryDefaultsAndRejects(t *testing.T) {
 		require.Equal(t, rng, q.Range, rng)
 	}
 
+	accountID := int64(98)
+	q, err = NormalizeFirstTokenTrendQuery(FirstTokenTrendQuery{AccountID: &accountID})
+	require.NoError(t, err)
+	require.NotNil(t, q.AccountID)
+	require.Equal(t, int64(98), *q.AccountID)
+
 	for _, bad := range []FirstTokenTrendQuery{
 		{Range: "13h"}, {Range: "24h"}, {Range: "7d"}, {Range: "1d"},
 		{Metric: "switch"}, {Metric: "p50"}, {Metric: "USAGE"}, {Dimension: "user"}, {GroupID: -1},
+		{AccountID: fttI64(0)}, {AccountID: fttI64(-3)},
 	} {
 		_, err := NormalizeFirstTokenTrendQuery(bad)
 		require.Error(t, err, "%+v", bad)
@@ -161,6 +168,156 @@ func TestFirstTokenTrendEmptyBucketsAreFilled(t *testing.T) {
 	// 变动前 10 分钟要用 from 之前的样本
 	require.True(t, repo.usageFrom.Equal(fttAt(14, 53, 0)))
 	require.False(t, repo.withIDs)
+}
+
+// 传 account_id 时，样本、拆段、同时在跑、并发上限合计、rows、events 都只算这个号；
+// accounts 仍给这个分组所有未删除的号（给前端做下拉）。
+func TestFirstTokenTrendAccountFilterScopesEverything(t *testing.T) {
+	now := fttAt(16, 2, 0)
+	f := func(v float64) *float64 { return &v }
+	a98 := FirstTokenTrendAccount{ID: 98, Name: "acc98", Status: StatusActive, Schedulable: true, Concurrency: 100,
+		ProxyID: fttI64(121), CreatedAt: fttAt(8, 0, 0)}
+	a97 := FirstTokenTrendAccount{ID: 97, Name: "acc97", Status: StatusActive, Schedulable: true, Concurrency: 50,
+		ProxyID: fttI64(122), CreatedAt: fttAt(8, 0, 0)}
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{a98, a97},
+		usage: []FirstTokenTrendUsageSample{
+			fttUsage(fttAt(15, 40, 0), 98, 2000, "gpt-6-sol"),  // 同时在跑 3 秒
+			fttUsage(fttAt(15, 40, 30), 97, 9000, "gpt-6-sol"), // 同时在跑 10 秒，筛选后不算
+		},
+		traces: []FirstTokenTrendTraceSample{
+			{StartedAt: fttAt(15, 40, 0), AccountID: 98, ProxyID: 77, HeadMS: f(300), UploadMS: f(2000), AfterMS: 6000},
+			{StartedAt: fttAt(15, 40, 30), AccountID: 97, ProxyID: 78, HeadMS: f(9000), UploadMS: f(8000), AfterMS: 9000},
+		},
+		audits: []FirstTokenTrendAuditWrite{
+			{CreatedAt: fttAt(15, 50, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":99}`},
+			{CreatedAt: fttAt(15, 51, 0), Action: fttActionUpdate, ParamID: "98", RequestBody: `{"proxy_id":77}`},
+			{CreatedAt: fttAt(15, 50, 0), Action: fttActionUpdate, ParamID: "97", RequestBody: `{"proxy_id":100}`},
+			{CreatedAt: fttAt(15, 52, 0), Action: fttActionUpdate, ParamID: "97", RequestBody: `{"proxy_id":101}`},
+		},
+	}
+	svc := newFttService(repo, now)
+	res, err := svc.Query(context.Background(), FirstTokenTrendQuery{Range: "1h", AccountID: fttI64(98)})
+	require.NoError(t, err)
+	require.NotNil(t, res.AccountID)
+	require.Equal(t, int64(98), *res.AccountID)
+	require.Len(t, res.Accounts, 2, "accounts 不受筛选影响，给全量")
+	require.Equal(t, FirstTokenTrendAccountOption{ID: 98, Label: "#98 acc98", Status: StatusActive, Schedulable: true}, res.Accounts[0])
+	require.Equal(t, FirstTokenTrendAccountOption{ID: 97, Label: "#97 acc97", Status: StatusActive, Schedulable: true}, res.Accounts[1])
+
+	i := int(fttAt(15, 40, 0).Sub(res.From) / time.Minute)
+	b := res.Buckets[i]
+	require.Equal(t, 1, b.Samples, "只算 98 的首字样本")
+	require.Equal(t, int64(2000), *b.AvgMS)
+	require.Equal(t, int64(2000), *b.P50MS)
+	require.Equal(t, int64(300), *b.HeadP50MS, "拆段只算 98 的 trace")
+	require.Equal(t, int64(2000), *b.UploadP50MS)
+	require.Equal(t, int64(6000), *b.AfterP50MS)
+	require.InDelta(t, 3.0/60, b.InflightAvg, 0.001, "同时在跑只算 98 的 3 秒")
+	for _, bucket := range res.Buckets {
+		require.Equal(t, int64(100), bucket.ConcurrencyLimitSum, "并发上限合计只算 98")
+	}
+
+	require.Len(t, res.Rows, 1, "rows 只保留筛选的号")
+	require.Equal(t, "98", res.Rows[0].Key)
+	require.Equal(t, "#98 acc98", res.Rows[0].Label)
+	require.Equal(t, 1, res.Rows[0].Samples)
+
+	require.Len(t, res.Events, 1, "events 只要 98 的")
+	require.Equal(t, int64(98), res.Events[0].AccountID)
+
+	// 不传 account_id：和以前一样，整个分组所有号合在一起。
+	all, err := svc.Query(context.Background(), FirstTokenTrendQuery{Range: "1h"})
+	require.NoError(t, err)
+	require.Nil(t, all.AccountID)
+	require.Len(t, all.Accounts, 2)
+	require.Len(t, all.Rows, 2)
+	allBucket := all.Buckets[i]
+	require.Equal(t, 2, allBucket.Samples)
+	require.Equal(t, int64(5500), *allBucket.AvgMS)
+	require.Equal(t, int64(4650), *allBucket.HeadP50MS)
+	require.InDelta(t, 0.22, allBucket.InflightAvg, 0.001, "13 秒 ÷ 60 秒，保留两位")
+	for _, bucket := range all.Buckets {
+		require.Equal(t, int64(150), bucket.ConcurrencyLimitSum)
+	}
+	require.Len(t, all.Events, 2, "两个号各一条变动")
+
+	// 和 from/to 组合：自定义时间段里也只算 98 的样本。
+	from, to := fttAt(15, 35, 0), fttAt(15, 45, 0)
+	custom, err := svc.Query(context.Background(), FirstTokenTrendQuery{
+		AccountID: fttI64(98), From: from.Format(time.RFC3339), To: to.Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "custom", custom.Range)
+	customSamples := 0
+	for _, bucket := range custom.Buckets {
+		customSamples += bucket.Samples
+	}
+	require.Equal(t, 1, customSamples, "97 的样本不进来")
+}
+
+// 按代理 / 模型拆时，account_id 同样只算这个号：样本和 rows 都只保留这个号的代理 / 模型。
+func TestFirstTokenTrendAccountFilterProxyAndModelDimension(t *testing.T) {
+	now := fttAt(16, 2, 0)
+	a98 := FirstTokenTrendAccount{ID: 98, Name: "acc98", Status: StatusActive, Schedulable: true, Concurrency: 100,
+		ProxyID: fttI64(121), CreatedAt: fttAt(8, 0, 0)}
+	a97 := FirstTokenTrendAccount{ID: 97, Name: "acc97", Status: StatusActive, Schedulable: true, Concurrency: 50,
+		ProxyID: fttI64(122), CreatedAt: fttAt(8, 0, 0)}
+	u98 := fttUsage(fttAt(15, 40, 0), 98, 2000, "gpt-6-sol")
+	u98.RequestID = "r-98"
+	u97 := fttUsage(fttAt(15, 40, 30), 97, 9000, "gpt-6-terra")
+	u97.RequestID = "r-97"
+	repo := &fttFakeRepo{
+		accounts: []FirstTokenTrendAccount{a98, a97},
+		usage:    []FirstTokenTrendUsageSample{u98, u97},
+		traces: []FirstTokenTrendTraceSample{
+			{StartedAt: fttAt(15, 40, 0), AccountID: 98, ProxyID: 121, RequestID: "r-98", AfterMS: 6000},
+			{StartedAt: fttAt(15, 40, 30), AccountID: 97, ProxyID: 122, RequestID: "r-97", AfterMS: 9000},
+		},
+	}
+	svc := newFttService(repo, now)
+
+	byProxy, err := svc.Query(context.Background(), FirstTokenTrendQuery{
+		Range: "1h", AccountID: fttI64(98), Dimension: "proxy",
+	})
+	require.NoError(t, err)
+	require.Len(t, byProxy.Accounts, 2, "accounts 不受筛选影响，给全量")
+	proxyRows := map[string]FirstTokenTrendRow{}
+	for _, row := range byProxy.Rows {
+		proxyRows[row.Key] = row
+	}
+	require.NotContains(t, proxyRows, "122", "97 挂的代理不能有行")
+	row121, ok := proxyRows["121"]
+	require.True(t, ok, "98 挂的代理要有行")
+	require.Equal(t, 1, row121.Samples)
+	require.Equal(t, "121", row121.Key)
+
+	byModel, err := svc.Query(context.Background(), FirstTokenTrendQuery{
+		Range: "1h", AccountID: fttI64(98), Dimension: "model",
+	})
+	require.NoError(t, err)
+	require.Len(t, byModel.Rows, 1, "只保留 98 用过的模型")
+	require.Equal(t, "gpt-6-sol", byModel.Rows[0].Key)
+	require.Equal(t, 1, byModel.Rows[0].Samples)
+	for _, row := range byModel.Rows {
+		require.NotEqual(t, "gpt-6-terra", row.Key, "97 用的模型不能有行")
+	}
+}
+
+// ListGroupAccounts 只返回这个分组里未删除的号，查不到的号（不在这组里，或已删除）都会
+// 返回 400。这里的 fake 仓储和真实 ListGroupAccounts 一样不返回已删除的号，所以只能证明
+// 「查不到的号 → 400」；已删除的号是否被排除由仓储集成测试
+// TestFirstTokenTrendRepositoryIntegration 覆盖。
+func TestFirstTokenTrendAccountFilterRejectsOutsideGroup(t *testing.T) {
+	now := fttAt(16, 2, 0)
+	repo := &fttFakeRepo{accounts: []FirstTokenTrendAccount{
+		{ID: 98, Name: "acc98", Status: StatusActive, Schedulable: true},
+	}}
+	for _, id := range []int64{97} {
+		_, err := newFttService(repo, now).Query(context.Background(), FirstTokenTrendQuery{AccountID: fttI64(id)})
+		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err), id)
+		require.Contains(t, err.Error(), "不在分组", id)
+	}
 }
 
 func TestFirstTokenTrendGroupNotFound(t *testing.T) {

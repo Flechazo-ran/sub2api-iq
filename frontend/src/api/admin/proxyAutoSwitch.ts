@@ -1,86 +1,105 @@
 import { apiClient } from '../client'
 
-// 代理优选（首字或响应头慢自动换代理）。字段与后端约定一致，见 proxy-autoswitch-contract.md。
+// 代理优选 v2：按每个号在当前代理上的使用记录首字判断，从候选代理池里换代理。
+// 字段与后端约定一致，见 proxy-autoswitch-v2-contract.md。
 const base = '/admin/proxy-autoswitch'
 
-export type ProxyAutoSwitchRegionPolicy = 'prefer_same' | 'same_only' | 'any'
-// 判慢指标：usage_first_token = 使用记录首字（usage_logs.first_token_ms，和使用记录页、首字趋势一致，含上传）；
-// first_token / response_headers 只用于展示旧记录。配置的判慢口径已固定为 usage_first_token。
-export type ProxyAutoSwitchMetric = 'usage_first_token' | 'response_headers' | 'first_token'
+export type ProxyAutoSwitchStrategy = 'random' | 'sequential' | 'region'
 
 export interface ProxyAutoSwitchConfig {
   enabled: boolean
+  group_ids: number[]
   window_minutes: number
   min_samples: number
-  // 后端固定返回 usage_first_token；PUT 不再传这个字段（传了也会被忽略）。
-  metric?: ProxyAutoSwitchMetric
-  threshold_ms: number
-  consecutive_checks: number
-  // 0 = 不比当前代理，直接挑测速最快的空闲代理。
-  min_improvement_pct: number
-  // 同一个号两次自动换代理至少隔几分钟（0–1440，0 = 不冷却）；没换成后也隔这么久再试。
-  account_cooldown_minutes: number
-  // 全站每小时上限（0–50，0 = 不限）。
-  max_switches_per_hour: number
-  // 换完观察几分钟（0–60）；0 = 观察不拦号，按统计窗口记一次效果。
-  observe_minutes: number
-  min_days_to_expiry: number
-  region_policy: ProxyAutoSwitchRegionPolicy
-  group_ids: number[]
+  p60_threshold_ms: number
+  mean_threshold_ms: number
+  candidate_proxy_ids: number[]
+  strategy: ProxyAutoSwitchStrategy
 }
 
-// 保存配置时不带 metric。
-export type ProxyAutoSwitchUpdate = Omit<ProxyAutoSwitchConfig, 'metric'>
+export type ProxyAutoSwitchUpdate = ProxyAutoSwitchConfig
 
+// 新记录的状态；observing / kept 等是旧记录的状态，老数据照常返回。
 export type ProxyAutoSwitchStatus =
+  | 'measuring'
+  | 'done'
+  | 'no_candidate'
+  | 'failed'
   | 'observing'
   | 'kept'
   | 'kept_insufficient'
-  // 观察下来没变快：不换回，还慢就过了冷却接着换
   | 'not_faster'
-  // reverted / revert_skipped 只在旧记录里出现，自动流程不再换回
   | 'reverted'
   | 'revert_skipped'
-  | 'no_candidate'
-  | 'failed'
   | 'manual_revert'
 
-export interface ProxyAutoSwitchCandidate {
-  proxy_id: number
-  label: string
-  region: string
-  probe_ms: number | null
-  error: string
+export type ProxyAutoSwitchAccountState = 'ok' | 'insufficient' | 'slow' | 'unavailable' | 'no_proxy'
+
+export interface ProxyAutoSwitchEventStats {
+  samples: number | null
+  p60_ms: number | null
+  mean_ms: number | null
+  duration_mean_ms: number | null
 }
 
 export interface ProxyAutoSwitchEvent {
   id: number
   created_at: string
-  updated_at: string
+  switched_at: string | null
+  status: ProxyAutoSwitchStatus
   account_id: number
   account_name: string
-  status: ProxyAutoSwitchStatus
-  // 这条记录按哪个指标判的慢（换前 p50 和换后 p50 都是这个指标）
-  metric: ProxyAutoSwitchMetric
+  group_id: number | null
+  strategy: ProxyAutoSwitchStrategy | null
   reason: string
-  from_proxy_id: number
-  from_proxy_label: string
-  from_region: string
+  from_proxy_id: number | null
+  from_proxy_label: string | null
+  from_region: string | null
   to_proxy_id: number | null
   to_proxy_label: string | null
   to_region: string | null
-  before_p50_ms: number | null
-  before_samples: number | null
-  current_probe_ms: number | null
-  candidate_probe_ms: number | null
-  after_p50_ms: number | null
-  after_samples: number | null
-  candidates: ProxyAutoSwitchCandidate[] | null
+  window_minutes: number | null
+  before: ProxyAutoSwitchEventStats | null
+  after: ProxyAutoSwitchEventStats | null
+  from_probe_ms: number | null
+  to_probe_ms: number | null
+  after_finished_at: string | null
 }
 
 export interface ProxyAutoSwitchEventPage {
   items: ProxyAutoSwitchEvent[]
   next_cursor: number
+}
+
+export interface ProxyAutoSwitchAccount {
+  account_id: number
+  account_name: string
+  group_ids: number[]
+  proxy_id: number | null
+  proxy_label: string | null
+  region: string | null
+  samples: number
+  p60_ms: number | null
+  mean_ms: number | null
+  duration_mean_ms: number | null
+  state: ProxyAutoSwitchAccountState
+  last_switch_at: string | null
+  note: string
+}
+
+export interface ProxyAutoSwitchAccountPage {
+  items: ProxyAutoSwitchAccount[]
+  window_minutes: number
+}
+
+export interface ProxyAutoSwitchProxy {
+  id: number
+  name: string
+  region: string
+  expires_at: string | null
+  expired: boolean
+  account_count: number
+  in_pool: boolean
 }
 
 export interface ProxyAutoSwitchRecent {
@@ -110,9 +129,14 @@ export async function listEvents(params: { before_id?: number; limit?: number; a
   return { items: data?.items ?? [], next_cursor: data?.next_cursor ?? 0 }
 }
 
-export async function revertEvent(id: number): Promise<ProxyAutoSwitchEvent> {
-  const { data } = await apiClient.post<ProxyAutoSwitchEvent>(`${base}/events/${id}/revert`)
-  return data
+export async function listAccounts(): Promise<ProxyAutoSwitchAccountPage> {
+  const { data } = await apiClient.get<Partial<ProxyAutoSwitchAccountPage>>(`${base}/accounts`)
+  return { items: data?.items ?? [], window_minutes: data?.window_minutes ?? 0 }
+}
+
+export async function listProxies(): Promise<ProxyAutoSwitchProxy[]> {
+  const { data } = await apiClient.get<{ items?: ProxyAutoSwitchProxy[] }>(`${base}/proxies`)
+  return data?.items ?? []
 }
 
 export async function listRecent(days = 7): Promise<ProxyAutoSwitchRecent[]> {
@@ -120,6 +144,6 @@ export async function listRecent(days = 7): Promise<ProxyAutoSwitchRecent[]> {
   return data?.items ?? []
 }
 
-export const proxyAutoSwitchAPI = { getConfig, updateConfig, listEvents, revertEvent, listRecent }
+export const proxyAutoSwitchAPI = { getConfig, updateConfig, listEvents, listAccounts, listProxies, listRecent }
 
 export default proxyAutoSwitchAPI

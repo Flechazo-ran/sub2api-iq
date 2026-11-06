@@ -11,6 +11,9 @@ export default {
   updatedAt: 'Updated {time}',
   filters: {
     group: 'Group',
+    account: 'Account',
+    accountAll: 'All accounts (combined)',
+    accountUnavailable: ' (unavailable)',
     range: 'Range',
     series: 'Series',
     autoRefresh: 'Auto refresh',

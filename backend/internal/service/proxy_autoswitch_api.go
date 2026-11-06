@@ -3,14 +3,13 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
-
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 func (s *ProxyAutoSwitchService) ListEvents(ctx context.Context, filter ProxyAutoSwitchEventFilter) (*ProxyAutoSwitchEventList, error) {
 	if filter.Limit <= 0 {
-		filter.Limit = proxyAutoSwitchEventsDefaultLim
+		filter.Limit = proxyAutoSwitchEventsDefault
 	}
 	if filter.Limit > proxyAutoSwitchEventsMaxLimit {
 		filter.Limit = proxyAutoSwitchEventsMaxLimit
@@ -29,12 +28,7 @@ func (s *ProxyAutoSwitchService) ListEvents(ctx context.Context, filter ProxyAut
 		items = items[:filter.Limit]
 		out.NextCursor = items[len(items)-1].ID
 	}
-	for _, item := range items {
-		if item.Candidates == nil {
-			item.Candidates = []ProxyAutoSwitchCandidate{}
-		}
-		out.Items = append(out.Items, item)
-	}
+	out.Items = append(out.Items, items...)
 	return out, nil
 }
 
@@ -46,7 +40,8 @@ func (s *ProxyAutoSwitchService) Recent(ctx context.Context, days int) (*ProxyAu
 	if days > 90 {
 		days = 90
 	}
-	events, err := s.repo.LatestEventPerAccount(ctx, s.now().Add(-time.Duration(days)*24*time.Hour), proxyAutoSwitchRecentStatuses)
+	events, err := s.repo.LatestEventPerAccount(ctx, s.now().Add(-time.Duration(days)*24*time.Hour),
+		proxyAutoSwitchSwitchedStatuses)
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +57,14 @@ func (s *ProxyAutoSwitchService) Recent(ctx context.Context, days int) (*ProxyAu
 	return out, nil
 }
 
-// AccountsDiag is a read-only view of what the next check would see.
-func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSwitchAccountDiagList, error) {
+// Accounts is the per-account monitoring view: every account in the configured
+// groups, including unavailable ones, with the same samples the next check uses.
+func (s *ProxyAutoSwitchService) Accounts(ctx context.Context) (*ProxyAutoSwitchAccountList, error) {
 	cfg, err := s.GetConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := &ProxyAutoSwitchAccountDiagList{Items: []ProxyAutoSwitchAccountDiag{}}
+	out := &ProxyAutoSwitchAccountList{Items: []ProxyAutoSwitchAccountItem{}, WindowMinutes: cfg.WindowMinutes}
 	if len(cfg.GroupIDs) == 0 {
 		return out, nil
 	}
@@ -80,122 +76,148 @@ func (s *ProxyAutoSwitchService) AccountsDiag(ctx context.Context) (*ProxyAutoSw
 		return out, nil
 	}
 	now := s.now()
-	ids := make([]int64, 0, len(accounts))
-	proxyIDs := make([]int64, 0, len(accounts))
-	for _, a := range accounts {
-		ids = append(ids, a.ID)
-		if a.ProxyID != nil {
-			proxyIDs = append(proxyIDs, *a.ProxyID)
-		}
-	}
 	stats, err := s.latencyStats(ctx, cfg.GroupIDs, currentProxies(accounts), now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
 	if err != nil {
 		return nil, err
 	}
-	observing, err := s.observingAccounts(ctx)
+	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
 		return nil, err
 	}
-	history, err := s.repo.AccountHistory(ctx, ids, now.Add(-proxyAutoSwitchHistorySpan(cfg)), proxyAutoSwitchSwitchedStatuses, proxyAutoSwitchMissStatuses)
+	proxyByID := make(map[int64]*Proxy, len(proxies))
+	proxyIDs := make([]int64, 0, len(accounts))
+	for i := range proxies {
+		proxyByID[proxies[i].ID] = &proxies[i].Proxy
+	}
+	for _, a := range accounts {
+		if a.ProxyID != nil {
+			proxyIDs = append(proxyIDs, *a.ProxyID)
+		}
+	}
+	regions := s.cachedRegions(ctx, proxyIDs)
+	lastSwitch, err := s.lastSwitchTimes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	regions, _ := s.cachedRegions(ctx, proxyIDs)
 	for _, a := range accounts {
 		st := latencyStatFor(stats, a.ID, a.ProxyID)
-		item := ProxyAutoSwitchAccountDiag{AccountID: a.ID, ProxyID: a.ProxyID, Samples: st.Samples,
-			SlowChecks: s.slowChecks(a.ID, a.ProxyID)}
+		item := ProxyAutoSwitchAccountItem{
+			AccountID:    a.ID,
+			AccountName:  a.Name,
+			GroupIDs:     proxyAutoSwitchConfiguredGroups(a, cfg),
+			ProxyID:      a.ProxyID,
+			Samples:      st.Samples,
+			State:        ProxyAutoSwitchStateOK,
+			LastSwitchAt: lastSwitch[a.ID],
+		}
 		if a.ProxyID != nil {
+			if p := proxyByID[*a.ProxyID]; p != nil {
+				item.ProxyLabel = proxyAutoSwitchLabel(p)
+			}
 			item.Region = regions[*a.ProxyID]
 		}
 		if st.Samples > 0 {
-			item.P50MS = autoSwitchInt64(st.P50MS)
+			item.P60MS = autoSwitchInt64(st.P60MS)
+			item.MeanMS = autoSwitchInt64(st.MeanMS)
+			item.DurationMeanMS = autoSwitchInt64(st.DurationMeanMS)
 		}
-		if ok, note := proxyAutoSwitchEligible(a); !ok {
-			item.State, item.Note = ProxyAutoSwitchStateSkipped, note
-		} else if gate := proxyAutoSwitchGate(cfg, now, observing[a.ID], history[a.ID]); gate != nil {
-			item.State, item.CooldownUntil, item.Note = gate.state, gate.until, gate.note
-		} else {
-			item.State = proxyAutoSwitchJudge(cfg, st.Samples, st.P50MS)
+		managed, reason := proxyAutoSwitchManaged(a)
+		switch {
+		case !managed:
+			item.State, item.Note = ProxyAutoSwitchStateUnavailable, reason+"，不参与自动换代理"
+		case a.Status != StatusActive:
+			item.State, item.Note = ProxyAutoSwitchStateUnavailable, "账号状态不是 active"
+		case !a.Schedulable:
+			item.State, item.Note = ProxyAutoSwitchStateUnavailable, "账号不可调度"
+		case a.ProxyID == nil || *a.ProxyID <= 0:
+			item.State, item.Note = ProxyAutoSwitchStateNoProxy, "没有代理"
+		default:
+			item.State = proxyAutoSwitchJudge(cfg, st.Samples, st.P60MS, st.MeanMS)
 			if item.State == ProxyAutoSwitchStateInsufficient {
 				item.Note = fmt.Sprintf("样本 %d 个，少于 %d 个不判断", st.Samples, cfg.MinSamples)
 			}
-		}
-		if !cfg.Enabled {
-			if item.Note != "" {
-				item.Note += "；"
-			}
-			item.Note += "功能未开启"
 		}
 		out.Items = append(out.Items, item)
 	}
 	return out, nil
 }
 
-// ManualRevert puts the old proxy back for an observing, kept or not_faster switch, when
-// the account still uses the proxy this event switched to and the old proxy is
-// still idle. A manual revert is recorded as a manual proxy change
-// (external_change_at, a record only, no hold), except within 30 minutes of
-// creating the account, where every proxy change counts as part of the setup.
-func (s *ProxyAutoSwitchService) ManualRevert(ctx context.Context, eventID int64) (*ProxyAutoSwitchEvent, error) {
-	if eventID <= 0 {
-		return nil, infraerrors.BadRequest("PROXY_AUTOSWITCH_EVENT_INVALID", "记录 ID 无效")
+func proxyAutoSwitchConfiguredGroups(account ProxyAutoSwitchAccount, cfg ProxyAutoSwitchConfig) []int64 {
+	out := make([]int64, 0, len(account.GroupIDs))
+	for _, id := range account.GroupIDs {
+		for _, configured := range cfg.GroupIDs {
+			if id == configured {
+				out = append(out, id)
+				break
+			}
+		}
 	}
-	var result *ProxyAutoSwitchEvent
-	err := s.withAssignLock(ctx, func(ctx context.Context) error {
-		event, err := s.repo.GetEvent(ctx, eventID)
-		if err != nil {
-			return err
-		}
-		if event == nil {
-			return infraerrors.NotFound("PROXY_AUTOSWITCH_EVENT_NOT_FOUND", "记录不存在")
-		}
-		if err := s.checkManualRevert(ctx, event); err != nil {
-			return err
-		}
-		if err := s.setAccountProxy(ctx, event.AccountID, *event.FromProxyID); err != nil {
-			return err
-		}
-		now := s.now()
-		s.saveSeenProxy(ctx, event.AccountID, *event.FromProxyID, &now)
-		previous := event.Status
-		event.Status = ProxyAutoSwitchStatusManualRevert
-		event.Reason = truncateReason(event.Reason + "；管理员手动换回旧代理")
-		event.UpdatedAt, event.FinishedAt = now, &now
-		if _, err := s.repo.UpdateEventIfStatus(ctx, event, previous); err != nil {
-			return err
-		}
-		result, err = s.repo.GetEvent(ctx, eventID)
-		return err
-	})
+	if len(out) == 0 {
+		out = append(out, account.GroupIDs...)
+	}
+	return out
+}
+
+func (s *ProxyAutoSwitchService) lastSwitchTimes(ctx context.Context) (map[int64]*time.Time, error) {
+	events, err := s.repo.LatestEventPerAccount(ctx, time.Time{}, proxyAutoSwitchSwitchedStatuses)
 	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	out := make(map[int64]*time.Time, len(events))
+	for i := range events {
+		if events[i].SwitchedAt != nil {
+			out[events[i].AccountID] = events[i].SwitchedAt
+		}
+	}
+	return out, nil
 }
 
-func (s *ProxyAutoSwitchService) checkManualRevert(ctx context.Context, event *ProxyAutoSwitchEvent) error {
-	switch event.Status {
-	case ProxyAutoSwitchStatusObserving, ProxyAutoSwitchStatusKept, ProxyAutoSwitchStatusKeptInsufficient, ProxyAutoSwitchStatusNotFaster:
-	default:
-		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED",
-			fmt.Sprintf("只有观察中、已换上新代理（变快了、样本不足或没变快）的记录可以换回，这条是 %s", event.Status))
-	}
-	if event.FromProxyID == nil || event.ToProxyID == nil {
-		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED", "这条记录没有换过代理")
-	}
-	account, err := s.repo.GetAccount(ctx, event.AccountID)
+// Proxies lists every undeleted proxy for the candidate-pool picker. In-pool
+// proxies come first in pool order, the rest by id.
+func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchProxyList, error) {
+	cfg, err := s.GetConfig(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if account == nil || account.Deleted {
-		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED", "账号已删除")
+	proxies, err := s.repo.ListProxies(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if account.ProxyID == nil || *account.ProxyID != *event.ToProxyID {
-		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED", "账号现在用的已经不是这次换上的代理，不能一键换回")
+	ids := make([]int64, 0, len(proxies))
+	for i := range proxies {
+		ids = append(ids, proxies[i].ID)
 	}
-	if reason := s.revertBlockedReason(ctx, *event.FromProxyID); reason != "" {
-		return infraerrors.BadRequest("PROXY_AUTOSWITCH_REVERT_NOT_ALLOWED", reason+"，不能换回")
+	regions := s.cachedRegions(ctx, ids)
+	poolIndex := make(map[int64]int, len(cfg.CandidateProxyIDs))
+	for i, id := range cfg.CandidateProxyIDs {
+		poolIndex[id] = i
 	}
-	return nil
+	now := s.now()
+	items := make([]ProxyAutoSwitchProxyItem, 0, len(proxies))
+	for i := range proxies {
+		p := &proxies[i]
+		_, inPool := poolIndex[p.ID]
+		items = append(items, ProxyAutoSwitchProxyItem{
+			ID:           p.ID,
+			Name:         p.Name,
+			Region:       regions[p.ID],
+			ExpiresAt:    p.ExpiresAt,
+			Expired:      p.IsExpired(now),
+			AccountCount: p.AccountCount,
+			InPool:       inPool,
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		pi, iOK := poolIndex[items[i].ID]
+		pj, jOK := poolIndex[items[j].ID]
+		switch {
+		case iOK && jOK:
+			return pi < pj
+		case iOK != jOK:
+			return iOK
+		default:
+			return items[i].ID < items[j].ID
+		}
+	})
+	return &ProxyAutoSwitchProxyList{Items: items}, nil
 }

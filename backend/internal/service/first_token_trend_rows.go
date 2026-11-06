@@ -148,7 +148,7 @@ func (b *firstTokenTrendBuilder) rowLabel(a *firstTokenTrendRowAcc, accounts map
 		} else if !acc.Schedulable {
 			sub += " · 不可调度"
 		}
-		return fmt.Sprintf("#%d %s", id, shortAccountName(acc.Name)), sub
+		return firstTokenTrendAccountLabel(acc), sub
 	case FirstTokenTrendDimensionProxy:
 		if id == 0 {
 			return "未知代理", "使用记录没对上连接记录"
@@ -172,6 +172,11 @@ func (b *firstTokenTrendBuilder) rowLabel(a *firstTokenTrendRowAcc, accounts map
 		return label, strings.Join(parts, " ") + " 用过"
 	}
 	return a.key, ""
+}
+
+// firstTokenTrendAccountLabel 是按号拆行和账号下拉共用的 label。
+func firstTokenTrendAccountLabel(a FirstTokenTrendAccount) string {
+	return fmt.Sprintf("#%d %s", a.ID, shortAccountName(a.Name))
 }
 
 var firstTokenTrendEmailLocal = regexp.MustCompile(`[A-Za-z0-9._%+-]+@`)
