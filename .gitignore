@@ -203,6 +203,8 @@ issues/
 **/*.sealed
 
 !docs/astra-candy-beta.md
+!docs/proxy-autoswitch.md
+!docs/first-token-trend.md
 
 # PR screenshots belong in PR attachments; retain text evidence in docs/screenshots.
 !docs/screenshots/
