@@ -200,6 +200,7 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 		items = append(items, ProxyAutoSwitchProxyItem{
 			ID:           p.ID,
 			Name:         p.Name,
+			Status:       p.Status,
 			Region:       regions[p.ID],
 			ExpiresAt:    p.ExpiresAt,
 			Expired:      p.IsExpired(now),

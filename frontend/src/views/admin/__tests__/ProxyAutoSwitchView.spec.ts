@@ -43,6 +43,7 @@ function proxy(id: number, overrides: Partial<ProxyAutoSwitchProxy> = {}): Proxy
   return {
     id,
     name: proxyNames[id] ?? `代理-${id}`,
+    status: 'active',
     region: id === 25 ? 'DE' : id === 99 ? 'VN' : id === 68 ? 'SG' : 'JP',
     expires_at: id === 25 ? '2026-10-01T00:00:00Z' : '2026-12-20T00:00:00Z',
     expired: id === 25,
@@ -277,16 +278,69 @@ describe('ProxyAutoSwitchView settings', () => {
     expect((api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig).candidate_proxy_ids).toEqual([68, 99, 42])
   })
 
-  it('greys out expired proxies with an expired tag and switches strategy', async () => {
+  it('lists only active, unexpired proxies in the candidate pool table and switches strategy', async () => {
+    api.listProxies.mockResolvedValue([...defaultProxies, proxy(77, { status: 'inactive' })])
     wrapper = mountView(); await flushPromises()
 
-    const expired = wrapper.get('[data-proxy-id="25"]')
-    expect(expired.classes()).toContain('row-expired')
-    expect(expired.text()).toContain('已过期')
+    const listed = wrapper.findAll('[data-testid="pas-proxies"] [data-proxy-id]').map(row => Number(row.attributes('data-proxy-id')))
+    expect(listed).toEqual([68, 19, 42, 99])
+    expect(wrapper.find('[data-proxy-id="25"]').exists()).toBe(false)
+    expect(wrapper.find('[data-proxy-id="77"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="pas-strategy-random"]').attributes('aria-checked')).toBe('true')
     await wrapper.get('[data-testid="pas-strategy-region"]').trigger('click')
     expect(wrapper.get('[data-testid="pas-strategy-region"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.get('[data-testid="pas-strategy-random"]').attributes('aria-checked')).toBe('false')
+  })
+
+  it('refresh removes disabled and expired proxies from the saved pool and saves only that change', async () => {
+    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19, 42] }))
+    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+    wrapper = mountView(); await flushPromises()
+    expect(poolOrder()).toEqual([68, 19, 42])
+
+    // 另有一处还没保存的改动，刷新保存时不能带上它。
+    await wrapper.get('[data-testid="pas-window_minutes"]').setValue('9')
+    // 刷新时 19 在 IP 管理里被停用、42 过期了。
+    api.listProxies.mockResolvedValue([proxy(68), proxy(19, { status: 'inactive' }), proxy(42, { expired: true }), proxy(99), proxy(25)])
+    await wrapper.get('[data-testid="pas-pool-refresh"]').trigger('click')
+    await flushPromises()
+
+    expect(api.updateConfig).toHaveBeenCalledTimes(1)
+    const payload = api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig
+    expect(payload).toEqual(config({ candidate_proxy_ids: [68] }))
+    expect(poolOrder()).toEqual([68])
+    expect(wrapper.get('[data-testid="pas-notice"]').text()).toContain('已把 2 个停用或过期的代理移出候选池并保存')
+    // 没保存的窗口改动还在，页面仍然提示有未保存的改动。
+    expect((wrapper.get('[data-testid="pas-window_minutes"]').element as HTMLInputElement).value).toBe('9')
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
+  })
+
+  it('refresh with nothing to remove reloads the list without saving', async () => {
+    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19] }))
+    wrapper = mountView(); await flushPromises()
+    expect(api.listProxies).toHaveBeenCalledTimes(1)
+
+    await wrapper.get('[data-testid="pas-pool-refresh"]').trigger('click')
+    await flushPromises()
+
+    expect(api.listProxies).toHaveBeenCalledTimes(2)
+    expect(api.updateConfig).not.toHaveBeenCalled()
+    expect(poolOrder()).toEqual([68, 19])
+    expect(wrapper.get('[data-testid="pas-notice"]').text()).toContain('候选池里没有停用或过期的代理')
+  })
+
+  it('refresh shows the backend error when saving the cleaned pool fails', async () => {
+    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19] }))
+    api.updateConfig.mockRejectedValue({ status: 500, message: '保存代理优选配置失败' })
+    wrapper = mountView(); await flushPromises()
+
+    api.listProxies.mockResolvedValue([proxy(68), proxy(19, { status: 'inactive' })])
+    await wrapper.get('[data-testid="pas-pool-refresh"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pas-pool-refresh-error"]').text()).toContain('保存代理优选配置失败')
+    expect(poolOrder()).toEqual([68])
+    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
   })
 
   it('blocks out-of-range values before calling the backend', async () => {

@@ -54,6 +54,8 @@ export default {
   },
   proxiesLoadFailed: 'Failed to load proxies',
   proxiesEmpty: 'No proxies available',
+  poolRefreshNone: 'Proxy status refreshed; no disabled or expired proxies in the candidate pool',
+  poolRefreshRemoved: 'Removed {count} disabled or expired proxies from the candidate pool and saved',
   accountMonitor: 'Account monitor',
   accountWindowHint: 'Past {minutes} min · each account is measured separately',
   accountsLoadFailed: 'Failed to load account monitor',

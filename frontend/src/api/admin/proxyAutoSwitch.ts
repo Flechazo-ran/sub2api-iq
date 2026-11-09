@@ -95,6 +95,7 @@ export interface ProxyAutoSwitchAccountPage {
 export interface ProxyAutoSwitchProxy {
   id: number
   name: string
+  status: string
   region: string
   expires_at: string | null
   expired: boolean

@@ -388,6 +388,7 @@ func TestProxyAutoSwitchV2ProxiesList(t *testing.T) {
 	expired := w.addProxy(99, "JP", 0)
 	at := w.now.Add(-time.Hour)
 	expired.ExpiresAt = &at
+	w.proxies[19].Status = "inactive"
 	cfg := v2Config()
 	cfg.CandidateProxyIDs = []int64{42, 68}
 	w.saveConfig(cfg)
@@ -398,13 +399,16 @@ func TestProxyAutoSwitchV2ProxiesList(t *testing.T) {
 	require.Len(t, list.Items, 4)
 	require.Equal(t, int64(42), list.Items[0].ID)
 	require.True(t, list.Items[0].InPool)
+	require.Equal(t, StatusActive, list.Items[0].Status)
 	require.Equal(t, int64(68), list.Items[1].ID)
 	require.True(t, list.Items[1].InPool)
 	require.Equal(t, int64(1), list.Items[1].AccountCount)
 	require.Equal(t, int64(19), list.Items[2].ID)
 	require.False(t, list.Items[2].InPool)
+	require.Equal(t, "inactive", list.Items[2].Status)
 	require.Equal(t, int64(99), list.Items[3].ID)
 	require.True(t, list.Items[3].Expired)
+	require.Equal(t, StatusActive, list.Items[3].Status)
 }
 
 func TestProxyAutoSwitchV2OldEventsStillListed(t *testing.T) {

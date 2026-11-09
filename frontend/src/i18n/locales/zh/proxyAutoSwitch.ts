@@ -54,6 +54,8 @@ export default {
   },
   proxiesLoadFailed: '代理列表加载失败',
   proxiesEmpty: '没有可用的代理',
+  poolRefreshNone: '代理状态已刷新，候选池里没有停用或过期的代理',
+  poolRefreshRemoved: '已把 {count} 个停用或过期的代理移出候选池并保存',
   accountMonitor: '账号监控',
   accountWindowHint: '过去 {minutes} 分钟 · 每个号单独看',
   accountsLoadFailed: '账号监控加载失败',

@@ -255,6 +255,7 @@ type ProxyAutoSwitchAccountList struct {
 type ProxyAutoSwitchProxyItem struct {
 	ID           int64      `json:"id"`
 	Name         string     `json:"name"`
+	Status       string     `json:"status"`
 	Region       string     `json:"region"`
 	ExpiresAt    *time.Time `json:"expires_at"`
 	Expired      bool       `json:"expired"`

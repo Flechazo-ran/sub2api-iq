@@ -41,21 +41,23 @@
 
           <div class="subsection-heading">
             <div><h4>{{ t('proxyAutoSwitch.candidatePool') }}</h4><p class="field-hint">{{ t('proxyAutoSwitch.candidatePoolHint') }}</p></div>
+            <button type="button" class="btn btn-secondary btn-sm" :disabled="poolRefreshing || proxiesLoading || saving" data-testid="pas-pool-refresh" @click="refreshPool"><Icon name="refresh" size="sm" :class="{ 'animate-spin': poolRefreshing }" />{{ t('proxyAutoSwitch.refresh') }}</button>
           </div>
+          <p v-if="poolRefreshError" role="alert" class="form-error" data-testid="pas-pool-refresh-error">{{ poolRefreshError }}</p>
           <div v-if="proxiesError" role="alert" class="inline-error" data-testid="pas-proxies-error">{{ proxiesError }}<button :disabled="proxiesLoading" @click="loadProxies">{{ t('proxyAutoSwitch.retry') }}</button></div>
           <div class="table-scroll">
             <table class="data-table proxy-table" data-testid="pas-proxies">
               <thead><tr><th class="cell-left">{{ t('proxyAutoSwitch.colSelect') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colRegion') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colExpires') }}</th><th>{{ t('proxyAutoSwitch.colAccountCount') }}</th></tr></thead>
               <tbody v-if="!proxiesLoaded && proxiesLoading"><tr v-for="n in 3" :key="`proxy-loading-${n}`" class="loading-row"><td v-for="c in 5" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
               <tbody v-else>
-                <tr v-for="proxy in proxies" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': isExpired(proxy) }">
+                <tr v-for="proxy in usableProxies" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': isExpired(proxy) }">
                   <td class="cell-left"><input type="checkbox" class="proxy-checkbox" :checked="isSelected(proxy.id)" :aria-label="proxyLabel(proxy)" :data-testid="`pas-proxy-checkbox-${proxy.id}`" @change="toggleProxy(proxy.id)" /></td>
                   <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="isExpired(proxy)" class="expired-tag" data-testid="pas-proxy-expired">{{ t('proxyAutoSwitch.expired') }}</span></td>
                   <td class="cell-left">{{ proxy.region || '—' }}</td>
                   <td class="cell-left tabular-nums">{{ monthDay(proxy.expires_at) }}</td>
                   <td class="tabular-nums">{{ proxy.account_count }}</td>
                 </tr>
-                <tr v-if="!proxies.length"><td colspan="5" class="table-empty" data-testid="pas-proxies-empty">{{ t('proxyAutoSwitch.proxiesEmpty') }}</td></tr>
+                <tr v-if="!usableProxies.length"><td colspan="5" class="table-empty" data-testid="pas-proxies-empty">{{ t('proxyAutoSwitch.proxiesEmpty') }}</td></tr>
               </tbody>
             </table>
           </div>
@@ -372,6 +374,9 @@ function isExpired(proxy: ProxyAutoSwitchProxy) {
   const date = validDate(proxy.expires_at)
   return !!date && date.getTime() < Date.now()
 }
+// 候选池列表只显示 IP 管理里状态为启用且没过期的代理。
+function isUsable(proxy: ProxyAutoSwitchProxy) { return proxy.status === 'active' && !isExpired(proxy) }
+const usableProxies = computed(() => proxies.value.filter(isUsable))
 function proxyLabel(proxy: ProxyAutoSwitchProxy) { return proxy.name ? `#${proxy.id} ${proxy.name}` : `#${proxy.id}` }
 async function loadProxies() {
   proxiesLoading.value = true; proxiesError.value = ''
@@ -384,6 +389,34 @@ async function loadProxies() {
   } catch (err) {
     if (!disposed) proxiesError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.proxiesLoadFailed'))
   } finally { proxiesLoading.value = false }
+}
+
+// 刷新候选池：重拉代理列表，把停用或已过期的代理移出池子。已保存的配置里有这类代理时，
+// 只改 candidate_proxy_ids 并立即保存（以已保存的配置为底，不带上其他还没保存的改动）。
+const poolRefreshing = ref(false), poolRefreshError = ref('')
+async function refreshPool() {
+  if (poolRefreshing.value || saving.value) return
+  poolRefreshing.value = true; poolRefreshError.value = ''; notice.value = ''
+  try {
+    await loadProxies()
+    if (disposed || proxiesError.value || !proxiesLoaded.value) return
+    const unusable = new Set(proxies.value.filter(proxy => !isUsable(proxy)).map(proxy => proxy.id))
+    draft.candidate_proxy_ids = draft.candidate_proxy_ids.filter(id => !unusable.has(id))
+    const current = saved.value
+    const removed = current ? current.candidate_proxy_ids.filter(id => unusable.has(id)) : []
+    if (!current || !removed.length) {
+      notice.value = t('proxyAutoSwitch.poolRefreshNone')
+      return
+    }
+    const known = new Set(proxies.value.map(proxy => proxy.id))
+    const payload = canonical({ ...current, candidate_proxy_ids: current.candidate_proxy_ids.filter(id => known.has(id) && !unusable.has(id)) })
+    const config = await proxyAutoSwitchAPI.updateConfig(payload)
+    if (disposed) return
+    saved.value = canonical(normalizeConfig(config ?? payload))
+    notice.value = t('proxyAutoSwitch.poolRefreshRemoved', { count: removed.length })
+  } catch (err) {
+    if (!disposed) poolRefreshError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.saveFailed'))
+  } finally { poolRefreshing.value = false }
 }
 
 // 保存时才去掉代理列表里已不存在的 id；列表没加载成功就原样带上，别把用户的池子清空。
@@ -544,6 +577,7 @@ onUnmounted(() => { disposed = true })
 .chip.on { @apply border-primary-300 bg-primary-50 font-medium text-primary-700 dark:border-primary-700 dark:bg-primary-950/40 dark:text-primary-300; }
 .chip:focus-within { @apply ring-2 ring-primary-400 ring-offset-2 dark:ring-offset-dark-900; }
 .rule { @apply rounded-lg border border-dashed border-gray-200 bg-gray-50/70 px-3 py-2 text-[13px] leading-6 text-gray-600 dark:border-dark-600 dark:bg-dark-800/50 dark:text-gray-300; }
+.subsection-heading { @apply flex items-start justify-between gap-3; }
 .subsection-heading h4 { @apply text-sm font-semibold; }
 
 .table-scroll { @apply min-w-0 overflow-x-auto border-t border-gray-100 dark:border-dark-700; }
