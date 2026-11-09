@@ -67,6 +67,17 @@
 | 没有别的号在用 | 只要还有一个未删除的号挂着这个代理就不算（包括不在指定分组里的号） |
 | 不是这个号现在的代理 | 当前代理就在池子里时会跳过它 |
 
+页面上的候选代理池（2026-11-09 22:37 起，提交 `39e2447`）：
+
+| 操作 | 行为 |
+|---|---|
+| 勾选列表 | 只显示 IP 管理里状态是 `active`、并且没过期（`expires_at` 为空或晚于现在）的代理；停用、已过期的不显示，不能勾选 |
+| 「刷新」按钮 | 重新拉一遍代理状态。已保存的池子里有停用或已过期的代理时，把它们移出并**立即保存**，提示「已把 N 个停用或过期的代理移出候选池并保存」；没有就只刷新列表，提示池子里没有停用或过期的代理 |
+| 刷新时的保存范围 | 以服务端已保存的配置为底，只改 `candidate_proxy_ids`；页面上其他还没保存的改动不会一起保存，仍提示「有未保存的改动」。顺带去掉池子里已删除的代理 ID，否则保存会被后端校验拒绝 |
+| 刷新保存失败 | 按钮下方显示后端返回的错误；页面上的池子已经移出这些代理，可以再点「保存设置」 |
+
+没点刷新之前，已保存池子里的停用、过期代理仍会出现在「池子顺序」里（上面的勾选列表里看不到）。换代理时这些代理本来就会被跳过（见上表），不影响判断。
+
 ### 选择策略
 
 | 策略 | 值 | 怎么挑 |
@@ -177,7 +188,7 @@
 | GET | `/config` | 无 | 上面 8 个配置字段 |
 | PUT | `/config` | body 是 8 个配置字段 | 保存后的配置（去重、排序后） |
 | GET | `/accounts` | 无 | `window_minutes`；`items[]`：`account_id` `account_name` `group_ids` `proxy_id` `proxy_label` `region` `samples` `p60_ms` `mean_ms` `duration_mean_ms` `state` `last_switch_at` `note` |
-| GET | `/proxies` | 无 | `items[]`：`id` `name` `region` `expires_at` `expired` `account_count` `in_pool`。所有未删除的代理，池子里的排前面（按池子顺序），其余按 ID |
+| GET | `/proxies` | 无 | `items[]`：`id` `name` `status` `region` `expires_at` `expired` `account_count` `in_pool`。所有未删除的代理（含停用、过期的，由页面过滤），池子里的排前面（按池子顺序），其余按 ID。`status` 是 IP 管理里的代理状态：`active`、`inactive`（停用），以及到期扫描任务改成的 `expired`；2026-11-09 新增 |
 | GET | `/events` | `before_id`（翻页游标）、`limit`（默认 50，最大 200）、`account_id`（可选） | `items[]`、`next_cursor`（0 表示没有更多）。每条：`id` `created_at` `switched_at` `status` `account_id` `account_name` `group_id` `strategy` `reason` `from_proxy_id` `from_proxy_label` `from_region` `to_proxy_id` `to_proxy_label` `to_region` `window_minutes` `before{samples,p60_ms,mean_ms,duration_mean_ms}` `after{同上}` `from_probe_ms` `to_probe_ms` `after_finished_at`。按 ID 倒序 |
 | GET | `/recent` | `days`（默认 7，最大 90） | `items[]`：每个号最近一条真正换过代理的记录，`account_id` `event_id` `at` `status` `from_proxy_label` `to_proxy_label` `reason`。账号列表的「自动换过」用它 |
 
@@ -287,3 +298,4 @@ v2 没有冷却。新代理上过了几分钟又攒够了请求数、两项又�
 | #12 | `20255b01a` `29cd00f75` | 11-06 | 删掉响应头、trace 首字两种口径，只留使用记录首字；页面去掉口径选择 |
 | #13 | `2be7e924b` | 11-06 | v2：配置只剩 8 项；p60 和均值两个阈值同时超过马上换；去掉连续轮数、观察期、冷却、每小时上限、快多少、到期天数、换回；人工候选池 + 三种策略；`no_candidate` 去重；记录换前 N 分钟 / 换后 10 分钟的数据和新旧测速；新增 `/proxies`；删掉 `/events/:id/revert`；迁移 311 |
 | #13 | `e5198fcd6` | 11-06 | 页面 v2：设置、候选代理池勾选和排序、账号监控、换代理记录前后对比；去掉换回按钮 |
+| — | `39e2447` | 11-09 22:37 | `/proxies` 返回代理 `status`；候选代理池列表只显示启用且没过期的代理；新增「刷新」按钮，把停用、过期的代理移出已保存的池子并立即保存（只改 `candidate_proxy_ids`）。判慢、选代理、换代理的后台逻辑没变 |
