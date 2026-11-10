@@ -42,14 +42,20 @@ func meanOf(values []float64) *int64 {
 //
 // current 是号 → 要看的代理。一条 usage 能从 trace 对出走的是别的代理（比如窗口里刚换过
 // 代理，旧代理上的请求），就不算在这个代理上；对不上 trace 的按号现在的代理算。
+//
+// since 是号 → 最早统计时间（可为 nil）：号被代理优选换到当前代理之后，开始时间早于换代理
+// 时间的请求一律不算，不管能不能对上 trace，避免旧代理上的慢请求让新代理马上又被判慢。
 func proxyAutoSwitchUsageStats(usage []FirstTokenTrendUsageSample, traces []FirstTokenTrendTraceSample,
-	current map[int64]int64, from, to time.Time) []ProxyAutoSwitchLatencyStat {
+	current map[int64]int64, since map[int64]time.Time, from, to time.Time) []ProxyAutoSwitchLatencyStat {
 	ix := newFirstTokenUsageProxyIndex(traces)
 	values := make(map[int64][]float64, len(current))
 	durations := make(map[int64][]float64, len(current))
 	for _, u := range usage {
 		proxyID, ok := current[u.AccountID]
 		if !ok {
+			continue
+		}
+		if start, ok := since[u.AccountID]; ok && u.StartedAt.Before(start) {
 			continue
 		}
 		ms, ok := firstTokenUsageValue(u, from, to)
@@ -81,9 +87,9 @@ func proxyAutoSwitchUsageStats(usage []FirstTokenTrendUsageSample, traces []Firs
 }
 
 // latencyStats 取 current 里每个号在给定代理上的判慢数据（使用记录首字），走首字趋势
-// 同一套 usage_logs 查询（按配置的分组）。
+// 同一套 usage_logs 查询（按配置的分组）。since 见 proxyAutoSwitchUsageStats。
 func (s *ProxyAutoSwitchService) latencyStats(ctx context.Context, groupIDs []int64,
-	current map[int64]int64, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error) {
+	current map[int64]int64, since map[int64]time.Time, from, to time.Time) ([]ProxyAutoSwitchLatencyStat, error) {
 	if len(current) == 0 || len(groupIDs) == 0 {
 		return nil, nil
 	}
@@ -91,7 +97,30 @@ func (s *ProxyAutoSwitchService) latencyStats(ctx context.Context, groupIDs []in
 	if err != nil {
 		return nil, err
 	}
-	return proxyAutoSwitchUsageStats(usage, traces, current, from, to), nil
+	return proxyAutoSwitchUsageStats(usage, traces, current, since, from, to), nil
+}
+
+// switchedOntoCurrentAt 返回号 → 被代理优选换到当前代理的时间，只取 from 之后换的
+// （更早的换代理时间已经在统计窗口外，不影响取样）。号最近一次换代理的目标不是当前代理
+// （比如之后被人工改过）时不算。
+func (s *ProxyAutoSwitchService) switchedOntoCurrentAt(ctx context.Context, current map[int64]int64,
+	from time.Time) (map[int64]time.Time, error) {
+	if len(current) == 0 {
+		return nil, nil
+	}
+	events, err := s.repo.LatestEventPerAccount(ctx, from, proxyAutoSwitchSwitchedStatuses)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]time.Time, len(events))
+	for _, e := range events {
+		proxyID, ok := current[e.AccountID]
+		if !ok || e.ToProxyID == nil || *e.ToProxyID != proxyID || e.SwitchedAt == nil || e.SwitchedAt.Before(from) {
+			continue
+		}
+		out[e.AccountID] = *e.SwitchedAt
+	}
+	return out, nil
 }
 
 // currentProxies 是号 → 现在的代理（没有代理的号不在里面）。

@@ -536,7 +536,7 @@ func (s *ProxyAutoSwitchService) finishMeasurement(ctx context.Context, cfg Prox
 	if event.GroupID != nil {
 		groups = []int64{*event.GroupID}
 	}
-	stats, err := s.latencyStats(ctx, groups, map[int64]int64{event.AccountID: *event.ToProxyID}, start, end)
+	stats, err := s.latencyStats(ctx, groups, map[int64]int64{event.AccountID: *event.ToProxyID}, nil, start, end)
 	if err != nil {
 		return err
 	}

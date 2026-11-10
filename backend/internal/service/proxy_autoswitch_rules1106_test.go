@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -104,6 +105,51 @@ func TestProxyAutoSwitchV2NoCooldownAfterSwitch(t *testing.T) {
 	runChecks(t, svc, w, 1)
 	require.Equal(t, [][2]int64{{65, 96}, {65, 97}}, w.updates,
 		"samples on the old proxy do not count; slow again on the new one switches at once")
+}
+
+// 对不上 trace 的旧代理请求，换代理后不能算到新代理头上，否则下一轮马上又换（2026-11-10 复现的 bug）。
+func untracedSlowWorld(t *testing.T) (*pasWorld, *ProxyAutoSwitchService) {
+	t.Helper()
+	w, svc := slowWorld(t, ProxyAutoSwitchStrategySequential, 96, 97, 98)
+	w.usage, w.traces = nil, nil
+	w.addUsages(65, 0, 25, w.now.Add(-time.Minute), 16000)
+	return w, svc
+}
+
+func TestProxyAutoSwitchV2UntracedOldProxySamplesDoNotSwitchAgain(t *testing.T) {
+	w, svc := untracedSlowWorld(t)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	require.Equal(t, 25, w.lastEvent().Before.Samples)
+
+	runChecks(t, svc, w, 3)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates,
+		"requests that started before the switch must not make the new proxy look slow")
+}
+
+func TestProxyAutoSwitchV2MonitorIgnoresRequestsBeforeSwitch(t *testing.T) {
+	w, svc := untracedSlowWorld(t)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+
+	list, err := svc.Accounts(context.Background())
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.Equal(t, int64(96), *list.Items[0].ProxyID)
+	require.Equal(t, 0, list.Items[0].Samples)
+	require.Equal(t, ProxyAutoSwitchStateInsufficient, list.Items[0].State)
+}
+
+func TestProxyAutoSwitchV2UntracedSlowRequestsAfterSwitchStillSwitch(t *testing.T) {
+	w, svc := untracedSlowWorld(t)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+
+	// 换代理之后开始的请求照常算，新代理真的慢还是会换。
+	w.addUsages(65, 0, 20, w.clock().Add(-50*time.Second), 16000)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}, {65, 97}}, w.updates)
+	require.Equal(t, 20, w.lastEvent().Before.Samples)
 }
 
 func TestProxyAutoSwitchV2IneligibleAccountsNotJudged(t *testing.T) {

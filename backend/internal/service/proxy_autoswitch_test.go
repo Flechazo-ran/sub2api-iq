@@ -183,7 +183,7 @@ func TestProxyAutoSwitchV2UsageStatsP60MeanAndDuration(t *testing.T) {
 		usage = append(usage, FirstTokenTrendUsageSample{StartedAt: start, EndedAt: start.Add(time.Duration(100*(i+1)) * time.Millisecond),
 			FirstTokenMS: &v, Stream: true, AccountID: 1, RequestID: "r" + strconv.Itoa(i)})
 	}
-	stats := proxyAutoSwitchUsageStats(usage, nil, map[int64]int64{1: 9}, from, to)
+	stats := proxyAutoSwitchUsageStats(usage, nil, map[int64]int64{1: 9}, nil, from, to)
 	require.Len(t, stats, 1)
 	require.Equal(t, 5, stats[0].Samples)
 	require.Equal(t, int64(3400), stats[0].P60MS)
@@ -198,7 +198,7 @@ func TestProxyAutoSwitchV2UsageStatsP60MeanAndDuration(t *testing.T) {
 	otherProxy := usage[2]
 	otherProxy.RequestID = "other"
 	traces := []FirstTokenTrendTraceSample{{StartedAt: from, ProxyID: 8, RequestID: "other"}}
-	stats = proxyAutoSwitchUsageStats([]FirstTokenTrendUsageSample{notStream, outside, otherProxy}, traces, map[int64]int64{1: 9}, from, to)
+	stats = proxyAutoSwitchUsageStats([]FirstTokenTrendUsageSample{notStream, outside, otherProxy}, traces, map[int64]int64{1: 9}, nil, from, to)
 	require.Empty(t, stats)
 }
 

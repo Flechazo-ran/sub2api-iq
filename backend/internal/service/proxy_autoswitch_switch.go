@@ -74,7 +74,12 @@ func (s *ProxyAutoSwitchService) checkAccounts(ctx context.Context, cfg ProxyAut
 	}
 	window := time.Duration(cfg.WindowMinutes) * time.Minute
 	now := s.now()
-	stats, err := s.latencyStats(ctx, cfg.GroupIDs, currentProxies(eligible), now.Add(-window), now)
+	current := currentProxies(eligible)
+	since, err := s.switchedOntoCurrentAt(ctx, current, now.Add(-window))
+	if err != nil {
+		return fmt.Errorf("latest proxy switches: %w", err)
+	}
+	stats, err := s.latencyStats(ctx, cfg.GroupIDs, current, since, now.Add(-window), now)
 	if err != nil {
 		return fmt.Errorf("usage first token stats: %w", err)
 	}

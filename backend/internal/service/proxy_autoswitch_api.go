@@ -76,7 +76,13 @@ func (s *ProxyAutoSwitchService) Accounts(ctx context.Context) (*ProxyAutoSwitch
 		return out, nil
 	}
 	now := s.now()
-	stats, err := s.latencyStats(ctx, cfg.GroupIDs, currentProxies(accounts), now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
+	from := now.Add(-time.Duration(cfg.WindowMinutes) * time.Minute)
+	current := currentProxies(accounts)
+	since, err := s.switchedOntoCurrentAt(ctx, current, from)
+	if err != nil {
+		return nil, err
+	}
+	stats, err := s.latencyStats(ctx, cfg.GroupIDs, current, since, from, now)
 	if err != nil {
 		return nil, err
 	}
