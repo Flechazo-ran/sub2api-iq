@@ -381,15 +381,82 @@ describe('FirstTokenTrendView', () => {
     expect(rows[2].get('[data-testid="ftt-effect"]').text()).toBe('↑ 慢了 2.7s')
   })
 
-  it('shows the breakdown with status by p50 and a sparkline', async () => {
+  it('shows the breakdown with status by p50 and a sparkline, sorted by name by default', async () => {
     wrapper = mountView(); await flushPromises()
     const rows = wrapper.findAll('[data-testid="ftt-row"]')
-    expect(rows.map(row => row.get('[data-testid="ftt-row-status"]').text())).toEqual(['偏慢', '正常', '暂无'])
-    expect(rows[0].text()).toContain('16.8s')
-    expect(rows[0].text()).toContain('78%')
-    expect(rows[0].find('[data-testid="ftt-spark"]').exists()).toBe(true)
-    expect(rows[1].find('[data-testid="ftt-spark"]').exists()).toBe(false)
+    // 默认按名称升序：#97、#98、#99（接口返回的顺序是 98、97、99）。
+    expect(rows.map(row => row.get('.name > span').text())).toEqual(['#97 fingermaikon7', '#98 jeremiassmith649', '#99 new'])
+    expect(rows.map(row => row.get('[data-testid="ftt-row-status"]').text())).toEqual(['正常', '偏慢', '暂无'])
+    expect(rows[1].text()).toContain('16.8s')
+    expect(rows[1].text()).toContain('78%')
+    expect(rows[1].find('[data-testid="ftt-spark"]').exists()).toBe(true)
+    expect(rows[0].find('[data-testid="ftt-spark"]').exists()).toBe(false)
     expect(rows[2].text()).toContain(zhFirstTokenTrend.dims.noRowData)
+    expect(wrapper.get('[data-testid="ftt-sort-label"]').element.closest('th')!.getAttribute('aria-sort')).toBe('ascending')
+  })
+
+  it('sorts the breakdown by any column, toggling direction and keeping empty rows last', async () => {
+    wrapper = mountView(); await flushPromises()
+    const names = () => wrapper.findAll('[data-testid="ftt-row"]').map(row => row.get('.name > span').text().split(' ')[0])
+
+    // 数值列第一次点是降序（大的在前），没数据的 #99 始终排最后。
+    await wrapper.get('[data-testid="ftt-sort-p50_ms"]').trigger('click')
+    expect(names()).toEqual(['#98', '#97', '#99'])
+    expect(wrapper.get('[data-testid="ftt-sort-p50_ms"]').element.closest('th')!.getAttribute('aria-sort')).toBe('descending')
+    await wrapper.get('[data-testid="ftt-sort-p50_ms"]').trigger('click')
+    expect(names()).toEqual(['#97', '#98', '#99'])
+    expect(wrapper.get('[data-testid="ftt-sort-p50_ms"]').element.closest('th')!.getAttribute('aria-sort')).toBe('ascending')
+
+    // 样本数：0 也是有效数值，降序排最后。
+    await wrapper.get('[data-testid="ftt-sort-samples"]').trigger('click')
+    expect(names()).toEqual(['#98', '#97', '#99'])
+
+    // 状态按严重程度：很慢 > 偏慢 > 正常，暂无排最后。
+    await wrapper.get('[data-testid="ftt-sort-status"]').trigger('click')
+    expect(names()).toEqual(['#98', '#97', '#99'])
+
+    // 名称再点一次回到升序，再点降序。
+    await wrapper.get('[data-testid="ftt-sort-label"]').trigger('click')
+    expect(names()).toEqual(['#97', '#98', '#99'])
+    await wrapper.get('[data-testid="ftt-sort-label"]').trigger('click')
+    expect(names()).toEqual(['#99', '#98', '#97'])
+
+    // 趋势列不能排序。
+    expect(wrapper.find('[data-testid="ftt-sort-spark"]').exists()).toBe(false)
+  })
+
+  it('pages the change log 20 rows at a time and resets to page 1 when the filter changes', async () => {
+    const many = Array.from({ length: 45 }, (_, i) => ({
+      at: new Date(Date.UTC(2026, 10, 5, 7, 0, 0) + i * 60000).toISOString(),
+      account_id: 98, account_name: 'acc', type: 'concurrency' as const, from: '10', to: String(i), detail: `并发 → ${i}`,
+      actor: '', source: 'audit', p50_before_ms: null, p50_after_ms: null,
+    }))
+    api.getTrend.mockResolvedValue(trend({ events: many }))
+    wrapper = mountView(); await flushPromises()
+
+    expect(wrapper.findAll('[data-testid="ftt-event-row"]')).toHaveLength(20)
+    expect(wrapper.get('[data-testid="ftt-events-page"]').text()).toBe('1 / 3')
+    expect(wrapper.get('[data-testid="ftt-events-pager"]').text()).toContain('第 1–20 条，共 45 条')
+    // 最新的在第一页第一行。
+    expect(wrapper.findAll('[data-testid="ftt-event-row"]')[0].text()).toContain('并发 → 44')
+    expect(wrapper.get('[data-testid="ftt-events-prev"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="ftt-events-next"]').trigger('click')
+    await wrapper.get('[data-testid="ftt-events-next"]').trigger('click')
+    expect(wrapper.findAll('[data-testid="ftt-event-row"]')).toHaveLength(5)
+    expect(wrapper.get('[data-testid="ftt-events-pager"]').text()).toContain('第 41–45 条，共 45 条')
+    expect(wrapper.get('[data-testid="ftt-events-next"]').attributes('disabled')).toBeDefined()
+
+    // 换范围回到第一页。
+    await wrapper.get('[data-testid="ftt-range-1h"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="ftt-events-page"]').text()).toBe('1 / 3')
+  })
+
+  it('hides the pager when the change log fits on one page', async () => {
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.findAll('[data-testid="ftt-event-row"]')).toHaveLength(3)
+    expect(wrapper.find('[data-testid="ftt-events-pager"]').exists()).toBe(false)
   })
 
   it('has no measure switch: always usage-log first token', async () => {

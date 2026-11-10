@@ -115,6 +115,9 @@ export default {
     waiting: 'Waiting for data',
     noBaseline: 'No data before',
     by: 'Changed by: {actor}',
+    pageInfo: '{from}–{to} of {total}',
+    prev: 'Previous',
+    next: 'Next',
   },
   dims: {
     title: 'Breakdown',

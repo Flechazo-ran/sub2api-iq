@@ -115,6 +115,9 @@ export default {
     waiting: '等数据',
     noBaseline: '变动前没数据',
     by: '谁改的：{actor}',
+    pageInfo: '第 {from}–{to} 条，共 {total} 条',
+    prev: '上一页',
+    next: '下一页',
   },
   dims: {
     title: '按维度拆开',
