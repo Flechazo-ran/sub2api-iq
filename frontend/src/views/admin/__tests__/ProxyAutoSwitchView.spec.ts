@@ -408,19 +408,53 @@ describe('ProxyAutoSwitchView switch log', () => {
     expect(wrapper.findAll('button').some(button => button.text() === '换回')).toBe(false)
   })
 
-  it('loads more with the cursor until the backend reports no more', async () => {
+  it('paginates the event log and loads more from backend when needed', async () => {
     api.listEvents
       .mockResolvedValueOnce({ items: [event(30, 'done'), event(29, 'no_candidate')], next_cursor: 29 })
       .mockResolvedValueOnce({ items: [event(29, 'no_candidate'), event(28, 'failed')], next_cursor: 0 })
     wrapper = mountView(); await flushPromises()
-    expect(wrapper.text()).toContain('已加载 2 条')
-    await wrapper.get('[data-testid="pas-load-more"]').trigger('click')
+    // 2 条已加载，每页 10 条，第 1 页，pager 显示，仍有下一页（cursor 还没完）
+    expect(wrapper.findAll('[data-testid="pas-event-row"]')).toHaveLength(2)
+    expect(wrapper.find('[data-testid="pas-events-pager"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="pas-events-range"]').text()).toContain('1–2')
+    // 点下一页：本地条数不够（2 < 10），触发 loadMore 拉后端，再推进 page
+    await wrapper.get('[data-testid="pas-events-next"]').trigger('click')
     await flushPromises()
     expect(api.listEvents).toHaveBeenLastCalledWith({ before_id: 29, limit: 50 })
+    // 现在共 3 条，cursor=0，显示 1 页（1–3 of 3）
     expect(wrapper.findAll('[data-testid="pas-event-row"]')).toHaveLength(3)
-    expect(wrapper.find('[data-testid="pas-load-more"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('已加载 3 条')
-    expect(wrapper.text()).toContain('没有更多了')
+    expect(wrapper.get('[data-testid="pas-events-next"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('shows 10 records per page by default and lets the page size change', async () => {
+    const items = Array.from({ length: 15 }, (_, i) => event(100 - i, 'done'))
+    api.listEvents.mockResolvedValueOnce({ items, next_cursor: 0 })
+    wrapper = mountView(); await flushPromises()
+
+    expect(wrapper.findAll('[data-testid="pas-event-row"]')).toHaveLength(10)
+    expect(wrapper.get('[data-testid="pas-events-page"]').text()).toBe('1 / 2')
+    expect(wrapper.get('[data-testid="pas-events-range"]').text()).toBe('第 1–10 条 · 共 15 条')
+    expect(wrapper.get('[data-testid="pas-events-prev"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="pas-events-next"]').trigger('click'); await flushPromises()
+    expect(wrapper.findAll('[data-testid="pas-event-row"]')).toHaveLength(5)
+    expect(wrapper.get('[data-testid="pas-events-range"]').text()).toContain('第 11–15 条')
+    expect(wrapper.get('[data-testid="pas-events-next"]').attributes('disabled')).toBeDefined()
+    // 拉完了就不再请求后端
+    expect(api.listEvents).toHaveBeenCalledTimes(1)
+
+    await wrapper.get('[data-testid="pas-events-page-size"]').setValue('20')
+    expect(wrapper.findAll('[data-testid="pas-event-row"]')).toHaveLength(15)
+    expect(wrapper.get('[data-testid="pas-events-page"]').text()).toBe('1 / 1')
+  })
+
+  it('puts the strategy picker in the proxy pool heading and the rank column first', async () => {
+    wrapper = mountView(); await flushPromises()
+    const heading = wrapper.get('.subsection-heading')
+    expect(heading.text()).toContain('代理池')
+    expect(heading.find('[data-testid="pas-strategy-sequential"]').exists()).toBe(true)
+    const firstCells = wrapper.findAll('[data-testid="pas-proxies"] tbody tr').map(row => row.find('td').attributes('data-testid'))
+    expect(firstCells.every(id => id === 'pas-proxy-rank')).toBe(true)
   })
 
   it('shows a retryable events error and an empty state', async () => {

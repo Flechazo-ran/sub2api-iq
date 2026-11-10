@@ -45,15 +45,21 @@
 
           <div class="subsection-heading">
             <div><h4>{{ t('proxyAutoSwitch.proxyPool') }}</h4><p class="field-hint">{{ t('proxyAutoSwitch.proxyPoolHint') }}</p></div>
+            <div class="pool-strategy" data-testid="pas-strategy">
+              <span class="field-label">{{ t('proxyAutoSwitch.strategy') }}</span>
+              <div class="strategy-group" role="radiogroup" :aria-label="t('proxyAutoSwitch.strategy')">
+                <button v-for="option in strategies" :key="option" type="button" role="radio" :aria-checked="draft.strategy === option" :class="{ on: draft.strategy === option }" :data-testid="`pas-strategy-${option}`" @click="draft.strategy = option">{{ t(`proxyAutoSwitch.strategyLabel.${option}`) }}</button>
+              </div>
+            </div>
           </div>
           <div v-if="proxiesError" role="alert" class="inline-error" data-testid="pas-proxies-error">{{ proxiesError }}<button :disabled="proxiesLoading" @click="loadProxies">{{ t('proxyAutoSwitch.retry') }}</button></div>
           <div class="table-scroll">
             <table class="data-table proxy-table" data-testid="pas-proxies">
-              <thead><tr><th>{{ t('proxyAutoSwitch.colRank') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colRegion') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colExpires') }}</th><th>{{ t('proxyAutoSwitch.colAccountCount') }}</th></tr></thead>
+              <thead><tr><th class="cell-left rank-cell">{{ t('proxyAutoSwitch.colRank') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colRegion') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colExpires') }}</th><th>{{ t('proxyAutoSwitch.colAccountCount') }}</th></tr></thead>
               <tbody v-if="!proxiesLoaded && proxiesLoading"><tr v-for="n in 3" :key="`proxy-loading-${n}`" class="loading-row"><td v-for="c in 5" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
               <tbody v-else>
                 <tr v-for="(proxy, index) in usableProxies" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': isFull(proxy) }">
-                  <td class="tabular-nums" data-testid="pas-proxy-rank">{{ index + 1 }}</td>
+                  <td class="cell-left rank-cell" data-testid="pas-proxy-rank">{{ index + 1 }}</td>
                   <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="isFull(proxy)" class="expired-tag" data-testid="pas-proxy-full">{{ t('proxyAutoSwitch.full') }}</span></td>
                   <td class="cell-left">{{ proxy.region || '—' }}</td>
                   <td class="cell-left tabular-nums">{{ monthDay(proxy.expires_at) }}</td>
@@ -62,13 +68,6 @@
                 <tr v-if="!usableProxies.length"><td colspan="5" class="table-empty" data-testid="pas-proxies-empty">{{ t('proxyAutoSwitch.proxiesEmpty') }}</td></tr>
               </tbody>
             </table>
-          </div>
-
-          <div class="settings-row">
-            <span class="field-label">{{ t('proxyAutoSwitch.strategy') }}</span>
-            <div class="strategy-group" role="radiogroup" :aria-label="t('proxyAutoSwitch.strategy')">
-              <button v-for="option in strategies" :key="option" type="button" role="radio" :aria-checked="draft.strategy === option" :class="{ on: draft.strategy === option }" :data-testid="`pas-strategy-${option}`" @click="draft.strategy = option">{{ t(`proxyAutoSwitch.strategyLabel.${option}`) }}</button>
-            </div>
           </div>
 
           <footer class="settings-footer">
@@ -116,7 +115,7 @@
             </thead>
             <tbody v-if="!eventsLoaded && eventsLoading"><tr v-for="n in 4" :key="`loading-${n}`" class="loading-row"><td v-for="c in 14" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
             <tbody v-else>
-              <tr v-for="event in events" :key="event.id" class="event-row" :data-event-id="event.id" data-testid="pas-event-row">
+              <tr v-for="event in pagedEvents" :key="event.id" class="event-row" :data-event-id="event.id" data-testid="pas-event-row">
                 <td class="cell-left time-cell"><strong :title="fullTime(eventAt(event))">{{ clock(eventAt(event)) }}</strong><span>{{ day(eventAt(event)) }}</span></td>
                 <td class="cell-left account-cell"><strong>#{{ event.account_id }}</strong><span v-if="event.account_name">{{ event.account_name }}</span><span class="status-badge" :class="statusTone(event.status)" :data-status="event.status" data-testid="pas-status">{{ statusLabel(event.status) }}</span></td>
                 <td class="cell-left proxy-cell" data-testid="pas-proxy">
@@ -144,14 +143,24 @@
             </tbody>
           </table>
         </div>
-        <footer class="operations-footer"><span>{{ t('proxyAutoSwitch.loadedCount', { count: events.length }) }}</span><button v-if="cursor" type="button" :disabled="moreLoading || eventsLoading" data-testid="pas-load-more" @click="loadMore">{{ moreLoading ? t('proxyAutoSwitch.loading') : t('proxyAutoSwitch.loadMore') }}<Icon name="arrowDown" size="xs" /></button><span v-else-if="eventsLoaded && events.length">{{ t('proxyAutoSwitch.loadedEnd') }}</span></footer>
+        <footer v-if="events.length" class="operations-footer" data-testid="pas-events-pager">
+          <span data-testid="pas-events-range">{{ t('proxyAutoSwitch.pageInfo', { from: eventPageFrom, to: eventPageTo }) }}<template v-if="!cursor"> · {{ t('proxyAutoSwitch.pageTotal', { total: events.length }) }}</template></span>
+          <div class="pager">
+            <label class="pager-size"><span>{{ t('proxyAutoSwitch.pageSize') }}</span>
+              <select v-model.number="eventPageSize" class="pager-select" data-testid="pas-events-page-size"><option v-for="size in eventPageSizes" :key="size" :value="size">{{ size }}</option></select>
+            </label>
+            <button type="button" class="pager-btn" :disabled="eventPage <= 1 || eventsLoading" data-testid="pas-events-prev" @click="eventPage--">{{ t('proxyAutoSwitch.prevPage') }}</button>
+            <span class="pager-num" data-testid="pas-events-page">{{ cursor ? t('proxyAutoSwitch.pageOnly', { page: eventPage }) : `${eventPage} / ${eventPages}` }}</span>
+            <button type="button" class="pager-btn" :disabled="!hasNextEventPage || moreLoading || eventsLoading" data-testid="pas-events-next" @click="nextEventPage">{{ moreLoading ? t('proxyAutoSwitch.loading') : t('proxyAutoSwitch.nextPage') }}</button>
+          </div>
+        </footer>
       </section>
     </div>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import RoutingNav from '@/components/admin/operations/RoutingNav.vue'
@@ -398,7 +407,7 @@ async function loadEvents() {
   try {
     const page = await proxyAutoSwitchAPI.listEvents({ before_id: 0, limit: PAGE_SIZE })
     if (seq !== eventsSeq || disposed) return
-    events.value = page.items; cursor.value = page.next_cursor; eventsLoaded.value = true
+    events.value = page.items; cursor.value = page.next_cursor; eventsLoaded.value = true; eventPage.value = 1
   } catch (err) {
     if (seq === eventsSeq && !disposed) { eventsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.eventsLoadFailed')); lastEventsFailure.value = 'list' }
   } finally { if (seq === eventsSeq) eventsLoading.value = false }
@@ -418,6 +427,29 @@ async function loadMore() {
   } finally { if (seq === eventsSeq) moreLoading.value = false }
 }
 function retryEvents() { return lastEventsFailure.value === 'more' && events.value.length ? loadMore() : loadEvents() }
+
+// 换代理记录前端分页：接口按 cursor 每次拉 PAGE_SIZE 条，翻到已加载的末尾且后端还有就再拉一批。
+// 后端不返回总数，没拉完之前只显示页码，拉完了才显示「共 N 条」和总页数。
+const eventPageSizes = [10, 20, 50]
+const EVENT_PAGE_SIZE_KEY = 'pas.eventPageSize'
+function readEventPageSize() {
+  try { const v = Number(localStorage.getItem(EVENT_PAGE_SIZE_KEY)); return eventPageSizes.includes(v) ? v : 10 } catch { return 10 }
+}
+const eventPageSize = ref(readEventPageSize())
+const eventPage = ref(1)
+const eventPages = computed(() => Math.max(1, Math.ceil(events.value.length / eventPageSize.value)))
+const pagedEvents = computed(() => events.value.slice((eventPage.value - 1) * eventPageSize.value, eventPage.value * eventPageSize.value))
+const eventPageFrom = computed(() => (events.value.length ? (eventPage.value - 1) * eventPageSize.value + 1 : 0))
+const eventPageTo = computed(() => Math.min(eventPage.value * eventPageSize.value, events.value.length))
+const hasNextEventPage = computed(() => eventPage.value * eventPageSize.value < events.value.length || !!cursor.value)
+async function nextEventPage() {
+  if (eventPage.value * eventPageSize.value >= events.value.length && cursor.value) await loadMore()
+  if (eventPage.value * eventPageSize.value < events.value.length) eventPage.value++
+}
+watch(eventPageSize, size => {
+  eventPage.value = 1
+  try { localStorage.setItem(EVENT_PAGE_SIZE_KEY, String(size)) } catch { /* ignore */ }
+})
 
 const legacyStatuses: ProxyAutoSwitchStatus[] = ['observing', 'kept', 'kept_insufficient', 'not_faster', 'reverted', 'revert_skipped', 'manual_revert']
 const statusTones: Record<string, string> = { measuring: 'tone-info', done: 'tone-success', no_candidate: 'tone-neutral', failed: 'tone-danger', observing: 'tone-info', kept: 'tone-success', kept_insufficient: 'tone-success', not_faster: 'tone-warning', reverted: 'tone-warning', revert_skipped: 'tone-warning', manual_revert: 'tone-muted' }
@@ -513,6 +545,14 @@ onUnmounted(() => { disposed = true })
 .rule { @apply rounded-lg border border-dashed border-gray-200 bg-gray-50/70 px-3 py-2 text-[13px] leading-6 text-gray-600 dark:border-dark-600 dark:bg-dark-800/50 dark:text-gray-300; }
 .subsection-heading { @apply flex items-start justify-between gap-3; }
 .subsection-heading h4 { @apply text-sm font-semibold; }
+.subsection-heading { @apply flex-wrap; }
+.pool-strategy { @apply ml-auto flex shrink-0 items-center gap-2; }
+.proxy-table .rank-cell { width: 5.5rem; font-variant-numeric: tabular-nums; }
+.pager { @apply flex flex-wrap items-center gap-2; }
+.pager-size { @apply inline-flex items-center gap-1.5; }
+.pager-select { @apply rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-600 dark:border-dark-600 dark:bg-dark-900 dark:text-gray-300; }
+.operations-footer .pager-btn { @apply rounded-md border border-gray-200 px-2.5 py-1 text-gray-600 hover:bg-gray-50 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-800; }
+.pager-num { @apply tabular-nums text-gray-500 dark:text-gray-400; }
 
 .table-scroll { @apply min-w-0 overflow-x-auto border-t border-gray-100 dark:border-dark-700; }
 .data-table { @apply w-full border-collapse text-left text-xs; }

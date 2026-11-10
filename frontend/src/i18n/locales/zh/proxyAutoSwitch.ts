@@ -96,6 +96,12 @@ export default {
   loadMore: '加载更多',
   loadedEnd: '没有更多了',
   loadedCount: '已加载 {count} 条',
+  pageInfo: '第 {from}–{to} 条',
+  pageTotal: '共 {total} 条',
+  pageOnly: '第 {page} 页',
+  pageSize: '每页',
+  prevPage: '上一页',
+  nextPage: '下一页',
   empty: '还没有换代理记录',
   emptyHint: '打开「自动换代理」后，判慢的号会在这里留记录。',
   status: {

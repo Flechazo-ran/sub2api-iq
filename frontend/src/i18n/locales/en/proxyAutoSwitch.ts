@@ -96,6 +96,12 @@ export default {
   loadMore: 'Load more',
   loadedEnd: 'No more entries',
   loadedCount: '{count} loaded',
+  pageInfo: '{from}–{to}',
+  pageTotal: 'of {total}',
+  pageOnly: 'Page {page}',
+  pageSize: 'per page',
+  prevPage: 'Prev',
+  nextPage: 'Next',
   empty: 'No proxy switches yet',
   emptyHint: 'After you turn on auto switch, slow accounts are logged here.',
   status: {
