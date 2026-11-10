@@ -863,6 +863,7 @@ const adminNavItems = computed((): NavItem[] => {
     { path: '/admin/routing', label: t('nav.routing'), icon: RoutingIcon, expandOnly: true, children: [
       { path: '/admin/first-token-trend', label: t('firstTokenTrend.title'), icon: TrendIcon },
       { path: '/admin/proxy-autoswitch', label: t('proxyAutoSwitch.title'), icon: ServerIcon },
+      { path: '/admin/proxy-score', label: t('proxyScore.title'), icon: TrendIcon },
     ] },
     { path: '/admin/smart-ops', label: t('accountOps.smartTitle'), icon: SmartOpsIcon, expandOnly: true, children: [
       { path: '/admin/auto-config', label: t('autoConfig.title'), icon: AccountOpsIcon },

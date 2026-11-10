@@ -8,5 +8,5 @@ import { RouterLink, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 const { t } = useI18n(), route = useRoute()
 // Keep the order in sync with the 线路优化 group in AppSidebar.vue.
-const items = [{ path: '/admin/first-token-trend', label: 'firstTokenTrend.title' }, { path: '/admin/proxy-autoswitch', label: 'proxyAutoSwitch.title' }]
+const items = [{ path: '/admin/first-token-trend', label: 'firstTokenTrend.title' }, { path: '/admin/proxy-autoswitch', label: 'proxyAutoSwitch.title' }, { path: '/admin/proxy-score', label: 'proxyScore.title' }]
 </script>
