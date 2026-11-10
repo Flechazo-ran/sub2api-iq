@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -87,30 +88,30 @@ var proxyAutoSwitchSwitchedStatuses = []string{
 }
 
 type ProxyAutoSwitchConfig struct {
-	Enabled           bool    `json:"enabled"`
-	GroupIDs          []int64 `json:"group_ids"`
-	WindowMinutes     int     `json:"window_minutes"`
-	MinSamples        int     `json:"min_samples"`
-	P60ThresholdMS    int     `json:"p60_threshold_ms"`
-	MeanThresholdMS   int     `json:"mean_threshold_ms"`
-	CandidateProxyIDs []int64 `json:"candidate_proxy_ids"`
-	Strategy          string  `json:"strategy"`
+	Enabled            bool    `json:"enabled"`
+	GroupIDs           []int64 `json:"group_ids"`
+	WindowMinutes      int     `json:"window_minutes"`
+	MinSamples         int     `json:"min_samples"`
+	P60ThresholdMS     int     `json:"p60_threshold_ms"`
+	MeanThresholdMS    int     `json:"mean_threshold_ms"`
+	MaxAccountsPerProxy int    `json:"max_accounts_per_proxy"`
+	Strategy           string  `json:"strategy"`
 }
 
 func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
 	return ProxyAutoSwitchConfig{
-		Enabled:           false,
-		GroupIDs:          []int64{proxyAutoSwitchDefaultGroupID},
-		WindowMinutes:     5,
-		MinSamples:        20,
-		P60ThresholdMS:    10000,
-		MeanThresholdMS:   15000,
-		CandidateProxyIDs: []int64{},
-		Strategy:          ProxyAutoSwitchStrategyRandom,
+		Enabled:             false,
+		GroupIDs:            []int64{proxyAutoSwitchDefaultGroupID},
+		WindowMinutes:       5,
+		MinSamples:          20,
+		P60ThresholdMS:      10000,
+		MeanThresholdMS:     15000,
+		MaxAccountsPerProxy: 2,
+		Strategy:            ProxyAutoSwitchStrategySequential,
 	}
 }
 
-// normalizeProxyAutoSwitchConfig 去重分组 ID（排序）、去重候选代理 ID（保持用户给的顺序）。
+// normalizeProxyAutoSwitchConfig 去重分组 ID（排序）。
 // 老配置里已经删掉的字段不在结构体里，json.Unmarshal 会自动忽略。
 func normalizeProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) ProxyAutoSwitchConfig {
 	seenGroups := make(map[int64]struct{}, len(cfg.GroupIDs))
@@ -124,21 +125,10 @@ func normalizeProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) ProxyAutoSwitchCo
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
 	cfg.GroupIDs = groups
-
-	seenProxies := make(map[int64]struct{}, len(cfg.CandidateProxyIDs))
-	proxies := make([]int64, 0, len(cfg.CandidateProxyIDs))
-	for _, id := range cfg.CandidateProxyIDs {
-		if _, ok := seenProxies[id]; ok {
-			continue
-		}
-		seenProxies[id] = struct{}{}
-		proxies = append(proxies, id)
-	}
-	cfg.CandidateProxyIDs = proxies
 	return cfg
 }
 
-// ValidateProxyAutoSwitchConfig 只校验不需要查库的范围和枚举；分组、候选代理是否存在在
+// ValidateProxyAutoSwitchConfig 只校验不需要查库的范围和枚举；分组是否存在在
 // SaveConfig 里查。
 func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 	ranges := []struct {
@@ -150,6 +140,7 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 		{"min_samples", cfg.MinSamples, 1, 100000},
 		{"p60_threshold_ms", cfg.P60ThresholdMS, 1, 600000},
 		{"mean_threshold_ms", cfg.MeanThresholdMS, 1, 600000},
+		{"max_accounts_per_proxy", cfg.MaxAccountsPerProxy, 1, 100},
 	}
 	for _, r := range ranges {
 		if r.value < r.min || r.value > r.max {
@@ -164,11 +155,6 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 	for _, id := range cfg.GroupIDs {
 		if id <= 0 {
 			return errors.New("group_ids 里有无效的分组 ID")
-		}
-	}
-	for _, id := range cfg.CandidateProxyIDs {
-		if id <= 0 {
-			return errors.New("candidate_proxy_ids 里有无效的代理 ID")
 		}
 	}
 	return nil
@@ -260,7 +246,6 @@ type ProxyAutoSwitchProxyItem struct {
 	ExpiresAt    *time.Time `json:"expires_at"`
 	Expired      bool       `json:"expired"`
 	AccountCount int64      `json:"account_count"`
-	InPool       bool       `json:"in_pool"`
 }
 
 type ProxyAutoSwitchProxyList struct {
@@ -376,9 +361,11 @@ type ProxyAutoSwitchService struct {
 	db         *sql.DB
 	instanceID string
 
-	mu       sync.Mutex
-	regions  map[int64]proxyAutoSwitchRegionMemo
-	assignMu sync.Mutex
+	mu             sync.Mutex
+	regions        map[int64]proxyAutoSwitchRegionMemo
+	assignMu       sync.Mutex
+	latencyRank    []int64 // proxy IDs sorted by probe latency, ascending; nil = not yet probed
+	latencyRankMu  sync.RWMutex
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -452,15 +439,6 @@ func (s *ProxyAutoSwitchService) SaveConfig(ctx context.Context, cfg ProxyAutoSw
 			return cfg, infraerrors.BadRequest("PROXY_AUTOSWITCH_GROUP_INVALID", fmt.Sprintf("分组 %d 不存在", id))
 		}
 	}
-	for _, id := range cfg.CandidateProxyIDs {
-		proxy, err := s.proxies.GetByID(ctx, id)
-		if err != nil || proxy == nil {
-			if err != nil && !errors.Is(err, ErrProxyNotFound) {
-				return cfg, err
-			}
-			return cfg, infraerrors.BadRequest("PROXY_AUTOSWITCH_PROXY_INVALID", fmt.Sprintf("代理 %d 不存在或已删除", id))
-		}
-	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return cfg, err
@@ -476,6 +454,20 @@ func (s *ProxyAutoSwitchService) Start() {
 		return
 	}
 	s.startOnce.Do(func() {
+		// 启动时先探测一次延迟排名，然后每小时刷新。
+		go s.refreshLatencyRankSafely()
+		go func() {
+			hourly := time.NewTicker(time.Hour)
+			defer hourly.Stop()
+			for {
+				select {
+				case <-s.rootCtx.Done():
+					return
+				case <-hourly.C:
+					s.refreshLatencyRankSafely()
+				}
+			}
+		}()
 		go func() {
 			defer close(s.doneCh)
 			ticker := time.NewTicker(proxyAutoSwitchCycleInterval)
@@ -490,6 +482,80 @@ func (s *ProxyAutoSwitchService) Start() {
 			}
 		}()
 	})
+}
+
+func (s *ProxyAutoSwitchService) refreshLatencyRankSafely() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("proxy_autoswitch_latency_rank_panic", "recover", r)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(s.rootCtx, 5*time.Minute)
+	defer cancel()
+	if err := s.refreshLatencyRank(ctx); err != nil && s.rootCtx.Err() == nil {
+		slog.Warn("proxy_autoswitch_latency_rank_failed", "error", err)
+	}
+}
+
+func (s *ProxyAutoSwitchService) refreshLatencyRank(ctx context.Context) error {
+	proxies, err := s.repo.ListProxies(ctx)
+	if err != nil {
+		return fmt.Errorf("list proxies for latency rank: %w", err)
+	}
+	now := s.now()
+	eligible := make([]ProxyWithAccountCount, 0, len(proxies))
+	for _, p := range proxies {
+		if p.Status == StatusActive && !p.IsExpired(now) {
+			eligible = append(eligible, p)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+
+	type proxyMS struct {
+		id int64
+		ms int64
+	}
+	results := make([]proxyMS, len(eligible))
+	for i, p := range eligible {
+		results[i] = proxyMS{id: p.ID, ms: math.MaxInt64}
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, proxyAutoSwitchProbeConcurrency)
+	for i, p := range eligible {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, p ProxyWithAccountCount) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			vals := s.probeOne(ctx, Proxy{
+				ID: p.ID, Protocol: p.Protocol, Host: p.Host, Port: p.Port,
+				Username: p.Username, Password: p.Password, MihomoNodeID: p.MihomoNodeID,
+			})
+			if len(vals) > 0 {
+				results[i].ms = medianInt64(vals)
+			}
+		}(i, p)
+	}
+	wg.Wait()
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].ms != results[j].ms {
+			return results[i].ms < results[j].ms
+		}
+		return results[i].id < results[j].id
+	})
+	ranked := make([]int64, len(results))
+	for i, r := range results {
+		ranked[i] = r.id
+	}
+	s.latencyRankMu.Lock()
+	s.latencyRank = ranked
+	s.latencyRankMu.Unlock()
+	slog.Info("proxy_autoswitch_latency_rank_refreshed", "count", len(ranked))
+	return nil
 }
 
 func (s *ProxyAutoSwitchService) runCycleSafely() {

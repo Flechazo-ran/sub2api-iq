@@ -178,13 +178,9 @@ func (s *ProxyAutoSwitchService) lastSwitchTimes(ctx context.Context) (map[int64
 	return out, nil
 }
 
-// Proxies lists every undeleted proxy for the candidate-pool picker. In-pool
-// proxies come first in pool order, the rest by id.
+// Proxies lists every undeleted proxy, ordered by the hourly latency rank.
+// Probes-not-yet-run proxies sort last by id.
 func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchProxyList, error) {
-	cfg, err := s.GetConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
 	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
 		return nil, err
@@ -194,15 +190,19 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 		ids = append(ids, proxies[i].ID)
 	}
 	regions := s.cachedRegions(ctx, ids)
-	poolIndex := make(map[int64]int, len(cfg.CandidateProxyIDs))
-	for i, id := range cfg.CandidateProxyIDs {
-		poolIndex[id] = i
+
+	s.latencyRankMu.RLock()
+	rank := s.latencyRank
+	s.latencyRankMu.RUnlock()
+	rankIndex := make(map[int64]int, len(rank))
+	for i, id := range rank {
+		rankIndex[id] = i
 	}
+
 	now := s.now()
 	items := make([]ProxyAutoSwitchProxyItem, 0, len(proxies))
 	for i := range proxies {
 		p := &proxies[i]
-		_, inPool := poolIndex[p.ID]
 		items = append(items, ProxyAutoSwitchProxyItem{
 			ID:           p.ID,
 			Name:         p.Name,
@@ -211,15 +211,14 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 			ExpiresAt:    p.ExpiresAt,
 			Expired:      p.IsExpired(now),
 			AccountCount: p.AccountCount,
-			InPool:       inPool,
 		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
-		pi, iOK := poolIndex[items[i].ID]
-		pj, jOK := poolIndex[items[j].ID]
+		ri, iOK := rankIndex[items[i].ID]
+		rj, jOK := rankIndex[items[j].ID]
 		switch {
 		case iOK && jOK:
-			return pi < pj
+			return ri < rj
 		case iOK != jOK:
 			return iOK
 		default:

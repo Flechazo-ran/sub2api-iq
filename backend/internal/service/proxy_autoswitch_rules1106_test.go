@@ -24,11 +24,20 @@ func slowWorld(t *testing.T, strategy string, candidates ...int64) (*pasWorld, *
 	w.setProbe(91, 800)
 	w.addUsages(65, 91, 20, w.now.Add(-time.Minute), 16000)
 	cfg := v2Config()
-	cfg.CandidateProxyIDs = candidates
 	cfg.Strategy = strategy
 	w.saveConfig(cfg)
 	svc := w.service()
 	svc.randInt = func(int) int { return 0 }
+	// Build latency rank from candidates so the intended order is preserved
+	// even though the pool is now automatic.
+	rank := make([]int64, 0, len(candidates)+1)
+	for _, id := range candidates {
+		if id != 91 {
+			rank = append(rank, id)
+		}
+	}
+	rank = append(rank, 91)
+	svc.latencyRank = rank
 	return w, svc
 }
 
@@ -226,9 +235,10 @@ func TestProxyAutoSwitchV2UnmanagedAccountsNeverSwitched(t *testing.T) {
 }
 
 func TestProxyAutoSwitchV2SkipsUsedExpiredCurrentAndInactive(t *testing.T) {
-	t.Run("used by another account", func(t *testing.T) {
+	t.Run("used by another account (at max per proxy)", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96)
 		w.addAccount(66, 96)
+		w.addAccount(67, 96) // 96 now has 2 accounts = max
 		runChecks(t, svc, w, 1)
 		require.Empty(t, w.updates)
 		e := w.lastEvent()
@@ -243,7 +253,7 @@ func TestProxyAutoSwitchV2SkipsUsedExpiredCurrentAndInactive(t *testing.T) {
 		require.Empty(t, w.updates)
 		require.Equal(t, "池子里的代理都过期了", w.lastEvent().Reason)
 	})
-	t.Run("current proxy is not a candidate", func(t *testing.T) {
+	t.Run("current proxy skipped, picks another", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 91, 96)
 		runChecks(t, svc, w, 1)
 		require.Equal(t, [][2]int64{{65, 96}}, w.updates)
@@ -251,27 +261,29 @@ func TestProxyAutoSwitchV2SkipsUsedExpiredCurrentAndInactive(t *testing.T) {
 	t.Run("random only picks qualified", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96, 97, 98, 99)
 		w.addAccount(66, 96)
+		w.addAccount(67, 96) // fills max=2
 		at := w.now.Add(-time.Hour)
 		w.proxies[97].ExpiresAt = &at
 		w.proxies[99].Status = "disabled"
 		runChecks(t, svc, w, 1)
 		require.Equal(t, [][2]int64{{65, 98}}, w.updates)
 	})
-	t.Run("empty pool", func(t *testing.T) {
+	t.Run("only current proxy exists", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom)
 		runChecks(t, svc, w, 1)
 		require.Empty(t, w.updates)
-		require.Equal(t, "候选代理池为空", w.lastEvent().Reason)
+		require.Equal(t, "候选代理池里只有当前代理", w.lastEvent().Reason)
 	})
 }
 
 func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
-	t.Run("current not in the pool starts from the beginning", func(t *testing.T) {
+	t.Run("picks the lowest-latency proxy (no latency rank = by id)", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategySequential, 96, 97, 98)
 		runChecks(t, svc, w, 1)
+		// No latency rank set; eligible sorted by ID, picks smallest = 96
 		require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 	})
-	t.Run("starts after the current proxy", func(t *testing.T) {
+	t.Run("picks by latency rank when rank is set", func(t *testing.T) {
 		w := newPASWorld()
 		w.addProxy(91, "JP", 30)
 		w.addProxy(96, "JP", 30)
@@ -282,10 +294,12 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.setProbe(97, 400)
 		w.addUsages(65, 96, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
-		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
-		runChecks(t, w.service(), w, 1)
+		svc := w.service()
+		// inject latency rank: 97 fastest, then 98, then 96, then 91
+		svc.latencyRank = []int64{97, 98, 96, 91}
+		runChecks(t, svc, w, 1)
 		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
 	})
 	t.Run("skips the proxy taken by another account", func(t *testing.T) {
@@ -296,18 +310,20 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.addProxy(98, "JP", 30)
 		w.addAccount(65, 96)
 		w.addAccount(66, 97)
+		w.addAccount(67, 97) // 97 at max=2
 		w.setProbe(96, 800)
 		w.setProbe(97, 400)
 		w.setProbe(98, 400)
 		w.addUsages(65, 96, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
-		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
-		runChecks(t, w.service(), w, 1)
+		svc := w.service()
+		svc.latencyRank = []int64{97, 98, 96, 91}
+		runChecks(t, svc, w, 1)
 		require.Equal(t, [][2]int64{{65, 98}}, w.updates)
 	})
-	t.Run("skips the expired proxy and wraps back", func(t *testing.T) {
+	t.Run("skips the expired proxy", func(t *testing.T) {
 		w := newPASWorld()
 		w.addProxy(91, "JP", 30)
 		w.addProxy(96, "JP", 30)
@@ -320,28 +336,32 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.proxies[98].ExpiresAt = &at
 		w.addUsages(65, 97, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
-		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
-		runChecks(t, w.service(), w, 1)
+		svc := w.service()
+		svc.latencyRank = []int64{98, 96, 97, 91}
+		runChecks(t, svc, w, 1)
 		require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 	})
-	t.Run("wraps to the beginning", func(t *testing.T) {
+	t.Run("picks only proxy with room when max=2", func(t *testing.T) {
 		w := newPASWorld()
 		w.addProxy(91, "JP", 30)
 		w.addProxy(96, "JP", 30)
 		w.addProxy(97, "JP", 30)
 		w.addProxy(98, "JP", 30)
 		w.addAccount(65, 98)
+		w.addAccount(66, 96)
+		w.addAccount(67, 96) // 96 at max=2
 		w.setProbe(98, 800)
 		w.setProbe(96, 400)
 		w.addUsages(65, 98, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
-		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
-		runChecks(t, w.service(), w, 1)
-		require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+		svc := w.service()
+		svc.latencyRank = []int64{96, 97, 98, 91}
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
 	})
 }
 
@@ -357,7 +377,6 @@ func TestProxyAutoSwitchV2RegionStrategy(t *testing.T) {
 		w.setProbe(97, 400)
 		w.addUsages(65, 91, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
-		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategyRegion
 		w.saveConfig(cfg)
 		svc := w.service()
@@ -377,7 +396,8 @@ func TestProxyAutoSwitchV2RegionStrategy(t *testing.T) {
 
 func TestProxyAutoSwitchV2NoCandidateNotDuplicated(t *testing.T) {
 	w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96)
-	w.addAccount(66, 96)
+	w.addAccount(66, 96) // max=2 default, but need 2 to fill; add another
+	w.addAccount(67, 96)
 	runChecks(t, svc, w, 3)
 	count := 0
 	for _, e := range w.events {
@@ -391,11 +411,13 @@ func TestProxyAutoSwitchV2NoCandidateNotDuplicated(t *testing.T) {
 func TestProxyAutoSwitchV2NoCandidateReasonChangeWritesAgain(t *testing.T) {
 	w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96)
 	w.addAccount(66, 96)
+	w.addAccount(67, 96)
 	runChecks(t, svc, w, 1)
 	require.Len(t, w.events, 1)
 	require.Equal(t, "池子里的代理都被别的号占用了", w.events[0].Reason)
 
 	w.accounts[66].Deleted = true
+	w.accounts[67].Deleted = true
 	at := w.now.Add(-time.Hour)
 	w.proxies[96].ExpiresAt = &at
 	runChecks(t, svc, w, 1)
@@ -410,9 +432,27 @@ func TestProxyAutoSwitchV2NoCandidateReasonChangeWritesAgain(t *testing.T) {
 }
 
 func TestProxyAutoSwitchV2NoCandidateCurrentProxyChangeWritesAgain(t *testing.T) {
-	w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96)
-	w.addAccount(66, 96)
+	// Use max=1 so a single account fills a proxy, matching the scenario where
+	// every proxy except the current one is at capacity.
+	w := newPASWorld()
+	w.addProxy(91, "JP", 30)
+	w.addProxy(96, "JP", 30)
 	w.addProxy(92, "JP", 30)
+	w.addAccount(65, 91)
+	w.addAccount(66, 96)
+	w.addAccount(67, 92)
+	w.addAccount(68, 91) // keep 91 occupied even after 65 moves away
+	w.setProbe(91, 800)
+	w.setProbe(96, 400)
+	w.addUsages(65, 91, 20, w.now.Add(-time.Minute), 16000)
+	cfg := v2Config()
+	cfg.Strategy = ProxyAutoSwitchStrategyRandom
+	cfg.MaxAccountsPerProxy = 1
+	w.saveConfig(cfg)
+	svc := w.service()
+	svc.randInt = func(int) int { return 0 }
+	svc.latencyRank = []int64{96, 92, 91}
+
 	runChecks(t, svc, w, 1)
 	require.Len(t, w.events, 1)
 	require.Equal(t, int64(91), *w.events[0].FromProxyID)

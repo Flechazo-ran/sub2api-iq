@@ -2,10 +2,10 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -242,18 +242,20 @@ type proxyAutoSwitchPoolIssue struct {
 }
 
 func (p proxyAutoSwitchPoolIssue) emptyReason() string {
-	total := p.missing + p.inactive + p.expired + p.used + p.current
+	// Count only the "real" failures (not current-proxy skips) for single-cause checks.
+	real := p.missing + p.inactive + p.expired + p.used
+	total := real + p.current
 	switch {
 	case total == 0:
 		return "候选代理池为空"
-	case p.used == total:
-		return "池子里的代理都被别的号占用了"
-	case p.expired == total:
-		return "池子里的代理都过期了"
-	case p.inactive == total:
-		return "池子里的代理都不可用了"
 	case p.current == total:
 		return "候选代理池里只有当前代理"
+	case p.used == real:
+		return "池子里的代理都被别的号占用了"
+	case p.expired == real:
+		return "池子里的代理都过期了"
+	case p.inactive == real:
+		return "池子里的代理都不可用了"
 	}
 	parts := make([]string, 0, 4)
 	if p.missing > 0 {
@@ -274,23 +276,34 @@ func (p proxyAutoSwitchPoolIssue) emptyReason() string {
 	return "没有可用候选代理：" + strings.Join(parts, "，")
 }
 
-// loadCandidatePool 只从 candidate_proxy_ids 里挑：没删除、状态可用、没过期、
-// 没有任何别的未删除账号在用、不是当前代理。顺序与 candidate_proxy_ids 一致。
+// loadCandidatePool 返回所有可用代理（active、没过期、没超过上限、不是当前代理），
+// 按延迟排名顺序排列（延迟未知的排最后）。
 func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg ProxyAutoSwitchConfig, now time.Time,
 	currentID int64) ([]Proxy, string, error) {
+	maxPerProxy := cfg.MaxAccountsPerProxy
+	if maxPerProxy <= 0 {
+		maxPerProxy = 2
+	}
+	proxies, err := s.repo.ListProxies(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// 按延迟排名排序
+	s.latencyRankMu.RLock()
+	rank := s.latencyRank
+	s.latencyRankMu.RUnlock()
+	rankIndex := make(map[int64]int, len(rank))
+	for i, id := range rank {
+		rankIndex[id] = i
+	}
+
+	eligible := make([]Proxy, 0, len(proxies))
 	var issue proxyAutoSwitchPoolIssue
-	eligible := make([]Proxy, 0, len(cfg.CandidateProxyIDs))
-	for _, id := range cfg.CandidateProxyIDs {
-		if id == currentID {
+	for i := range proxies {
+		p := &proxies[i]
+		if p.ID == currentID {
 			issue.current++
-			continue
-		}
-		p, err := s.proxies.GetByID(ctx, id)
-		if err != nil || p == nil {
-			if err != nil && !errors.Is(err, ErrProxyNotFound) {
-				return nil, "", err
-			}
-			issue.missing++
 			continue
 		}
 		if p.Status != StatusActive {
@@ -301,46 +314,44 @@ func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg Prox
 			issue.expired++
 			continue
 		}
-		used, err := s.proxies.CountAccountsByProxyID(ctx, id)
-		if err != nil {
-			return nil, "", err
-		}
-		if used > 0 {
+		if int(p.AccountCount) >= maxPerProxy {
 			issue.used++
 			continue
 		}
-		eligible = append(eligible, *p)
+		eligible = append(eligible, Proxy{
+			ID: p.ID, Name: p.Name, Protocol: p.Protocol, Host: p.Host, Port: p.Port,
+			Username: p.Username, Password: p.Password, MihomoNodeID: p.MihomoNodeID,
+			Status: p.Status, ExpiresAt: p.ExpiresAt,
+		})
 	}
 	if len(eligible) == 0 {
 		return nil, issue.emptyReason(), nil
 	}
+	sort.SliceStable(eligible, func(i, j int) bool {
+		ri, iHas := rankIndex[eligible[i].ID]
+		rj, jHas := rankIndex[eligible[j].ID]
+		switch {
+		case iHas && jHas:
+			return ri < rj
+		case iHas != jHas:
+			return iHas
+		default:
+			return eligible[i].ID < eligible[j].ID
+		}
+	})
 	return eligible, "", nil
 }
 
 // selectProxy applies the configured strategy to the already qualified pool.
-// sequential keeps candidate_proxy_ids order and starts after the current proxy,
-// wrapping once; random and region pick a random qualified proxy.
+// sequential picks the first proxy in the latency-sorted eligible list;
+// random and region pick a random qualified proxy.
 func (s *ProxyAutoSwitchService) selectProxy(cfg ProxyAutoSwitchConfig, currentID int64, currentRegion string,
 	eligible []Proxy, regions map[int64]string) (*Proxy, string) {
 	switch cfg.Strategy {
 	case ProxyAutoSwitchStrategySequential:
-		start := 0
-		for i, id := range cfg.CandidateProxyIDs {
-			if id == currentID {
-				start = i + 1
-				break
-			}
-		}
-		byID := make(map[int64]Proxy, len(eligible))
-		for _, p := range eligible {
-			byID[p.ID] = p
-		}
-		n := len(cfg.CandidateProxyIDs)
-		for offset := 0; offset < n; offset++ {
-			id := cfg.CandidateProxyIDs[(start+offset)%n]
-			if p, ok := byID[id]; ok {
-				return &p, ""
-			}
+		// eligible 已按延迟排序，从头取第一个可用的
+		if len(eligible) > 0 {
+			return &eligible[0], ""
 		}
 		return nil, "顺序策略没有可用候选代理"
 	case ProxyAutoSwitchStrategyRegion:
@@ -422,7 +433,7 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 	event.ToRegion = &region
 	event.FromProbeMS = s.probeProxyMS(ctx, *current)
 	event.ToProbeMS = s.probeProxyMS(ctx, *target)
-	switched, busy, err := s.applySwitch(ctx, account.ID, currentID, *target, event)
+	switched, busy, err := s.applySwitch(ctx, cfg, account.ID, currentID, *target, event)
 	if err != nil || switched {
 		return switched, err
 	}
@@ -435,10 +446,14 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 }
 
 // applySwitch rechecks under the assign lock that the account still uses the
-// slow proxy and the target is still idle, then switches through the admin
-// account edit path. busy means the target was taken meanwhile.
-func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fromID int64, target Proxy,
+// slow proxy and the target is not over capacity, then switches through the admin
+// account edit path. busy means the target was at capacity meanwhile.
+func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, cfg ProxyAutoSwitchConfig, accountID, fromID int64, target Proxy,
 	event *ProxyAutoSwitchEvent) (switched, busy bool, err error) {
+	maxPerProxy := cfg.MaxAccountsPerProxy
+	if maxPerProxy <= 0 {
+		maxPerProxy = 2
+	}
 	err = s.withAssignLock(ctx, func(ctx context.Context) error {
 		fresh, err := s.repo.GetAccount(ctx, accountID)
 		if err != nil {
@@ -452,7 +467,7 @@ func (s *ProxyAutoSwitchService) applySwitch(ctx context.Context, accountID, fro
 		if err != nil {
 			return err
 		}
-		if used > 0 {
+		if int(used) >= maxPerProxy {
 			busy = true
 			return nil
 		}

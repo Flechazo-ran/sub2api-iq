@@ -290,25 +290,27 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	data := asMap(t, body["data"])
 	require.Equal(t, []string{
-		"candidate_proxy_ids", "enabled", "group_ids", "mean_threshold_ms", "min_samples",
+		"enabled", "group_ids", "max_accounts_per_proxy", "mean_threshold_ms", "min_samples",
 		"p60_threshold_ms", "strategy", "window_minutes",
 	}, sortedKeys(data))
 	require.Equal(t, false, data["enabled"])
-	require.Equal(t, "random", data["strategy"])
+	require.Equal(t, service.ProxyAutoSwitchStrategySequential, data["strategy"])
 
-	// 老字段照旧忽略，新字段正常保存。
+	// 老字段照旧忽略（candidate_proxy_ids 被忽略），新字段正常保存。
 	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", map[string]any{
 		"enabled": true, "group_ids": []int{16}, "window_minutes": 3, "min_samples": 30,
-		"p60_threshold_ms": 12000, "mean_threshold_ms": 18000, "candidate_proxy_ids": []int{68, 42, 68},
+		"p60_threshold_ms": 12000, "mean_threshold_ms": 18000, "max_accounts_per_proxy": 3,
 		"strategy": "sequential",
 		"metric":   "response_headers", "threshold_ms": 2500, "consecutive_checks": 2,
 		"account_cooldown_minutes": 10, "observe_minutes": 10, "region_policy": "any",
+		"candidate_proxy_ids": []int{68, 42},
 	})
 	require.Equal(t, http.StatusOK, code)
 	data = asMap(t, body["data"])
 	require.Equal(t, true, data["enabled"])
 	require.Equal(t, "sequential", data["strategy"])
-	require.Equal(t, []any{float64(68), float64(42)}, data["candidate_proxy_ids"])
+	require.Equal(t, float64(3), data["max_accounts_per_proxy"])
+	require.NotContains(t, data, "candidate_proxy_ids")
 	require.NotContains(t, data, "metric")
 	require.NotContains(t, data, "threshold_ms")
 	require.NotContains(t, data, "account_cooldown_minutes")
@@ -383,21 +385,21 @@ func TestProxyAutoSwitchHandlerAccountsAndProxies(t *testing.T) {
 	require.Equal(t, "越南河内-165.101.116.72", item["proxy_label"])
 	require.Equal(t, []any{float64(16)}, item["group_ids"])
 
-	// 候选池顺序：42、68 在前；其余按 id。
+	// 代理列表按延迟排名排序（没有排名时按 id）。
 	code, _ = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", map[string]any{
 		"group_ids": []int{16}, "window_minutes": 5, "min_samples": 20,
 		"p60_threshold_ms": 10000, "mean_threshold_ms": 15000,
-		"candidate_proxy_ids": []int{68, 42}, "strategy": "random",
+		"max_accounts_per_proxy": 2, "strategy": "random",
 	})
 	require.Equal(t, http.StatusOK, code)
 	code, body = doPAS(t, r, http.MethodGet, "/api/v1/admin/proxy-autoswitch/proxies", nil)
 	require.Equal(t, http.StatusOK, code)
 	items = asSlice(t, asMap(t, body["data"])["items"])
 	require.Len(t, items, 4)
-	require.Equal(t, float64(68), asMap(t, items[0])["id"])
-	require.Equal(t, true, asMap(t, items[0])["in_pool"])
+	// 没有延迟排名时按 id 排序
+	require.Equal(t, float64(19), asMap(t, items[0])["id"])
 	require.Equal(t, float64(42), asMap(t, items[1])["id"])
-	require.Equal(t, float64(19), asMap(t, items[2])["id"])
+	require.Equal(t, float64(68), asMap(t, items[2])["id"])
 	require.Equal(t, float64(96), asMap(t, items[3])["id"])
 	require.Equal(t, float64(1), asMap(t, items[3])["account_count"])
 }

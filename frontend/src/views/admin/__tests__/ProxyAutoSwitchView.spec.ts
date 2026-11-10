@@ -26,8 +26,8 @@ function config(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitch
     min_samples: 20,
     p60_threshold_ms: 10000,
     mean_threshold_ms: 15000,
-    candidate_proxy_ids: [],
-    strategy: 'random',
+    max_accounts_per_proxy: 2,
+    strategy: 'sequential',
     ...overrides,
   }
 }
@@ -48,7 +48,6 @@ function proxy(id: number, overrides: Partial<ProxyAutoSwitchProxy> = {}): Proxy
     expires_at: id === 25 ? '2026-10-01T00:00:00Z' : '2026-12-20T00:00:00Z',
     expired: id === 25,
     account_count: id === 68 ? 1 : 0,
-    in_pool: false,
     ...overrides,
   }
 }
@@ -126,7 +125,7 @@ beforeEach(() => {
 afterEach(() => wrapper?.unmount())
 
 describe('ProxyAutoSwitchView settings', () => {
-  it('shows the four contract defaults and saves exactly the eight contract fields, converting seconds to milliseconds', async () => {
+  it('shows the contract defaults and saves exactly the contract fields, converting seconds to milliseconds', async () => {
     api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
     wrapper = mountView(); await flushPromises()
 
@@ -142,6 +141,7 @@ describe('ProxyAutoSwitchView settings', () => {
     expect((wrapper.get('[data-testid="pas-min_samples"]').element as HTMLInputElement).value).toBe('20')
     expect((wrapper.get('[data-testid="pas-p60_threshold_s"]').element as HTMLInputElement).value).toBe('10')
     expect((wrapper.get('[data-testid="pas-mean_threshold_s"]').element as HTMLInputElement).value).toBe('15')
+    expect((wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').element as HTMLInputElement).value).toBe('2')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toBe('规则：统计过去 5 分钟，窗口里不少于 20 个请求，首字 p60 大于 10 秒且首字均值大于 15 秒，就自动更换代理。首字和耗时都取自使用记录的每个请求。')
 
     await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
@@ -149,9 +149,8 @@ describe('ProxyAutoSwitchView settings', () => {
     await wrapper.get('[data-testid="pas-min_samples"]').setValue('30')
     await wrapper.get('[data-testid="pas-p60_threshold_s"]').setValue('12.5')
     await wrapper.get('[data-testid="pas-mean_threshold_s"]').setValue('16.5')
-    await wrapper.get('[data-testid="pas-proxy-checkbox-19"]').setValue(true)
-    await wrapper.get('[data-testid="pas-proxy-checkbox-99"]').setValue(true)
-    await wrapper.get('[data-testid="pas-strategy-sequential"]').trigger('click')
+    await wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').setValue('3')
+    await wrapper.get('[data-testid="pas-strategy-random"]').trigger('click')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('统计过去 7 分钟')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('不少于 30 个请求')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('首字 p60 大于 12.5 秒')
@@ -167,10 +166,11 @@ describe('ProxyAutoSwitchView settings', () => {
       min_samples: 30,
       p60_threshold_ms: 12500,
       mean_threshold_ms: 16500,
-      candidate_proxy_ids: [19, 99],
-      strategy: 'sequential',
+      max_accounts_per_proxy: 3,
+      strategy: 'random',
     })
-    expect(Object.keys(payload).sort()).toEqual(['candidate_proxy_ids', 'enabled', 'group_ids', 'mean_threshold_ms', 'min_samples', 'p60_threshold_ms', 'strategy', 'window_minutes'])
+    expect(Object.keys(payload).sort()).toEqual(['enabled', 'group_ids', 'max_accounts_per_proxy', 'mean_threshold_ms', 'min_samples', 'p60_threshold_ms', 'strategy', 'window_minutes'])
+    expect(payload).not.toHaveProperty('candidate_proxy_ids')
     expect(payload).not.toHaveProperty('metric')
     expect(payload).not.toHaveProperty('threshold_ms')
     expect(payload).not.toHaveProperty('consecutive_checks')
@@ -195,30 +195,6 @@ describe('ProxyAutoSwitchView settings', () => {
     expect((api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig).group_ids).toEqual([16, 44])
   })
 
-  it('drops deleted proxy ids from the save payload', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 777] }))
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
-    wrapper = mountView(); await flushPromises()
-
-    await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
-    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
-    await flushPromises()
-    expect((api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig).candidate_proxy_ids).toEqual([68])
-  })
-
-  it('keeps the configured proxy pool when the proxy list fails to load', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 777] }))
-    api.listProxies.mockRejectedValue({ status: 500, message: '代理列表读取失败' })
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
-    wrapper = mountView(); await flushPromises()
-
-    await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
-    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
-    await flushPromises()
-    expect((api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig).candidate_proxy_ids).toEqual([68, 777])
-  })
-
   it('reloads the account monitor and proxy list after a successful save', async () => {
     api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
     api.listAccounts
@@ -237,110 +213,24 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.get('[data-testid="pas-account-window"]').text()).toBe('过去 7 分钟 · 每个号单独看')
   })
 
-  it('moves a visible proxy past a deleted proxy id instead of swapping with the hidden id', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 777, 19] }))
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+  it('shows proxies sorted by latency rank (server order) and marks full ones', async () => {
+    // 后端已按延迟排好序返回，前端照序展示，账号数 >= 配置上限的标「已满」。
+    api.listProxies.mockResolvedValue([proxy(19), proxy(68, { account_count: 2 }), proxy(42)])
     wrapper = mountView(); await flushPromises()
 
-    expect(poolOrder()).toEqual([68, 19])
-    await wrapper.get('[data-testid="pas-pool-down-68"]').trigger('click')
-    expect(poolOrder()).toEqual([19, 68])
-
-    await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
-    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
-    await flushPromises()
-    expect((api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig).candidate_proxy_ids).toEqual([19, 68])
+    const rows = wrapper.findAll('[data-testid="pas-proxies"] [data-proxy-id]')
+    expect(rows.map(r => Number(r.attributes('data-proxy-id')))).toEqual([19, 68, 42])
+    expect(wrapper.find('[data-proxy-id="68"] [data-testid="pas-proxy-full"]').exists()).toBe(true)
+    expect(wrapper.find('[data-proxy-id="19"] [data-testid="pas-proxy-full"]').exists()).toBe(false)
   })
 
-  it('adds checked proxies in click order and moves them up or down to change candidate_proxy_ids', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19, 42] }))
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
+  it('switches strategy and shows the right aria-checked', async () => {
     wrapper = mountView(); await flushPromises()
-
-    expect(poolOrder()).toEqual([68, 19, 42])
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
-    await wrapper.get('[data-testid="pas-proxy-checkbox-99"]').setValue(true)
-    expect(poolOrder()).toEqual([68, 19, 42, 99])
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
-    await wrapper.get('[data-testid="pas-proxy-checkbox-99"]').setValue(false)
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(false)
-    await wrapper.get('[data-testid="pas-proxy-checkbox-99"]').setValue(true)
-    await wrapper.get('[data-testid="pas-pool-up-99"]').trigger('click')
-    expect(poolOrder()).toEqual([68, 19, 99, 42])
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
-    await wrapper.get('[data-testid="pas-pool-down-68"]').trigger('click')
-    expect(poolOrder()).toEqual([19, 68, 99, 42])
-    await wrapper.get('[data-testid="pas-proxy-checkbox-19"]').setValue(false)
-    expect(poolOrder()).toEqual([68, 99, 42])
-
-    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
-    await flushPromises()
-    expect((api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig).candidate_proxy_ids).toEqual([68, 99, 42])
-  })
-
-  it('lists only active, unexpired proxies in the candidate pool table and switches strategy', async () => {
-    api.listProxies.mockResolvedValue([...defaultProxies, proxy(77, { status: 'inactive' })])
-    wrapper = mountView(); await flushPromises()
-
-    const listed = wrapper.findAll('[data-testid="pas-proxies"] [data-proxy-id]').map(row => Number(row.attributes('data-proxy-id')))
-    expect(listed).toEqual([68, 19, 42, 99])
-    expect(wrapper.find('[data-proxy-id="25"]').exists()).toBe(false)
-    expect(wrapper.find('[data-proxy-id="77"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="pas-strategy-random"]').attributes('aria-checked')).toBe('true')
+    // 默认 sequential
+    expect(wrapper.get('[data-testid="pas-strategy-sequential"]').attributes('aria-checked')).toBe('true')
     await wrapper.get('[data-testid="pas-strategy-region"]').trigger('click')
     expect(wrapper.get('[data-testid="pas-strategy-region"]').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('[data-testid="pas-strategy-random"]').attributes('aria-checked')).toBe('false')
-  })
-
-  it('refresh removes disabled and expired proxies from the saved pool and saves only that change', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19, 42] }))
-    api.updateConfig.mockImplementation(async (body: ProxyAutoSwitchConfig) => body)
-    wrapper = mountView(); await flushPromises()
-    expect(poolOrder()).toEqual([68, 19, 42])
-
-    // 另有一处还没保存的改动，刷新保存时不能带上它。
-    await wrapper.get('[data-testid="pas-window_minutes"]').setValue('9')
-    // 刷新时 19 在 IP 管理里被停用、42 过期了。
-    api.listProxies.mockResolvedValue([proxy(68), proxy(19, { status: 'inactive' }), proxy(42, { expired: true }), proxy(99), proxy(25)])
-    await wrapper.get('[data-testid="pas-pool-refresh"]').trigger('click')
-    await flushPromises()
-
-    expect(api.updateConfig).toHaveBeenCalledTimes(1)
-    const payload = api.updateConfig.mock.calls[0][0] as ProxyAutoSwitchConfig
-    expect(payload).toEqual(config({ candidate_proxy_ids: [68] }))
-    expect(poolOrder()).toEqual([68])
-    expect(wrapper.get('[data-testid="pas-notice"]').text()).toContain('已把 2 个停用或过期的代理移出候选池并保存')
-    // 没保存的窗口改动还在，页面仍然提示有未保存的改动。
-    expect((wrapper.get('[data-testid="pas-window_minutes"]').element as HTMLInputElement).value).toBe('9')
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
-  })
-
-  it('refresh with nothing to remove reloads the list without saving', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19] }))
-    wrapper = mountView(); await flushPromises()
-    expect(api.listProxies).toHaveBeenCalledTimes(1)
-
-    await wrapper.get('[data-testid="pas-pool-refresh"]').trigger('click')
-    await flushPromises()
-
-    expect(api.listProxies).toHaveBeenCalledTimes(2)
-    expect(api.updateConfig).not.toHaveBeenCalled()
-    expect(poolOrder()).toEqual([68, 19])
-    expect(wrapper.get('[data-testid="pas-notice"]').text()).toContain('候选池里没有停用或过期的代理')
-  })
-
-  it('refresh shows the backend error when saving the cleaned pool fails', async () => {
-    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 19] }))
-    api.updateConfig.mockRejectedValue({ status: 500, message: '保存代理优选配置失败' })
-    wrapper = mountView(); await flushPromises()
-
-    api.listProxies.mockResolvedValue([proxy(68), proxy(19, { status: 'inactive' })])
-    await wrapper.get('[data-testid="pas-pool-refresh"]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.get('[data-testid="pas-pool-refresh-error"]').text()).toContain('保存代理优选配置失败')
-    expect(poolOrder()).toEqual([68])
-    expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="pas-strategy-sequential"]').attributes('aria-checked')).toBe('false')
   })
 
   it('blocks out-of-range values before calling the backend', async () => {
@@ -357,6 +247,17 @@ describe('ProxyAutoSwitchView settings', () => {
     expect(wrapper.find('[data-testid="pas-invalid"]').exists()).toBe(false)
   })
 
+  it('validates max_accounts_per_proxy range', async () => {
+    wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').setValue('101')
+    expect(wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').attributes('aria-invalid')).toBe('true')
+    expect(wrapper.get('[data-testid="pas-invalid"]').text()).toContain('1')
+    expect(wrapper.get('[data-testid="pas-save"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
+    await flushPromises()
+    expect(api.updateConfig).not.toHaveBeenCalled()
+  })
+
   it('shows a config load error and retries', async () => {
     api.getConfig.mockRejectedValueOnce({ status: 500, message: '读取配置失败' })
     wrapper = mountView(); await flushPromises()
@@ -369,12 +270,12 @@ describe('ProxyAutoSwitchView settings', () => {
   })
 
   it('shows the backend message when saving fails and keeps the edits', async () => {
-    api.updateConfig.mockRejectedValue({ status: 400, code: 400, message: 'candidate_proxy_ids 里的代理不存在' })
+    api.updateConfig.mockRejectedValue({ status: 400, code: 400, message: '配置无效' })
     wrapper = mountView(); await flushPromises()
     await wrapper.get('[data-testid="pas-min_samples"]').setValue('30')
     await wrapper.get('[data-testid="pas-settings"]').trigger('submit')
     await flushPromises()
-    expect(wrapper.get('[data-testid="pas-save-error"]').text()).toBe('candidate_proxy_ids 里的代理不存在')
+    expect(wrapper.get('[data-testid="pas-save-error"]').text()).toBe('配置无效')
     expect((wrapper.get('[data-testid="pas-min_samples"]').element as HTMLInputElement).value).toBe('30')
     expect(wrapper.find('[data-testid="pas-dirty"]').exists()).toBe(true)
     expect(api.listAccounts).toHaveBeenCalledTimes(1)
