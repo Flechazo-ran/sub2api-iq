@@ -158,6 +158,10 @@ func (s *pasHandlerStore) ListMeasuring(context.Context) ([]service.ProxyAutoSwi
 	return nil, nil
 }
 
+func (s *pasHandlerStore) AuditWrites(context.Context, []int64, time.Time, time.Time) ([]service.FirstTokenTrendAuditWrite, error) {
+	return nil, nil
+}
+
 func (s *pasHandlerStore) LatestEventPerAccount(_ context.Context, since time.Time, statuses []string) ([]service.ProxyAutoSwitchEvent, error) {
 	latest := map[int64]service.ProxyAutoSwitchEvent{}
 	for _, e := range s.events {

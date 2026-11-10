@@ -152,6 +152,51 @@ func TestProxyAutoSwitchV2UntracedSlowRequestsAfterSwitchStillSwitch(t *testing.
 	require.Equal(t, 20, w.lastEvent().Before.Samples)
 }
 
+// 人工在后台改代理后，同样只算改到当前代理之后开始的请求（2026-11-10 复现：人工改完 15 秒被自动换走）。
+func TestProxyAutoSwitchV2ManualEditIgnoresRequestsBeforeChange(t *testing.T) {
+	for _, bulk := range []bool{false, true} {
+		w, svc := untracedSlowWorld(t)
+		w.addProxy(95, "JP", 30)
+		w.manualProxyEdit(65, 95, bulk)
+
+		runChecks(t, svc, w, 3)
+		require.Empty(t, w.updates, "bulk=%v: the old proxy's requests must not make the manually chosen proxy look slow", bulk)
+		list, err := svc.Accounts(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, 0, list.Items[0].Samples, "bulk=%v", bulk)
+	}
+}
+
+func TestProxyAutoSwitchV2ManualEditStillSwitchesWhenNewProxyIsSlow(t *testing.T) {
+	w, svc := untracedSlowWorld(t)
+	w.addProxy(95, "JP", 30)
+	w.manualProxyEdit(65, 95, false)
+	w.advance(time.Minute)
+	// 人工选的代理不受保护：改完之后它自己攒够慢请求，照样换。
+	w.addUsages(65, 0, 20, w.clock().Add(-50*time.Second), 16000)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+	require.Equal(t, 20, w.lastEvent().Before.Samples)
+
+	// 自动换代理比人工改代理晚，以自动换的时间为准：人工改完后、自动换之前的请求不再算。
+	runChecks(t, svc, w, 3)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+}
+
+func TestProxyAutoSwitchV2ManualEditAfterAutoSwitchUsesManualTime(t *testing.T) {
+	w, svc := untracedSlowWorld(t)
+	runChecks(t, svc, w, 1)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates)
+
+	// 自动换到 96 之后又在 96 上慢了，但还没到下一轮，管理员先手动改到 95。
+	w.addUsages(65, 0, 20, w.clock().Add(-50*time.Second), 16000)
+	w.addProxy(95, "JP", 30)
+	w.manualProxyEdit(65, 95, false)
+	runChecks(t, svc, w, 3)
+	require.Equal(t, [][2]int64{{65, 96}}, w.updates,
+		"requests from before the manual change must not count on the manually chosen proxy")
+}
+
 func TestProxyAutoSwitchV2IneligibleAccountsNotJudged(t *testing.T) {
 	w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96)
 	w.accounts[65].Status = StatusError

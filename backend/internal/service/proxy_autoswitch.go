@@ -309,6 +309,9 @@ type ProxyAutoSwitchRepository interface {
 	ListEvents(ctx context.Context, filter ProxyAutoSwitchEventFilter) ([]ProxyAutoSwitchEvent, error)
 	ListMeasuring(ctx context.Context) ([]ProxyAutoSwitchEvent, error)
 	LatestEventPerAccount(ctx context.Context, since time.Time, statuses []string) ([]ProxyAutoSwitchEvent, error)
+	// AuditWrites reads the admin account-edit audit rows the first-token-trend
+	// board uses, so manual proxy changes are known to the switcher too.
+	AuditWrites(ctx context.Context, accountIDs []int64, since, until time.Time) ([]FirstTokenTrendAuditWrite, error)
 }
 
 // ProxyAutoSwitchProbeResult is one fresh-connection request through a proxy

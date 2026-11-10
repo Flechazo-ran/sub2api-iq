@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -100,25 +101,51 @@ func (s *ProxyAutoSwitchService) latencyStats(ctx context.Context, groupIDs []in
 	return proxyAutoSwitchUsageStats(usage, traces, current, since, from, to), nil
 }
 
-// switchedOntoCurrentAt 返回号 → 被代理优选换到当前代理的时间，只取 from 之后换的
-// （更早的换代理时间已经在统计窗口外，不影响取样）。号最近一次换代理的目标不是当前代理
-// （比如之后被人工改过）时不算。
+// switchedOntoCurrentAt 返回号 → 换到当前代理的时间，只取 from 之后换的（更早的换代理
+// 时间已经在统计窗口外，不影响取样）。两种来源取较晚的一个：
+//   - 代理优选自己的换代理记录，目标是当前代理；
+//   - 后台人工编辑账号（单个编辑、带 account_ids 的批量编辑，审计日志里）把代理改成当前代理。
+//
+// 审计日志还原不出的改动（按筛选条件的批量编辑、代理到期后系统改到备用代理）不在此列。
 func (s *ProxyAutoSwitchService) switchedOntoCurrentAt(ctx context.Context, current map[int64]int64,
 	from time.Time) (map[int64]time.Time, error) {
 	if len(current) == 0 {
 		return nil, nil
 	}
+	out := make(map[int64]time.Time, len(current))
+	keepLater := func(accountID int64, at time.Time) {
+		if prev, ok := out[accountID]; !ok || at.After(prev) {
+			out[accountID] = at
+		}
+	}
 	events, err := s.repo.LatestEventPerAccount(ctx, from, proxyAutoSwitchSwitchedStatuses)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int64]time.Time, len(events))
 	for _, e := range events {
 		proxyID, ok := current[e.AccountID]
 		if !ok || e.ToProxyID == nil || *e.ToProxyID != proxyID || e.SwitchedAt == nil || e.SwitchedAt.Before(from) {
 			continue
 		}
-		out[e.AccountID] = *e.SwitchedAt
+		keepLater(e.AccountID, *e.SwitchedAt)
+	}
+	accountIDs := make([]int64, 0, len(current))
+	for id := range current {
+		accountIDs = append(accountIDs, id)
+	}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+	audits, err := s.repo.AuditWrites(ctx, accountIDs, from, s.now())
+	if err != nil {
+		return nil, err
+	}
+	for i, w := range audits {
+		for _, p := range parseFirstTokenTrendAudit(w, i) {
+			proxyID, ok := current[p.accountID]
+			if !ok || p.field != fttFieldProxy || p.to != strconv.FormatInt(proxyID, 10) || p.at.Before(from) {
+				continue
+			}
+			keepLater(p.accountID, p.at)
+		}
 	}
 	return out, nil
 }

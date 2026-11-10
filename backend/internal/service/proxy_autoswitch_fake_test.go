@@ -25,6 +25,7 @@ type pasWorld struct {
 	nextEvent int64
 	updates   [][2]int64
 	updateErr error
+	audits    []FirstTokenTrendAuditWrite
 
 	probeMS  map[int64][]any // proxy id -> sequence of int64 ms or error, last value repeats
 	settings map[string]string
@@ -396,6 +397,28 @@ func pasContains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func (w *pasWorld) AuditWrites(_ context.Context, _ []int64, since, until time.Time) ([]FirstTokenTrendAuditWrite, error) {
+	out := []FirstTokenTrendAuditWrite{}
+	for _, a := range w.audits {
+		if !a.CreatedAt.Before(since) && !a.CreatedAt.After(until) {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+// manualProxyEdit 模拟后台人工改代理：改账号的 proxy_id，并写一条和真实接口一样的审计记录。
+func (w *pasWorld) manualProxyEdit(accountID, proxyID int64, bulk bool) {
+	w.accounts[accountID].ProxyID = autoSwitchInt64(proxyID)
+	audit := FirstTokenTrendAuditWrite{CreatedAt: w.clock(), Action: "admin.accounts.update", ParamID: fmt.Sprint(accountID),
+		RequestBody: fmt.Sprintf(`{"proxy_id":%d}`, proxyID)}
+	if bulk {
+		audit.Action, audit.ParamID = "admin.accounts.bulk_update.create", ""
+		audit.RequestBody = fmt.Sprintf(`{"account_ids":[%d],"proxy_id":%d}`, accountID, proxyID)
+	}
+	w.audits = append(w.audits, audit)
 }
 
 func (w *pasWorld) LatestEventPerAccount(_ context.Context, since time.Time, statuses []string) ([]ProxyAutoSwitchEvent, error) {

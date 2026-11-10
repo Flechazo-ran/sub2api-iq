@@ -98,6 +98,12 @@ func (r *proxyAutoSwitchRepository) FirstTokenUsage(ctx context.Context, groupID
 	return usage, traces, nil
 }
 
+// AuditWrites runs the first-token-trend audit query, so manual proxy changes
+// are read exactly the way the trend board reconstructs them.
+func (r *proxyAutoSwitchRepository) AuditWrites(ctx context.Context, accountIDs []int64, since, until time.Time) ([]service.FirstTokenTrendAuditWrite, error) {
+	return (&firstTokenTrendRepository{db: r.db}).AuditWrites(ctx, accountIDs, since, until)
+}
+
 // ListProxies returns every undeleted proxy with its live account count. The
 // candidate-pool picker needs deleted proxies excluded and the region cache is
 // filled by the service.
