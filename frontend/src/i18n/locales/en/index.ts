@@ -7,6 +7,7 @@ import qualityOps from './qualityOps'
 import controlledExperiments from './controlledExperiments'
 import proxyAutoSwitch from './proxyAutoSwitch'
 import firstTokenTrend from './firstTokenTrend'
+import proxyScore from './proxyScore'
 import accountOps from './accountOps'
 import tokenGuard from './tokenGuard'
 import pelicanTests from './pelicanTests'
@@ -37,6 +38,7 @@ export default {
   controlledExperiments,
   proxyAutoSwitch,
   firstTokenTrend,
+  proxyScore,
   accountOps,
   tokenGuard,
   pelicanTests,

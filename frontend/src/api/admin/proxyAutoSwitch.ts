@@ -1,6 +1,6 @@
 import { apiClient } from '../client'
 
-// 代理优选 v2：按每个号在当前代理上的使用记录首字判断，从候选代理池里换代理。
+// 代理优选 v2：按每个号在当前代理上的使用记录首字判断，从代理池（人工从 IP 管理里选的）里按延迟排名换代理。
 // 字段与后端约定一致，见 proxy-autoswitch-v2-contract.md。
 const base = '/admin/proxy-autoswitch'
 
@@ -13,6 +13,8 @@ export interface ProxyAutoSwitchConfig {
   min_samples: number
   p60_threshold_ms: number
   mean_threshold_ms: number
+  max_accounts_per_proxy: number
+  // 代理池：人工从 IP 管理里选进来的代理 ID，换代理只从这里挑。
   candidate_proxy_ids: number[]
   strategy: ProxyAutoSwitchStrategy
 }
@@ -95,10 +97,12 @@ export interface ProxyAutoSwitchAccountPage {
 export interface ProxyAutoSwitchProxy {
   id: number
   name: string
+  status: string
   region: string
   expires_at: string | null
   expired: boolean
   account_count: number
+  // 已保存的代理池里有没有它（页面上的草稿以 candidate_proxy_ids 为准）
   in_pool: boolean
 }
 

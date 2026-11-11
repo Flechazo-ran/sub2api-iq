@@ -924,6 +924,8 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	// 线路优化 → 首字趋势（只读）
 	admin.GET("/first-token-trend", h.Admin.FirstTokenTrend.Get)
 	admin.GET("/first-token-trend/groups", h.Admin.FirstTokenTrend.Groups)
+	// 线路优化 → 代理评分（只读）
+	admin.GET("/proxy-score", h.Admin.ProxyScore.Get)
 	admin.GET("/account-quality-results", h.Admin.ScheduledTest.ListQualityHistory)
 	admin.GET("/account-quality-plans", h.Admin.ScheduledTest.ListQualityPlans)
 	admin.POST("/account-quality-plans/:id/run", h.Admin.ScheduledTest.TriggerQuality)

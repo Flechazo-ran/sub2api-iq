@@ -115,8 +115,10 @@ describe('AppSidebar routing group', () => {
     expect(adminPaths.indexOf('/admin/routing')).toBe(adminPaths.indexOf('/admin/accounts') + 1)
   })
 
-  it('lists 首字趋势 then 代理优选, each declared once', () => {
-    expect(pathsIn(routingBlock).slice(1)).toEqual(['/admin/first-token-trend', '/admin/proxy-autoswitch'])
+  it('lists 首字趋势, 代理优选 then 代理评分, each declared once', () => {
+    expect(pathsIn(routingBlock).slice(1)).toEqual(['/admin/first-token-trend', '/admin/proxy-autoswitch', '/admin/proxy-score'])
+    expect(routingBlock).toMatch(/path: '\/admin\/proxy-score'[^\n]*label: t\('proxyScore\.title'\)/)
+    expect(componentSource.match(/path: '\/admin\/proxy-score'/g)).toHaveLength(1)
     expect(routingBlock).toMatch(/path: '\/admin\/first-token-trend'[^\n]*label: t\('firstTokenTrend\.title'\)/)
     expect(routingBlock).toMatch(/path: '\/admin\/proxy-autoswitch'[^\n]*label: t\('proxyAutoSwitch\.title'\)/)
     expect(componentSource.match(/path: '\/admin\/proxy-autoswitch'/g)).toHaveLength(1)

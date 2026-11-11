@@ -121,7 +121,7 @@
             <table class="data-table" data-testid="ftt-events">
               <thead><tr><th class="l">{{ t('firstTokenTrend.events.colTime') }}</th><th class="l">{{ t('firstTokenTrend.events.colAccount') }}</th><th class="l">{{ t('firstTokenTrend.events.colType') }}</th><th class="l">{{ t('firstTokenTrend.events.colChange') }}</th><th class="l">{{ t('firstTokenTrend.events.colActor') }}</th><th>{{ t('firstTokenTrend.events.colBefore') }}</th><th>{{ t('firstTokenTrend.events.colAfter') }}</th><th class="l">{{ t('firstTokenTrend.events.colEffect') }}</th></tr></thead>
               <tbody>
-                <tr v-for="(event, index) in sortedEvents" :key="`${event.at}-${event.type}-${event.account_id}-${index}`" data-testid="ftt-event-row">
+                <tr v-for="(event, index) in pagedEvents" :key="`${event.at}-${event.type}-${event.account_id}-${index}`" data-testid="ftt-event-row">
                   <td class="l num">{{ clock(event.at, true) }}</td>
                   <td class="l"><span class="acct">#{{ event.account_id }}</span><small v-if="event.account_name" class="muted">{{ event.account_name }}</small></td>
                   <td class="l"><span class="tag"><i class="dot" :class="eventSwatch[event.type]" />{{ t(`firstTokenTrend.events.type.${event.type}`) }}</span></td>
@@ -135,6 +135,14 @@
               </tbody>
             </table>
           </div>
+          <footer v-if="eventPages > 1" class="pager" data-testid="ftt-events-pager">
+            <span class="muted">{{ t('firstTokenTrend.events.pageInfo', { from: eventPageFrom, to: eventPageTo, total: sortedEvents.length }) }}</span>
+            <div class="pager-btns">
+              <button type="button" :disabled="eventPage <= 1" data-testid="ftt-events-prev" @click="eventPage--">{{ t('firstTokenTrend.events.prev') }}</button>
+              <span class="pager-num" data-testid="ftt-events-page">{{ eventPage }} / {{ eventPages }}</span>
+              <button type="button" :disabled="eventPage >= eventPages" data-testid="ftt-events-next" @click="eventPage++">{{ t('firstTokenTrend.events.next') }}</button>
+            </div>
+          </footer>
         </section>
 
         <section v-if="!isEmpty" class="workspace-panel card" aria-labelledby="ftt-dims-heading">
@@ -146,9 +154,14 @@
           </header>
           <div class="table-scroll" :aria-busy="loading">
             <table class="data-table" data-testid="ftt-rows">
-              <thead><tr><th class="l">{{ t('firstTokenTrend.dims.colName') }}</th><th>{{ t('firstTokenTrend.dims.colSamples') }}</th><th>{{ t('firstTokenTrend.dims.colAvg') }}</th><th>{{ t('firstTokenTrend.dims.colP50') }}</th><th>{{ t('firstTokenTrend.dims.colP80') }}</th><th>{{ t('firstTokenTrend.dims.colOver10') }}</th><th>{{ t('firstTokenTrend.dims.colInflight') }}</th><th class="l">{{ t('firstTokenTrend.dims.colSpark') }}</th><th class="l">{{ t('firstTokenTrend.dims.colStatus') }}</th></tr></thead>
+              <thead><tr>
+                <th v-for="col in rowColumns" :key="col.key" :class="{ l: col.left }" :aria-sort="col.sortable ? (rowSort.key === col.key ? (rowSort.dir === 'asc' ? 'ascending' : 'descending') : 'none') : undefined">
+                  <button v-if="col.sortable" type="button" class="sort-btn" :class="{ on: rowSort.key === col.key }" :data-testid="`ftt-sort-${col.key}`" @click="toggleRowSort(col.key)">{{ t(col.label) }}<span class="sort-ind" aria-hidden="true">{{ rowSort.key === col.key ? (rowSort.dir === 'asc' ? '↑' : '↓') : '↕' }}</span></button>
+                  <template v-else>{{ t(col.label) }}</template>
+                </th>
+              </tr></thead>
               <tbody>
-                <tr v-for="row in data.rows" :key="row.key" data-testid="ftt-row">
+                <tr v-for="row in sortedRows" :key="row.key" data-testid="ftt-row">
                   <td class="l name"><span>{{ row.label }}</span><small v-if="row.sub" class="muted">{{ row.sub }}</small></td>
                   <td class="num">{{ row.samples.toLocaleString() }}</td>
                   <template v-if="row.samples > 0">
@@ -592,6 +605,65 @@ const kpis = computed(() => {
 
 // ---- 变动 ----
 const sortedEvents = computed(() => [...(data.value?.events ?? [])].sort((a, b) => (toDate(b.at)?.getTime() ?? 0) - (toDate(a.at)?.getTime() ?? 0)))
+// 变动日志分页：前端分页，每页 EVENTS_PAGE_SIZE 条；数据变了（刷新、换筛选）回到第一页。
+const EVENTS_PAGE_SIZE = 20
+const eventPage = ref(1)
+const eventPages = computed(() => Math.max(1, Math.ceil(sortedEvents.value.length / EVENTS_PAGE_SIZE)))
+const pagedEvents = computed(() => sortedEvents.value.slice((eventPage.value - 1) * EVENTS_PAGE_SIZE, eventPage.value * EVENTS_PAGE_SIZE))
+const eventPageFrom = computed(() => (sortedEvents.value.length ? (eventPage.value - 1) * EVENTS_PAGE_SIZE + 1 : 0))
+const eventPageTo = computed(() => Math.min(eventPage.value * EVENTS_PAGE_SIZE, sortedEvents.value.length))
+// 自动刷新时同一批变动多半没变：页数够就留在当前页，不够才夹到最后一页；换分组、账号、范围、框选才回第一页。
+watch(eventPages, pages => { if (eventPage.value > pages) eventPage.value = pages })
+watch([groupId, accountId, range, selection], () => { eventPage.value = 1 })
+
+// ---- 按维度拆开：列排序 ----
+type RowSortKey = 'label' | 'samples' | 'avg_ms' | 'p50_ms' | 'p80_ms' | 'over10_pct' | 'inflight_avg' | 'status'
+interface RowColumn { key: RowSortKey | 'spark'; label: string; left?: boolean; sortable: boolean }
+const rowColumns: RowColumn[] = [
+  { key: 'label', label: 'firstTokenTrend.dims.colName', left: true, sortable: true },
+  { key: 'samples', label: 'firstTokenTrend.dims.colSamples', sortable: true },
+  { key: 'avg_ms', label: 'firstTokenTrend.dims.colAvg', sortable: true },
+  { key: 'p50_ms', label: 'firstTokenTrend.dims.colP50', sortable: true },
+  { key: 'p80_ms', label: 'firstTokenTrend.dims.colP80', sortable: true },
+  { key: 'over10_pct', label: 'firstTokenTrend.dims.colOver10', sortable: true },
+  { key: 'inflight_avg', label: 'firstTokenTrend.dims.colInflight', sortable: true },
+  { key: 'spark', label: 'firstTokenTrend.dims.colSpark', left: true, sortable: false },
+  { key: 'status', label: 'firstTokenTrend.dims.colStatus', left: true, sortable: true },
+]
+// 默认按名称升序；点同一列切换升降序，点别的列：名称默认升序，数值列默认降序（大的在前）。
+const rowSort = reactive<{ key: RowSortKey; dir: 'asc' | 'desc' }>({ key: 'label', dir: 'asc' })
+function toggleRowSort(key: RowColumn['key']) {
+  if (key === 'spark') return
+  if (rowSort.key === key) { rowSort.dir = rowSort.dir === 'asc' ? 'desc' : 'asc'; return }
+  rowSort.key = key
+  rowSort.dir = key === 'label' ? 'asc' : 'desc'
+}
+// 状态按严重程度排：正常 < 偏慢 < 很慢，暂无当空值。
+const statusRank: Record<string, number> = { 'pill-good': 1, 'pill-warn': 2, 'pill-bad': 3 }
+function rowSortValue(row: FirstTokenTrendRow, key: RowSortKey): number | string | null {
+  if (key === 'label') return row.label
+  if (key === 'samples') return row.samples
+  if (key === 'status') return statusRank[statusOf(row).tone] ?? null
+  // 没样本的行数值列显示「这段时间没有数据」，排序时当空值。
+  if (row.samples <= 0) return null
+  const v = row[key]
+  return isNum(v) ? v : null
+}
+const labelCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' })
+const sortedRows = computed(() => {
+  const rows = [...(data.value?.rows ?? [])]
+  const { key, dir } = rowSort
+  const sign = dir === 'asc' ? 1 : -1
+  return rows.sort((a, b) => {
+    const va = rowSortValue(a, key), vb = rowSortValue(b, key)
+    // 空值不管升降序都排最后。
+    if (va == null && vb == null) return labelCollator.compare(a.label, b.label)
+    if (va == null) return 1
+    if (vb == null) return -1
+    const diff = typeof va === 'string' || typeof vb === 'string' ? labelCollator.compare(String(va), String(vb)) : va - vb
+    return diff !== 0 ? diff * sign : labelCollator.compare(a.label, b.label)
+  })
+})
 function statusValue(value: string) { const key = `firstTokenTrend.events.statusValue.${value}`; return value && te(key) ? t(key) : value }
 function eventShort(event: FirstTokenTrendEvent) {
   if (event.type === 'proxy') return t('firstTokenTrend.events.short.proxy', { from: event.from || '—', to: event.to || '—' })
@@ -1038,6 +1110,14 @@ onBeforeUnmount(() => { disposed = true; themeObserver?.disconnect(); resizeObse
 .data-table th, .data-table td { @apply whitespace-nowrap border-b border-gray-100 px-2.5 py-2 text-right dark:border-dark-800; }
 .data-table th { @apply text-xs font-medium text-gray-500 dark:text-gray-400; }
 .data-table .l { @apply text-left; }
+.sort-btn { @apply inline-flex items-center gap-1 font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100; }
+.sort-btn.on { @apply text-gray-900 dark:text-gray-100; }
+.sort-ind { @apply text-[10px] opacity-60; }
+.sort-btn.on .sort-ind { @apply opacity-100; }
+.pager { @apply mt-3 flex flex-wrap items-center justify-between gap-2 text-xs; }
+.pager-btns { @apply flex items-center gap-2; }
+.pager-btns button { @apply rounded-md border border-gray-200 px-2.5 py-1 text-gray-600 hover:bg-gray-50 dark:border-dark-700 dark:text-gray-300 dark:hover:bg-dark-800; }
+.pager-num { @apply tabular-nums text-gray-500 dark:text-gray-400; }
 .data-table td.wrap { @apply whitespace-normal; min-width: 14rem; }
 .data-table .name > span { @apply text-primary-700 dark:text-primary-400; }
 .data-table small { @apply ml-1.5 text-xs; }

@@ -76,7 +76,13 @@ func (s *ProxyAutoSwitchService) Accounts(ctx context.Context) (*ProxyAutoSwitch
 		return out, nil
 	}
 	now := s.now()
-	stats, err := s.latencyStats(ctx, cfg.GroupIDs, currentProxies(accounts), now.Add(-time.Duration(cfg.WindowMinutes)*time.Minute), now)
+	from := now.Add(-time.Duration(cfg.WindowMinutes) * time.Minute)
+	current := currentProxies(accounts)
+	since, err := s.switchedOntoCurrentAt(ctx, current, from)
+	if err != nil {
+		return nil, err
+	}
+	stats, err := s.latencyStats(ctx, cfg.GroupIDs, current, since, from, now)
 	if err != nil {
 		return nil, err
 	}
@@ -172,12 +178,18 @@ func (s *ProxyAutoSwitchService) lastSwitchTimes(ctx context.Context) (map[int64
 	return out, nil
 }
 
-// Proxies lists every undeleted proxy for the candidate-pool picker. In-pool
-// proxies come first in pool order, the rest by id.
+// Proxies lists every undeleted proxy, ordered by the hourly latency rank.
+// Probes-not-yet-run proxies sort last by id.
+// Proxies 返回 IP 管理里所有未删除的代理，in_pool 标出是否在代理池里。池里的排前面、按延迟排名，
+// 其余按 ID。页面上的代理池表只显示 in_pool 的，添加弹窗从全部里挑。
 func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchProxyList, error) {
 	cfg, err := s.GetConfig(ctx)
 	if err != nil {
 		return nil, err
+	}
+	inPool := make(map[int64]struct{}, len(cfg.CandidateProxyIDs))
+	for _, id := range cfg.CandidateProxyIDs {
+		inPool[id] = struct{}{}
 	}
 	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
@@ -188,31 +200,39 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 		ids = append(ids, proxies[i].ID)
 	}
 	regions := s.cachedRegions(ctx, ids)
-	poolIndex := make(map[int64]int, len(cfg.CandidateProxyIDs))
-	for i, id := range cfg.CandidateProxyIDs {
-		poolIndex[id] = i
+
+	s.latencyRankMu.RLock()
+	rank := s.latencyRank
+	s.latencyRankMu.RUnlock()
+	rankIndex := make(map[int64]int, len(rank))
+	for i, id := range rank {
+		rankIndex[id] = i
 	}
+
 	now := s.now()
 	items := make([]ProxyAutoSwitchProxyItem, 0, len(proxies))
 	for i := range proxies {
 		p := &proxies[i]
-		_, inPool := poolIndex[p.ID]
 		items = append(items, ProxyAutoSwitchProxyItem{
 			ID:           p.ID,
 			Name:         p.Name,
+			Status:       p.Status,
 			Region:       regions[p.ID],
 			ExpiresAt:    p.ExpiresAt,
 			Expired:      p.IsExpired(now),
 			AccountCount: p.AccountCount,
-			InPool:       inPool,
+			InPool:       hasKey(inPool, p.ID),
 		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
-		pi, iOK := poolIndex[items[i].ID]
-		pj, jOK := poolIndex[items[j].ID]
+		if items[i].InPool != items[j].InPool {
+			return items[i].InPool
+		}
+		ri, iOK := rankIndex[items[i].ID]
+		rj, jOK := rankIndex[items[j].ID]
 		switch {
 		case iOK && jOK:
-			return pi < pj
+			return ri < rj
 		case iOK != jOK:
 			return iOK
 		default:
@@ -220,4 +240,9 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 		}
 	})
 	return &ProxyAutoSwitchProxyList{Items: items}, nil
+}
+
+func hasKey(m map[int64]struct{}, k int64) bool {
+	_, ok := m[k]
+	return ok
 }

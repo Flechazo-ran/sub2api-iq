@@ -4,7 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { describe, expect, it } from 'vitest'
 import RoutingNav from '../RoutingNav.vue'
 
-const routingPaths = ['/admin/first-token-trend', '/admin/proxy-autoswitch']
+const routingPaths = ['/admin/first-token-trend', '/admin/proxy-autoswitch', '/admin/proxy-score']
 
 async function mountAt(path: string) {
   const router = createRouter({ history: createMemoryHistory(), routes: routingPaths.map(route => ({ path: route, component: { template: '<div />' } })) })

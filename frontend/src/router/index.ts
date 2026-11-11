@@ -569,6 +569,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/admin/proxy-autoswitch', name: 'AdminProxyAutoSwitch', component: () => import('@/views/admin/ProxyAutoSwitchView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Proxy optimizer', titleKey: 'proxyAutoSwitch.title', descriptionKey: 'proxyAutoSwitch.description' } },
   { path: '/admin/routing', redirect: '/admin/first-token-trend', meta: { requiresAuth: true, requiresAdmin: true } },
   { path: '/admin/first-token-trend', name: 'AdminFirstTokenTrend', component: () => import('@/views/admin/FirstTokenTrendView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'First-token trend', titleKey: 'firstTokenTrend.title', descriptionKey: 'firstTokenTrend.description' } },
+  { path: '/admin/proxy-score', name: 'AdminProxyScore', component: () => import('@/views/admin/ProxyScoreView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Proxy score', titleKey: 'proxyScore.title', descriptionKey: 'proxyScore.description' } },
   {
     path: '/admin/account-quality',
     name: 'AdminAccountQuality',

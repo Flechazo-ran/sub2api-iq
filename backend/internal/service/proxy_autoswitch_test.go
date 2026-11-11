@@ -20,14 +20,14 @@ func runChecks(t *testing.T, svc *ProxyAutoSwitchService, w *pasWorld, n int) {
 
 func v2Config() ProxyAutoSwitchConfig {
 	return ProxyAutoSwitchConfig{
-		Enabled:           true,
-		GroupIDs:          []int64{16},
-		WindowMinutes:     5,
-		MinSamples:        20,
-		P60ThresholdMS:    10000,
-		MeanThresholdMS:   15000,
-		CandidateProxyIDs: []int64{96},
-		Strategy:          ProxyAutoSwitchStrategyRandom,
+		Enabled:             true,
+		GroupIDs:            []int64{16},
+		WindowMinutes:       5,
+		MinSamples:          20,
+		P60ThresholdMS:      10000,
+		MeanThresholdMS:     15000,
+		MaxAccountsPerProxy: 2,
+		Strategy:            ProxyAutoSwitchStrategyRandom,
 	}
 }
 
@@ -39,13 +39,70 @@ func TestProxyAutoSwitchV2DefaultConfig(t *testing.T) {
 	require.Equal(t, 20, cfg.MinSamples)
 	require.Equal(t, 10000, cfg.P60ThresholdMS)
 	require.Equal(t, 15000, cfg.MeanThresholdMS)
+	require.Equal(t, 2, cfg.MaxAccountsPerProxy)
 	require.Empty(t, cfg.CandidateProxyIDs)
-	require.Equal(t, ProxyAutoSwitchStrategyRandom, cfg.Strategy)
+	require.Equal(t, ProxyAutoSwitchStrategySequential, cfg.Strategy)
 
 	raw, err := json.Marshal(cfg)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"enabled":false,"group_ids":[16],"window_minutes":5,"min_samples":20,
-		"p60_threshold_ms":10000,"mean_threshold_ms":15000,"candidate_proxy_ids":[],"strategy":"random"}`, string(raw))
+		"p60_threshold_ms":10000,"mean_threshold_ms":15000,"max_accounts_per_proxy":2,"candidate_proxy_ids":[],"strategy":"sequential"}`, string(raw))
+}
+
+// 线上配置还是候选池改造之前存的（有 candidate_proxy_ids、没有 max_accounts_per_proxy）：
+// 池子原样读回来，号数上限取默认 2。
+func TestProxyAutoSwitchV2KeepsSavedPoolFromBeforeRework(t *testing.T) {
+	w := newPASWorld()
+	w.settings[proxyAutoSwitchConfigKey] = `{"enabled":true,"group_ids":[16],"window_minutes":5,"min_samples":20,
+		"p60_threshold_ms":10000,"mean_threshold_ms":15000,"candidate_proxy_ids":[68,19,68,42],"strategy":"random"}`
+	cfg, err := w.service().GetConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []int64{68, 19, 42}, cfg.CandidateProxyIDs)
+	require.Equal(t, 2, cfg.MaxAccountsPerProxy)
+	require.Equal(t, ProxyAutoSwitchStrategyRandom, cfg.Strategy)
+}
+
+func TestProxyAutoSwitchV2SaveConfigRejectsDeletedPoolProxy(t *testing.T) {
+	w := newPASWorld()
+	w.addProxy(96, "JP", 30)
+	svc := w.service()
+	cfg := v2Config()
+	cfg.CandidateProxyIDs = []int64{96, 96}
+	saved, err := svc.SaveConfig(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Equal(t, []int64{96}, saved.CandidateProxyIDs)
+
+	cfg.CandidateProxyIDs = []int64{96, 777}
+	_, err = svc.SaveConfig(context.Background(), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "代理 777 不存在或已删除")
+}
+
+// 每小时测速只测池子里可用的代理，池子外的、停用的、过期的都不测。
+func TestProxyAutoSwitchV2LatencyRankOnlyProbesPool(t *testing.T) {
+	w := newPASWorld()
+	w.addProxy(96, "JP", 30)
+	w.addProxy(97, "JP", 30)
+	w.addProxy(98, "JP", 30)
+	w.addProxy(99, "JP", 30)
+	w.addProxy(90, "JP", 30) // 不在池子里
+	w.setProbe(96, 900)
+	w.setProbe(97, 300)
+	w.setProbe(98, 500)
+	w.setProbe(90, 100)
+	w.proxies[99].Status = "disabled"
+	cfg := v2Config()
+	cfg.CandidateProxyIDs = []int64{96, 97, 98, 99}
+	w.saveConfig(cfg)
+	svc := w.service()
+
+	require.NoError(t, svc.refreshLatencyRank(context.Background()))
+	require.Equal(t, []int64{97, 98, 96}, svc.latencyRank)
+
+	cfg.CandidateProxyIDs = nil
+	w.saveConfig(cfg)
+	require.NoError(t, svc.refreshLatencyRank(context.Background()))
+	require.Empty(t, svc.latencyRank)
 }
 
 func TestProxyAutoSwitchV2ReadsOldConfigWithDefaults(t *testing.T) {
@@ -65,25 +122,26 @@ func TestProxyAutoSwitchV2ReadsOldConfigWithDefaults(t *testing.T) {
 	require.Equal(t, 20, cfg.MinSamples)
 	require.Equal(t, 10000, cfg.P60ThresholdMS)
 	require.Equal(t, 15000, cfg.MeanThresholdMS)
-	require.Empty(t, cfg.CandidateProxyIDs)
-	require.Equal(t, ProxyAutoSwitchStrategyRandom, cfg.Strategy)
+	require.Equal(t, 2, cfg.MaxAccountsPerProxy)
+	require.Equal(t, ProxyAutoSwitchStrategySequential, cfg.Strategy)
 }
 
 func TestProxyAutoSwitchV2ConfigValidation(t *testing.T) {
 	ok := v2Config()
 	require.NoError(t, ValidateProxyAutoSwitchConfig(ok))
 	cases := map[string]func(*ProxyAutoSwitchConfig){
-		"window low":    func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 0 },
-		"window high":   func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 61 },
-		"samples low":   func(c *ProxyAutoSwitchConfig) { c.MinSamples = 0 },
-		"samples high":  func(c *ProxyAutoSwitchConfig) { c.MinSamples = 100001 },
-		"p60 low":       func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 0 },
-		"p60 high":      func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 600001 },
-		"mean low":      func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 0 },
-		"mean high":     func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 600001 },
-		"bad strategy":  func(c *ProxyAutoSwitchConfig) { c.Strategy = "fastest" },
-		"bad group id":  func(c *ProxyAutoSwitchConfig) { c.GroupIDs = []int64{0} },
-		"bad candidate": func(c *ProxyAutoSwitchConfig) { c.CandidateProxyIDs = []int64{0} },
+		"window low":   func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 0 },
+		"window high":  func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 61 },
+		"samples low":  func(c *ProxyAutoSwitchConfig) { c.MinSamples = 0 },
+		"samples high": func(c *ProxyAutoSwitchConfig) { c.MinSamples = 100001 },
+		"p60 low":      func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 0 },
+		"p60 high":     func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 600001 },
+		"mean low":     func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 0 },
+		"mean high":    func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 600001 },
+		"bad strategy": func(c *ProxyAutoSwitchConfig) { c.Strategy = "fastest" },
+		"bad group id": func(c *ProxyAutoSwitchConfig) { c.GroupIDs = []int64{0} },
+		"bad max per":  func(c *ProxyAutoSwitchConfig) { c.MaxAccountsPerProxy = 0 },
+		"high max per": func(c *ProxyAutoSwitchConfig) { c.MaxAccountsPerProxy = 101 },
 	}
 	for name, mutate := range cases {
 		cfg := v2Config()
@@ -92,26 +150,22 @@ func TestProxyAutoSwitchV2ConfigValidation(t *testing.T) {
 	}
 }
 
-func TestProxyAutoSwitchV2NormalizeCandidateOrder(t *testing.T) {
+func TestProxyAutoSwitchV2NormalizeGroups(t *testing.T) {
 	cfg := v2Config()
-	cfg.CandidateProxyIDs = []int64{68, 19, 68, 42, 19}
 	cfg.GroupIDs = []int64{16, 9, 16}
 	got := normalizeProxyAutoSwitchConfig(cfg)
-	require.Equal(t, []int64{68, 19, 42}, got.CandidateProxyIDs)
 	require.Equal(t, []int64{9, 16}, got.GroupIDs)
 }
 
-func TestProxyAutoSwitchV2SaveConfigChecksGroupsAndProxies(t *testing.T) {
+func TestProxyAutoSwitchV2SaveConfigChecksGroups(t *testing.T) {
 	w := newPASWorld()
 	w.addProxy(96, "JP", 30)
-	w.addProxy(97, "JP", 30)
 	svc := w.service()
 
 	cfg := v2Config()
-	cfg.CandidateProxyIDs = []int64{96, 97}
 	saved, err := svc.SaveConfig(context.Background(), cfg)
 	require.NoError(t, err)
-	require.Equal(t, []int64{96, 97}, saved.CandidateProxyIDs)
+	require.Equal(t, 2, saved.MaxAccountsPerProxy)
 	got, err := svc.GetConfig(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, saved, got)
@@ -119,11 +173,6 @@ func TestProxyAutoSwitchV2SaveConfigChecksGroupsAndProxies(t *testing.T) {
 	badGroup := cfg
 	badGroup.GroupIDs = []int64{99}
 	_, err = svc.SaveConfig(context.Background(), badGroup)
-	require.Error(t, err)
-
-	badProxy := cfg
-	badProxy.CandidateProxyIDs = []int64{96, 99}
-	_, err = svc.SaveConfig(context.Background(), badProxy)
 	require.Error(t, err)
 }
 
@@ -183,7 +232,7 @@ func TestProxyAutoSwitchV2UsageStatsP60MeanAndDuration(t *testing.T) {
 		usage = append(usage, FirstTokenTrendUsageSample{StartedAt: start, EndedAt: start.Add(time.Duration(100*(i+1)) * time.Millisecond),
 			FirstTokenMS: &v, Stream: true, AccountID: 1, RequestID: "r" + strconv.Itoa(i)})
 	}
-	stats := proxyAutoSwitchUsageStats(usage, nil, map[int64]int64{1: 9}, from, to)
+	stats := proxyAutoSwitchUsageStats(usage, nil, map[int64]int64{1: 9}, nil, from, to)
 	require.Len(t, stats, 1)
 	require.Equal(t, 5, stats[0].Samples)
 	require.Equal(t, int64(3400), stats[0].P60MS)
@@ -198,7 +247,7 @@ func TestProxyAutoSwitchV2UsageStatsP60MeanAndDuration(t *testing.T) {
 	otherProxy := usage[2]
 	otherProxy.RequestID = "other"
 	traces := []FirstTokenTrendTraceSample{{StartedAt: from, ProxyID: 8, RequestID: "other"}}
-	stats = proxyAutoSwitchUsageStats([]FirstTokenTrendUsageSample{notStream, outside, otherProxy}, traces, map[int64]int64{1: 9}, from, to)
+	stats = proxyAutoSwitchUsageStats([]FirstTokenTrendUsageSample{notStream, outside, otherProxy}, traces, map[int64]int64{1: 9}, nil, from, to)
 	require.Empty(t, stats)
 }
 
@@ -388,22 +437,28 @@ func TestProxyAutoSwitchV2ProxiesList(t *testing.T) {
 	expired := w.addProxy(99, "JP", 0)
 	at := w.now.Add(-time.Hour)
 	expired.ExpiresAt = &at
+	w.proxies[19].Status = "inactive"
 	cfg := v2Config()
-	cfg.CandidateProxyIDs = []int64{42, 68}
+	cfg.CandidateProxyIDs = []int64{68, 42}
 	w.saveConfig(cfg)
 	w.addAccount(65, 68)
 
-	list, err := w.service().Proxies(context.Background())
+	svc := w.service()
+	svc.latencyRank = []int64{68, 42}
+	list, err := svc.Proxies(context.Background())
 	require.NoError(t, err)
 	require.Len(t, list.Items, 4)
-	require.Equal(t, int64(42), list.Items[0].ID)
+	// 池子里的排前面、按延迟排名；池子外的按 ID。
+	require.Equal(t, int64(68), list.Items[0].ID)
 	require.True(t, list.Items[0].InPool)
-	require.Equal(t, int64(68), list.Items[1].ID)
+	require.Equal(t, int64(1), list.Items[0].AccountCount)
+	require.Equal(t, int64(42), list.Items[1].ID)
 	require.True(t, list.Items[1].InPool)
-	require.Equal(t, int64(1), list.Items[1].AccountCount)
 	require.Equal(t, int64(19), list.Items[2].ID)
 	require.False(t, list.Items[2].InPool)
+	require.Equal(t, "inactive", list.Items[2].Status)
 	require.Equal(t, int64(99), list.Items[3].ID)
+	require.False(t, list.Items[3].InPool)
 	require.True(t, list.Items[3].Expired)
 }
 
