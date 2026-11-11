@@ -290,27 +290,26 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	data := asMap(t, body["data"])
 	require.Equal(t, []string{
-		"enabled", "group_ids", "max_accounts_per_proxy", "mean_threshold_ms", "min_samples",
+		"candidate_proxy_ids", "enabled", "group_ids", "max_accounts_per_proxy", "mean_threshold_ms", "min_samples",
 		"p60_threshold_ms", "strategy", "window_minutes",
 	}, sortedKeys(data))
 	require.Equal(t, false, data["enabled"])
 	require.Equal(t, service.ProxyAutoSwitchStrategySequential, data["strategy"])
 
-	// 老字段照旧忽略（candidate_proxy_ids 被忽略），新字段正常保存。
+	// 老字段照旧忽略，新字段（含 candidate_proxy_ids）正常保存。
 	code, body = doPAS(t, r, http.MethodPut, "/api/v1/admin/proxy-autoswitch/config", map[string]any{
 		"enabled": true, "group_ids": []int{16}, "window_minutes": 3, "min_samples": 30,
 		"p60_threshold_ms": 12000, "mean_threshold_ms": 18000, "max_accounts_per_proxy": 3,
-		"strategy": "sequential",
-		"metric":   "response_headers", "threshold_ms": 2500, "consecutive_checks": 2,
+		"strategy": "sequential", "candidate_proxy_ids": []int{},
+		"metric": "response_headers", "threshold_ms": 2500, "consecutive_checks": 2,
 		"account_cooldown_minutes": 10, "observe_minutes": 10, "region_policy": "any",
-		"candidate_proxy_ids": []int{68, 42},
 	})
 	require.Equal(t, http.StatusOK, code)
 	data = asMap(t, body["data"])
 	require.Equal(t, true, data["enabled"])
 	require.Equal(t, "sequential", data["strategy"])
 	require.Equal(t, float64(3), data["max_accounts_per_proxy"])
-	require.NotContains(t, data, "candidate_proxy_ids")
+	require.Equal(t, []any{}, data["candidate_proxy_ids"])
 	require.NotContains(t, data, "metric")
 	require.NotContains(t, data, "threshold_ms")
 	require.NotContains(t, data, "account_cooldown_minutes")

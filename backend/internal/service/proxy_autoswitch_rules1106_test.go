@@ -24,20 +24,11 @@ func slowWorld(t *testing.T, strategy string, candidates ...int64) (*pasWorld, *
 	w.setProbe(91, 800)
 	w.addUsages(65, 91, 20, w.now.Add(-time.Minute), 16000)
 	cfg := v2Config()
+	cfg.CandidateProxyIDs = candidates
 	cfg.Strategy = strategy
 	w.saveConfig(cfg)
 	svc := w.service()
 	svc.randInt = func(int) int { return 0 }
-	// Build latency rank from candidates so the intended order is preserved
-	// even though the pool is now automatic.
-	rank := make([]int64, 0, len(candidates)+1)
-	for _, id := range candidates {
-		if id != 91 {
-			rank = append(rank, id)
-		}
-	}
-	rank = append(rank, 91)
-	svc.latencyRank = rank
 	return w, svc
 }
 
@@ -243,7 +234,7 @@ func TestProxyAutoSwitchV2SkipsUsedExpiredCurrentAndInactive(t *testing.T) {
 		require.Empty(t, w.updates)
 		e := w.lastEvent()
 		require.Equal(t, ProxyAutoSwitchStatusNoCandidate, e.Status)
-		require.Equal(t, "池子里的代理都被别的号占用了", e.Reason)
+		require.Equal(t, "池子里的代理挂的号都满了", e.Reason)
 	})
 	t.Run("expired", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 96)
@@ -268,19 +259,39 @@ func TestProxyAutoSwitchV2SkipsUsedExpiredCurrentAndInactive(t *testing.T) {
 		runChecks(t, svc, w, 1)
 		require.Equal(t, [][2]int64{{65, 98}}, w.updates)
 	})
-	t.Run("only current proxy exists", func(t *testing.T) {
+	t.Run("empty pool", func(t *testing.T) {
 		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom)
+		runChecks(t, svc, w, 1)
+		require.Empty(t, w.updates)
+		require.Equal(t, "候选代理池为空", w.lastEvent().Reason)
+	})
+	t.Run("pool has only the current proxy", func(t *testing.T) {
+		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 91)
 		runChecks(t, svc, w, 1)
 		require.Empty(t, w.updates)
 		require.Equal(t, "候选代理池里只有当前代理", w.lastEvent().Reason)
 	})
+	t.Run("proxies outside the pool are never picked", func(t *testing.T) {
+		w, svc := slowWorld(t, ProxyAutoSwitchStrategySequential, 97)
+		w.addProxy(96, "JP", 30) // 不在池子里，ID 更小、也更快
+		w.setProbe(96, 100)
+		svc.latencyRank = []int64{96, 97}
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
+	})
+	t.Run("deleted pool proxy counts as missing", func(t *testing.T) {
+		w, svc := slowWorld(t, ProxyAutoSwitchStrategyRandom, 777)
+		delete(w.proxies, 777) // IP 管理里已经删掉，池子里还留着 ID
+		runChecks(t, svc, w, 1)
+		require.Empty(t, w.updates)
+		require.Equal(t, "没有可用候选代理：1 个不存在或已删除", w.lastEvent().Reason)
+	})
 }
 
 func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
-	t.Run("picks the lowest-latency proxy (no latency rank = by id)", func(t *testing.T) {
-		w, svc := slowWorld(t, ProxyAutoSwitchStrategySequential, 96, 97, 98)
+	t.Run("no latency rank yet: picks the smallest id in the pool", func(t *testing.T) {
+		w, svc := slowWorld(t, ProxyAutoSwitchStrategySequential, 98, 97, 96)
 		runChecks(t, svc, w, 1)
-		// No latency rank set; eligible sorted by ID, picks smallest = 96
 		require.Equal(t, [][2]int64{{65, 96}}, w.updates)
 	})
 	t.Run("picks by latency rank when rank is set", func(t *testing.T) {
@@ -294,6 +305,7 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.setProbe(97, 400)
 		w.addUsages(65, 96, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
+		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
 		svc := w.service()
@@ -316,6 +328,7 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.setProbe(98, 400)
 		w.addUsages(65, 96, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
+		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
 		svc := w.service()
@@ -336,6 +349,7 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.proxies[98].ExpiresAt = &at
 		w.addUsages(65, 97, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
+		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
 		svc := w.service()
@@ -356,6 +370,7 @@ func TestProxyAutoSwitchV2SequentialOrder(t *testing.T) {
 		w.setProbe(96, 400)
 		w.addUsages(65, 98, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
+		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategySequential
 		w.saveConfig(cfg)
 		svc := w.service()
@@ -377,6 +392,7 @@ func TestProxyAutoSwitchV2RegionStrategy(t *testing.T) {
 		w.setProbe(97, 400)
 		w.addUsages(65, 91, 20, w.now.Add(-time.Minute), 16000)
 		cfg := v2Config()
+		cfg.CandidateProxyIDs = []int64{96, 97, 98}
 		cfg.Strategy = ProxyAutoSwitchStrategyRegion
 		w.saveConfig(cfg)
 		svc := w.service()
@@ -414,7 +430,7 @@ func TestProxyAutoSwitchV2NoCandidateReasonChangeWritesAgain(t *testing.T) {
 	w.addAccount(67, 96)
 	runChecks(t, svc, w, 1)
 	require.Len(t, w.events, 1)
-	require.Equal(t, "池子里的代理都被别的号占用了", w.events[0].Reason)
+	require.Equal(t, "池子里的代理挂的号都满了", w.events[0].Reason)
 
 	w.accounts[66].Deleted = true
 	w.accounts[67].Deleted = true
@@ -428,7 +444,7 @@ func TestProxyAutoSwitchV2NoCandidateReasonChangeWritesAgain(t *testing.T) {
 			reasons = append(reasons, e.Reason)
 		}
 	}
-	require.Equal(t, []string{"池子里的代理都被别的号占用了", "池子里的代理都过期了"}, reasons)
+	require.Equal(t, []string{"池子里的代理挂的号都满了", "池子里的代理都过期了"}, reasons)
 }
 
 func TestProxyAutoSwitchV2NoCandidateCurrentProxyChangeWritesAgain(t *testing.T) {
@@ -446,6 +462,7 @@ func TestProxyAutoSwitchV2NoCandidateCurrentProxyChangeWritesAgain(t *testing.T)
 	w.setProbe(96, 400)
 	w.addUsages(65, 91, 20, w.now.Add(-time.Minute), 16000)
 	cfg := v2Config()
+	cfg.CandidateProxyIDs = []int64{96, 92}
 	cfg.Strategy = ProxyAutoSwitchStrategyRandom
 	cfg.MaxAccountsPerProxy = 1
 	w.saveConfig(cfg)
@@ -456,7 +473,7 @@ func TestProxyAutoSwitchV2NoCandidateCurrentProxyChangeWritesAgain(t *testing.T)
 	runChecks(t, svc, w, 1)
 	require.Len(t, w.events, 1)
 	require.Equal(t, int64(91), *w.events[0].FromProxyID)
-	require.Equal(t, "池子里的代理都被别的号占用了", w.events[0].Reason)
+	require.Equal(t, "池子里的代理挂的号都满了", w.events[0].Reason)
 
 	w.accounts[65].ProxyID = autoSwitchInt64(92)
 	w.addUsages(65, 92, 20, w.now.Add(-time.Minute), 16000)

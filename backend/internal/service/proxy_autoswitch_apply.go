@@ -251,7 +251,7 @@ func (p proxyAutoSwitchPoolIssue) emptyReason() string {
 	case p.current == total:
 		return "候选代理池里只有当前代理"
 	case p.used == real:
-		return "池子里的代理都被别的号占用了"
+		return "池子里的代理挂的号都满了"
 	case p.expired == real:
 		return "池子里的代理都过期了"
 	case p.inactive == real:
@@ -268,7 +268,7 @@ func (p proxyAutoSwitchPoolIssue) emptyReason() string {
 		parts = append(parts, fmt.Sprintf("%d 个已过期", p.expired))
 	}
 	if p.used > 0 {
-		parts = append(parts, fmt.Sprintf("%d 个被别的号占用", p.used))
+		parts = append(parts, fmt.Sprintf("%d 个挂的号已满", p.used))
 	}
 	if p.current > 0 {
 		parts = append(parts, "当前代理不能选")
@@ -276,8 +276,8 @@ func (p proxyAutoSwitchPoolIssue) emptyReason() string {
 	return "没有可用候选代理：" + strings.Join(parts, "，")
 }
 
-// loadCandidatePool 返回所有可用代理（active、没过期、没超过上限、不是当前代理），
-// 按延迟排名顺序排列（延迟未知的排最后）。
+// loadCandidatePool 返回代理池（candidate_proxy_ids）里可用的代理（没删除、active、没过期、
+// 号数没到上限、不是当前代理），按延迟排名排列（还没测过的排最后，按 ID）。
 func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg ProxyAutoSwitchConfig, now time.Time,
 	currentID int64) ([]Proxy, string, error) {
 	maxPerProxy := cfg.MaxAccountsPerProxy
@@ -287,6 +287,10 @@ func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg Prox
 	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
 		return nil, "", err
+	}
+	byID := make(map[int64]*ProxyWithAccountCount, len(proxies))
+	for i := range proxies {
+		byID[proxies[i].ID] = &proxies[i]
 	}
 
 	// 按延迟排名排序
@@ -298,10 +302,15 @@ func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg Prox
 		rankIndex[id] = i
 	}
 
-	eligible := make([]Proxy, 0, len(proxies))
+	// 只从代理池（candidate_proxy_ids）里挑。
+	eligible := make([]Proxy, 0, len(cfg.CandidateProxyIDs))
 	var issue proxyAutoSwitchPoolIssue
-	for i := range proxies {
-		p := &proxies[i]
+	for _, id := range cfg.CandidateProxyIDs {
+		p, ok := byID[id]
+		if !ok {
+			issue.missing++
+			continue
+		}
 		if p.ID == currentID {
 			issue.current++
 			continue

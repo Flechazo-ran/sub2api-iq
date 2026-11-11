@@ -180,7 +180,17 @@ func (s *ProxyAutoSwitchService) lastSwitchTimes(ctx context.Context) (map[int64
 
 // Proxies lists every undeleted proxy, ordered by the hourly latency rank.
 // Probes-not-yet-run proxies sort last by id.
+// Proxies 返回 IP 管理里所有未删除的代理，in_pool 标出是否在代理池里。池里的排前面、按延迟排名，
+// 其余按 ID。页面上的代理池表只显示 in_pool 的，添加弹窗从全部里挑。
 func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchProxyList, error) {
+	cfg, err := s.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inPool := make(map[int64]struct{}, len(cfg.CandidateProxyIDs))
+	for _, id := range cfg.CandidateProxyIDs {
+		inPool[id] = struct{}{}
+	}
 	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
 		return nil, err
@@ -211,9 +221,13 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 			ExpiresAt:    p.ExpiresAt,
 			Expired:      p.IsExpired(now),
 			AccountCount: p.AccountCount,
+			InPool:       hasKey(inPool, p.ID),
 		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].InPool != items[j].InPool {
+			return items[i].InPool
+		}
 		ri, iOK := rankIndex[items[i].ID]
 		rj, jOK := rankIndex[items[j].ID]
 		switch {
@@ -226,4 +240,9 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 		}
 	})
 	return &ProxyAutoSwitchProxyList{Items: items}, nil
+}
+
+func hasKey(m map[int64]struct{}, k int64) bool {
+	_, ok := m[k]
+	return ok
 }

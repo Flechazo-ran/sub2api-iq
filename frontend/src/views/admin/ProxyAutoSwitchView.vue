@@ -44,7 +44,14 @@
           </div>
 
           <div class="subsection-heading">
-            <div><h4>{{ t('proxyAutoSwitch.proxyPool') }}</h4><p class="field-hint">{{ t('proxyAutoSwitch.proxyPoolHint') }}</p></div>
+            <div>
+              <h4>{{ t('proxyAutoSwitch.proxyPool') }}<span class="count-label" data-testid="pas-pool-count">{{ draft.candidate_proxy_ids.length }}</span></h4>
+              <p class="field-hint">{{ t('proxyAutoSwitch.proxyPoolHint') }}</p>
+              <div class="pool-actions">
+                <button type="button" class="btn btn-secondary btn-sm" :disabled="!proxiesLoaded" data-testid="pas-pool-add" @click="pickerOpen = true"><Icon name="plus" size="sm" />{{ t('proxyAutoSwitch.poolAdd') }}</button>
+                <button v-if="unusablePoolCount" type="button" class="btn btn-secondary btn-sm" data-testid="pas-pool-remove-unusable" @click="removeUnusable">{{ t('proxyAutoSwitch.poolRemoveUnusable', { count: unusablePoolCount }) }}</button>
+              </div>
+            </div>
             <div class="pool-strategy" data-testid="pas-strategy">
               <span class="field-label">{{ t('proxyAutoSwitch.strategy') }}</span>
               <div class="strategy-group" role="radiogroup" :aria-label="t('proxyAutoSwitch.strategy')">
@@ -55,17 +62,24 @@
           <div v-if="proxiesError" role="alert" class="inline-error" data-testid="pas-proxies-error">{{ proxiesError }}<button :disabled="proxiesLoading" @click="loadProxies">{{ t('proxyAutoSwitch.retry') }}</button></div>
           <div class="table-scroll">
             <table class="data-table proxy-table" data-testid="pas-proxies">
-              <thead><tr><th class="cell-left rank-cell">{{ t('proxyAutoSwitch.colRank') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colRegion') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colExpires') }}</th><th>{{ t('proxyAutoSwitch.colAccountCount') }}</th></tr></thead>
-              <tbody v-if="!proxiesLoaded && proxiesLoading"><tr v-for="n in 3" :key="`proxy-loading-${n}`" class="loading-row"><td v-for="c in 5" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
+              <thead><tr><th class="cell-left rank-cell">{{ t('proxyAutoSwitch.colRank') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colProxy') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colRegion') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colExpires') }}</th><th>{{ t('proxyAutoSwitch.colAccountCount') }}</th><th class="cell-left action-cell" /></tr></thead>
+              <tbody v-if="!proxiesLoaded && proxiesLoading"><tr v-for="n in 3" :key="`proxy-loading-${n}`" class="loading-row"><td v-for="c in 6" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
               <tbody v-else>
-                <tr v-for="(proxy, index) in usableProxies" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': isFull(proxy) }">
-                  <td class="cell-left rank-cell" data-testid="pas-proxy-rank">{{ index + 1 }}</td>
-                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="isFull(proxy)" class="expired-tag" data-testid="pas-proxy-full">{{ t('proxyAutoSwitch.full') }}</span></td>
+                <tr v-for="proxy in poolRows" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': !isUsable(proxy) || isFull(proxy) }">
+                  <td class="cell-left rank-cell" data-testid="pas-proxy-rank">{{ poolRank.get(proxy.id) ?? '—' }}</td>
+                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="poolNote(proxy)" class="expired-tag" data-testid="pas-proxy-note">{{ poolNote(proxy) }}</span></td>
                   <td class="cell-left">{{ proxy.region || '—' }}</td>
                   <td class="cell-left tabular-nums">{{ monthDay(proxy.expires_at) }}</td>
                   <td class="tabular-nums" data-testid="pas-proxy-accounts">{{ proxy.account_count }} / {{ savedMax }}</td>
+                  <td class="cell-left action-cell"><button type="button" class="link-button" :aria-label="t('proxyAutoSwitch.poolRemoveLabel', { name: proxyLabel(proxy) })" :data-testid="`pas-pool-remove-${proxy.id}`" @click="removeFromPool(proxy.id)">{{ t('proxyAutoSwitch.poolRemove') }}</button></td>
                 </tr>
-                <tr v-if="!usableProxies.length"><td colspan="5" class="table-empty" data-testid="pas-proxies-empty">{{ t('proxyAutoSwitch.proxiesEmpty') }}</td></tr>
+                <tr v-for="id in missingPoolIds" :key="`missing-${id}`" :data-proxy-id="id" class="row-expired">
+                  <td class="cell-left rank-cell">—</td>
+                  <td class="cell-left proxy-name-cell">#{{ id }}<span class="expired-tag">{{ t('proxyAutoSwitch.poolDeleted') }}</span></td>
+                  <td class="cell-left">—</td><td class="cell-left">—</td><td class="tabular-nums">—</td>
+                  <td class="cell-left action-cell"><button type="button" class="link-button" :data-testid="`pas-pool-remove-${id}`" @click="removeFromPool(id)">{{ t('proxyAutoSwitch.poolRemove') }}</button></td>
+                </tr>
+                <tr v-if="!poolRows.length && !missingPoolIds.length"><td colspan="6" class="table-empty" data-testid="pas-proxies-empty">{{ t('proxyAutoSwitch.poolEmpty') }}<span>{{ t('proxyAutoSwitch.poolEmptyHint') }}</span></td></tr>
               </tbody>
             </table>
           </div>
@@ -156,6 +170,7 @@
         </footer>
       </section>
     </div>
+    <ProxyPoolPicker :show="pickerOpen" :proxies="proxies" :pool-ids="draft.candidate_proxy_ids" :max-accounts="savedMax" @close="pickerOpen = false" @add="addToPool" />
   </AppLayout>
 </template>
 
@@ -164,6 +179,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import RoutingNav from '@/components/admin/operations/RoutingNav.vue'
+import ProxyPoolPicker from '@/components/admin/proxyAutoSwitch/ProxyPoolPicker.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { getAll as getAllGroups } from '@/api/admin/groups'
 import {
@@ -191,6 +207,7 @@ interface Draft {
   p60_threshold_s: number | string
   mean_threshold_s: number | string
   max_accounts_per_proxy: number | string
+  candidate_proxy_ids: number[]
   strategy: ProxyAutoSwitchStrategy
 }
 
@@ -202,7 +219,7 @@ const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }>
   mean_threshold_s: { min: 0.001, max: 600, integer: false },
   max_accounts_per_proxy: { min: 1, max: 100, integer: true },
 }
-const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, max_accounts_per_proxy: 2, strategy: 'sequential' }
+const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, max_accounts_per_proxy: 2, candidate_proxy_ids: [], strategy: 'sequential' }
 
 function finiteNumber(value: unknown, fallback: number): number {
   const parsed = Number(value)
@@ -221,6 +238,7 @@ function normalizeConfig(raw: Partial<ProxyAutoSwitchConfig> | null | undefined)
     p60_threshold_ms: finiteNumber(raw?.p60_threshold_ms, defaultConfig.p60_threshold_ms),
     mean_threshold_ms: finiteNumber(raw?.mean_threshold_ms, defaultConfig.mean_threshold_ms),
     max_accounts_per_proxy: finiteNumber(raw?.max_accounts_per_proxy, defaultConfig.max_accounts_per_proxy),
+    candidate_proxy_ids: Array.isArray(raw?.candidate_proxy_ids) ? [...new Set(raw.candidate_proxy_ids.map(Number).filter(Number.isFinite))] : [],
     strategy: normalizeStrategy(raw?.strategy),
   }
 }
@@ -233,10 +251,11 @@ function toDraft(config: ProxyAutoSwitchConfig): Draft {
     p60_threshold_s: config.p60_threshold_ms / 1000,
     mean_threshold_s: config.mean_threshold_ms / 1000,
     max_accounts_per_proxy: config.max_accounts_per_proxy,
+    candidate_proxy_ids: [...config.candidate_proxy_ids],
     strategy: config.strategy,
   }
 }
-// 固定键顺序、分组去重排序，方便比对是否改过。
+// 固定键顺序、分组和代理池都去重排序，方便比对是否改过（池内顺序由延迟排名决定，加入顺序不重要）。
 function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchUpdate {
   return {
     enabled: config.enabled,
@@ -246,6 +265,7 @@ function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchUpdate {
     p60_threshold_ms: config.p60_threshold_ms,
     mean_threshold_ms: config.mean_threshold_ms,
     max_accounts_per_proxy: config.max_accounts_per_proxy,
+    candidate_proxy_ids: [...new Set(config.candidate_proxy_ids)].sort((a, b) => a - b),
     strategy: config.strategy,
   }
 }
@@ -258,6 +278,7 @@ function toPayload(): ProxyAutoSwitchUpdate {
     p60_threshold_ms: Math.round(Number(draft.p60_threshold_s) * 1000),
     mean_threshold_ms: Math.round(Number(draft.mean_threshold_s) * 1000),
     max_accounts_per_proxy: Number(draft.max_accounts_per_proxy),
+    candidate_proxy_ids: [...draft.candidate_proxy_ids],
     strategy: draft.strategy,
   })
 }
@@ -343,18 +364,60 @@ function discard() {
   saveError.value = ''
 }
 
-// 代理池（只读）：IP 管理里启用、没过期的代理全部进池，后端按每小时测速的延迟从低到高排好序。
+// 代理池：人工从 IP 管理里选进来的代理（draft.candidate_proxy_ids）。
+// 表里按后端返回的顺序排（池内按延迟排名），本地新加、还没保存的排最后，显示「待保存」。
 const proxies = ref<ProxyAutoSwitchProxy[]>([]), proxiesLoading = ref(false), proxiesLoaded = ref(false), proxiesError = ref('')
 function isExpired(proxy: ProxyAutoSwitchProxy) {
   if (proxy.expired) return true
   const date = validDate(proxy.expires_at)
   return !!date && date.getTime() < Date.now()
 }
-const usableProxies = computed(() => proxies.value.filter(proxy => proxy.status === 'active' && !isExpired(proxy)))
+function isUsable(proxy: ProxyAutoSwitchProxy) { return proxy.status === 'active' && !isExpired(proxy) }
+const proxyById = computed(() => new Map(proxies.value.map(proxy => [proxy.id, proxy])))
+const poolIds = computed(() => new Set(draft.candidate_proxy_ids))
+const savedPoolIds = computed(() => new Set(saved.value?.candidate_proxy_ids ?? []))
+// 池里的代理：已保存的在前（后端顺序 = 延迟排名），新加的在后；IP 管理里已删除的单独列在最后。
+const poolRows = computed(() => {
+  const listed = proxies.value.filter(proxy => poolIds.value.has(proxy.id))
+  const savedRows = listed.filter(proxy => savedPoolIds.value.has(proxy.id))
+  const added = draft.candidate_proxy_ids.map(id => proxyById.value.get(id)).filter((proxy): proxy is ProxyAutoSwitchProxy => !!proxy && !savedPoolIds.value.has(proxy.id))
+  return [...savedRows, ...added]
+})
+const missingPoolIds = computed(() => (proxiesLoaded.value ? draft.candidate_proxy_ids.filter(id => !proxyById.value.has(id)) : []))
+// 排名只给已保存、可用的代理编号；停用 / 过期 / 新加没保存的显示「—」。
+const poolRank = computed(() => {
+  const rank = new Map<number, number>()
+  let n = 0
+  for (const proxy of poolRows.value) {
+    if (savedPoolIds.value.has(proxy.id) && isUsable(proxy)) rank.set(proxy.id, ++n)
+  }
+  return rank
+})
+function poolNote(proxy: ProxyAutoSwitchProxy): string {
+  if (proxy.status !== 'active') return t('proxyAutoSwitch.poolInactive')
+  if (isExpired(proxy)) return t('proxyAutoSwitch.expired')
+  if (!savedPoolIds.value.has(proxy.id)) return t('proxyAutoSwitch.poolUnsaved')
+  if (isFull(proxy)) return t('proxyAutoSwitch.full')
+  return ''
+}
 // 「已满」按已保存的上限算，和后端换代理时用的一致。
 const savedMax = computed(() => saved.value?.max_accounts_per_proxy ?? defaultConfig.max_accounts_per_proxy)
 function isFull(proxy: ProxyAutoSwitchProxy) { return proxy.account_count >= savedMax.value }
 function proxyLabel(proxy: ProxyAutoSwitchProxy) { return proxy.name ? `#${proxy.id} ${proxy.name}` : `#${proxy.id}` }
+function removeFromPool(id: number) { draft.candidate_proxy_ids = draft.candidate_proxy_ids.filter(candidate => candidate !== id) }
+function addToPool(ids: number[]) {
+  const next = [...draft.candidate_proxy_ids]
+  for (const id of ids) if (!next.includes(id)) next.push(id)
+  draft.candidate_proxy_ids = next
+  pickerOpen.value = false
+}
+// 停用、过期的代理一键移出（只改草稿，点保存才生效）。
+const unusablePoolCount = computed(() => poolRows.value.filter(proxy => !isUsable(proxy)).length + missingPoolIds.value.length)
+function removeUnusable() {
+  const drop = new Set([...poolRows.value.filter(proxy => !isUsable(proxy)).map(proxy => proxy.id), ...missingPoolIds.value])
+  draft.candidate_proxy_ids = draft.candidate_proxy_ids.filter(id => !drop.has(id))
+}
+const pickerOpen = ref(false)
 async function loadProxies() {
   proxiesLoading.value = true; proxiesError.value = ''
   try {
@@ -368,8 +431,11 @@ async function loadProxies() {
   } finally { proxiesLoading.value = false }
 }
 
+// 保存时去掉 IP 管理里已经删掉的代理（否则后端校验会拒绝）；代理列表没加载成功就原样带上，别把池子清空。
 function payloadForSave(): ProxyAutoSwitchUpdate {
-  return toPayload()
+  const payload = toPayload()
+  if (proxiesLoaded.value) payload.candidate_proxy_ids = payload.candidate_proxy_ids.filter(id => proxyById.value.has(id))
+  return payload
 }
 
 // 账号监控：窗口以接口返回为准，没返回时退回已保存配置。
@@ -547,6 +613,10 @@ onUnmounted(() => { disposed = true })
 .subsection-heading h4 { @apply text-sm font-semibold; }
 .subsection-heading { @apply flex-wrap; }
 .pool-strategy { @apply ml-auto flex shrink-0 items-center gap-2; }
+.pool-actions { @apply mt-2 flex flex-wrap items-center gap-2; }
+.pool-actions .btn { @apply inline-flex items-center gap-1; }
+.proxy-table .action-cell { width: 4.5rem; }
+.link-button { @apply text-xs text-gray-500 underline-offset-2 hover:text-rose-600 hover:underline dark:text-gray-400 dark:hover:text-rose-400; }
 .proxy-table .rank-cell { width: 5.5rem; font-variant-numeric: tabular-nums; }
 .pager { @apply flex flex-wrap items-center gap-2; }
 .pager-size { @apply inline-flex items-center gap-1.5; }

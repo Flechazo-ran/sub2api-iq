@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -88,14 +89,17 @@ var proxyAutoSwitchSwitchedStatuses = []string{
 }
 
 type ProxyAutoSwitchConfig struct {
-	Enabled            bool    `json:"enabled"`
-	GroupIDs           []int64 `json:"group_ids"`
-	WindowMinutes      int     `json:"window_minutes"`
-	MinSamples         int     `json:"min_samples"`
-	P60ThresholdMS     int     `json:"p60_threshold_ms"`
-	MeanThresholdMS    int     `json:"mean_threshold_ms"`
-	MaxAccountsPerProxy int    `json:"max_accounts_per_proxy"`
-	Strategy           string  `json:"strategy"`
+	Enabled             bool    `json:"enabled"`
+	GroupIDs            []int64 `json:"group_ids"`
+	WindowMinutes       int     `json:"window_minutes"`
+	MinSamples          int     `json:"min_samples"`
+	P60ThresholdMS      int     `json:"p60_threshold_ms"`
+	MeanThresholdMS     int     `json:"mean_threshold_ms"`
+	MaxAccountsPerProxy int     `json:"max_accounts_per_proxy"`
+	// CandidateProxyIDs 是人工从 IP 管理里选进代理池的代理；换代理只从这里挑，池内按延迟排名排序。
+	// 字段名和 v2 之前一样，老配置里的池子原样沿用。
+	CandidateProxyIDs []int64 `json:"candidate_proxy_ids"`
+	Strategy          string  `json:"strategy"`
 }
 
 func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
@@ -107,13 +111,25 @@ func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
 		P60ThresholdMS:      10000,
 		MeanThresholdMS:     15000,
 		MaxAccountsPerProxy: 2,
+		CandidateProxyIDs:   []int64{},
 		Strategy:            ProxyAutoSwitchStrategySequential,
 	}
 }
 
-// normalizeProxyAutoSwitchConfig 去重分组 ID（排序）。
+// normalizeProxyAutoSwitchConfig 去重分组 ID（排序）、去重代理池 ID（保持加入顺序）。
 // 老配置里已经删掉的字段不在结构体里，json.Unmarshal 会自动忽略。
 func normalizeProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) ProxyAutoSwitchConfig {
+	seenProxies := make(map[int64]struct{}, len(cfg.CandidateProxyIDs))
+	pool := make([]int64, 0, len(cfg.CandidateProxyIDs))
+	for _, id := range cfg.CandidateProxyIDs {
+		if _, ok := seenProxies[id]; ok {
+			continue
+		}
+		seenProxies[id] = struct{}{}
+		pool = append(pool, id)
+	}
+	cfg.CandidateProxyIDs = pool
+
 	seenGroups := make(map[int64]struct{}, len(cfg.GroupIDs))
 	groups := make([]int64, 0, len(cfg.GroupIDs))
 	for _, id := range cfg.GroupIDs {
@@ -155,6 +171,11 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 	for _, id := range cfg.GroupIDs {
 		if id <= 0 {
 			return errors.New("group_ids 里有无效的分组 ID")
+		}
+	}
+	for _, id := range cfg.CandidateProxyIDs {
+		if id <= 0 {
+			return errors.New("candidate_proxy_ids 里有无效的代理 ID")
 		}
 	}
 	return nil
@@ -246,6 +267,7 @@ type ProxyAutoSwitchProxyItem struct {
 	ExpiresAt    *time.Time `json:"expires_at"`
 	Expired      bool       `json:"expired"`
 	AccountCount int64      `json:"account_count"`
+	InPool       bool       `json:"in_pool"`
 }
 
 type ProxyAutoSwitchProxyList struct {
@@ -361,11 +383,13 @@ type ProxyAutoSwitchService struct {
 	db         *sql.DB
 	instanceID string
 
-	mu             sync.Mutex
-	regions        map[int64]proxyAutoSwitchRegionMemo
-	assignMu       sync.Mutex
-	latencyRank    []int64 // proxy IDs sorted by probe latency, ascending; nil = not yet probed
-	latencyRankMu  sync.RWMutex
+	mu            sync.Mutex
+	regions       map[int64]proxyAutoSwitchRegionMemo
+	assignMu      sync.Mutex
+	latencyRank   []int64 // proxy IDs sorted by probe latency, ascending; nil = not yet probed
+	latencyRankMu sync.RWMutex
+	rankRefreshMu sync.Mutex  // 同一时间只跑一轮测速（整点和保存配置触发的不会叠在一起）
+	started       atomic.Bool // Start() 跑过：这个实例跑后台任务
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -439,12 +463,33 @@ func (s *ProxyAutoSwitchService) SaveConfig(ctx context.Context, cfg ProxyAutoSw
 			return cfg, infraerrors.BadRequest("PROXY_AUTOSWITCH_GROUP_INVALID", fmt.Sprintf("分组 %d 不存在", id))
 		}
 	}
+	// 池子可能有上百个代理，一次查全部未删除代理来核对，不逐个 GetByID。
+	if len(cfg.CandidateProxyIDs) > 0 {
+		all, err := s.repo.ListProxies(ctx)
+		if err != nil {
+			return cfg, err
+		}
+		known := make(map[int64]struct{}, len(all))
+		for i := range all {
+			known[all[i].ID] = struct{}{}
+		}
+		for _, id := range cfg.CandidateProxyIDs {
+			if _, ok := known[id]; !ok {
+				return cfg, infraerrors.BadRequest("PROXY_AUTOSWITCH_PROXY_INVALID", fmt.Sprintf("代理 %d 不存在或已删除", id))
+			}
+		}
+	}
+	prev, _ := s.GetConfig(ctx)
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return cfg, err
 	}
 	if err := s.settings.Set(ctx, proxyAutoSwitchConfigKey, string(raw)); err != nil {
 		return cfg, infraerrors.InternalServer("PROXY_AUTOSWITCH_CONFIG_SAVE_FAILED", "保存代理优选配置失败")
+	}
+	// 池子变了马上在后台重测一轮，新加的代理不用等到下一个整点才有排名。只在跑后台任务的实例上做。
+	if s.started.Load() && !sameInt64Set(prev.CandidateProxyIDs, cfg.CandidateProxyIDs) {
+		go s.refreshLatencyRankSafely()
 	}
 	return cfg, nil
 }
@@ -454,6 +499,7 @@ func (s *ProxyAutoSwitchService) Start() {
 		return
 	}
 	s.startOnce.Do(func() {
+		s.started.Store(true)
 		// 启动时先探测一次延迟排名，然后每小时刷新。
 		go s.refreshLatencyRankSafely()
 		go func() {
@@ -485,6 +531,9 @@ func (s *ProxyAutoSwitchService) Start() {
 }
 
 func (s *ProxyAutoSwitchService) refreshLatencyRankSafely() {
+	// 前一轮还在跑就排队等它跑完；这一轮开始时才读配置，所以用的是最新的池子。
+	s.rankRefreshMu.Lock()
+	defer s.rankRefreshMu.Unlock()
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("proxy_autoswitch_latency_rank_panic", "recover", r)
@@ -498,18 +547,33 @@ func (s *ProxyAutoSwitchService) refreshLatencyRankSafely() {
 }
 
 func (s *ProxyAutoSwitchService) refreshLatencyRank(ctx context.Context) error {
+	cfg, err := s.GetConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("load config for latency rank: %w", err)
+	}
+	// 只测代理池里的代理；池子空了就清空排名。
+	inPool := make(map[int64]struct{}, len(cfg.CandidateProxyIDs))
+	for _, id := range cfg.CandidateProxyIDs {
+		inPool[id] = struct{}{}
+	}
 	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
 		return fmt.Errorf("list proxies for latency rank: %w", err)
 	}
 	now := s.now()
-	eligible := make([]ProxyWithAccountCount, 0, len(proxies))
+	eligible := make([]ProxyWithAccountCount, 0, len(cfg.CandidateProxyIDs))
 	for _, p := range proxies {
+		if _, ok := inPool[p.ID]; !ok {
+			continue
+		}
 		if p.Status == StatusActive && !p.IsExpired(now) {
 			eligible = append(eligible, p)
 		}
 	}
 	if len(eligible) == 0 {
+		s.latencyRankMu.Lock()
+		s.latencyRank = []int64{}
+		s.latencyRankMu.Unlock()
 		return nil
 	}
 
