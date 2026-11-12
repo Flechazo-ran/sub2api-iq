@@ -179,6 +179,11 @@ type OpsInsertSystemMetricsInput struct {
 
 	GoroutineCount        *int
 	ConcurrencyQueueDepth *int
+
+	// Request body memory budget (#16) over the collection window; nil when disabled.
+	RequestBodyBudgetLimitMB  *int64
+	RequestBodyBudgetPeakMB   *int64
+	RequestBodyBudgetRejected *int64
 }
 
 type OpsInsertSystemLogInput struct {
@@ -277,6 +282,12 @@ type OpsSystemMetricsSnapshot struct {
 	GoroutineCount        *int   `json:"goroutine_count"`
 	ConcurrencyQueueDepth *int   `json:"concurrency_queue_depth"`
 	AccountSwitchCount    *int64 `json:"account_switch_count"`
+
+	// Request body memory budget (#16): limit, peak usage and 503 rejections in
+	// the window. Nil when the budget is disabled or the row predates it.
+	RequestBodyBudgetLimitMB  *int64 `json:"request_body_budget_limit_mb"`
+	RequestBodyBudgetPeakMB   *int64 `json:"request_body_budget_peak_mb"`
+	RequestBodyBudgetRejected *int64 `json:"request_body_budget_rejected"`
 }
 
 type OpsUpsertJobHeartbeatInput struct {
