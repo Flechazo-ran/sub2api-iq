@@ -53,8 +53,12 @@ func RegisterGatewayRoutes(
 	}
 	r.GET("/api/bps-images/:token", imageOwner, h.OpenAIGateway.ExcelBPSImage)
 	r.HEAD("/api/bps-images/:token", imageOwner, h.OpenAIGateway.ExcelBPSImage)
-	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
-	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
+	// 请求体内存总额度（#16）：所有网关路由共用一个额度，超额返回 503 让客户端重试。
+	// 额度为 0 时不挂预占记录，行为与没有额度时完全一样。
+	bodyMemoryBudget := pkghttputil.NewBodyMemoryBudget(cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	pkghttputil.PublishBodyMemoryBudget(bodyMemoryBudget)
+	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize, bodyMemoryBudget)
+	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize, bodyMemoryBudget)
 	imageAdmission := middleware.ExcelBPSImageAdmission()
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
@@ -659,6 +663,9 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 
 		body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 		if err != nil {
+			if middleware.RejectRequestBodyMemoryOverload(c, err) {
+				return
+			}
 			status := http.StatusBadRequest
 			message := "Failed to read request body"
 			var maxErr *http.MaxBytesError

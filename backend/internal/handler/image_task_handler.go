@@ -77,6 +77,9 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
+		if rejectRequestBodyMemoryOverload(c, err) {
+			return
+		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			imageTaskJSONError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
@@ -259,8 +262,18 @@ func (h *AsyncImageHandler) failTask(taskID string, statusCode int, taskErr json
 }
 
 func newAsyncImageContext(c *gin.Context, body []byte, timeoutDuration time.Duration) (*gin.Context, *httptest.ResponseRecorder, context.CancelFunc) {
-	base := context.WithoutCancel(c.Request.Context())
-	executionCtx, cancel := context.WithTimeout(base, timeoutDuration)
+	// The task keeps body (and re-reads it) after Submit returns and the
+	// request's body memory reservation is released, so it holds them on its own
+	// reservation (#16). That reservation is best effort: the task was accepted,
+	// so accounting never fails it. cancel releases it; run() defers cancel and
+	// Submit calls it when the task cannot be created.
+	retained, releaseBody, _ := pkghttputil.DetachRequestBodyMemory(c.Request.Context(), int64(len(body)))
+	base := context.WithoutCancel(retained)
+	executionCtx, cancelExecution := context.WithTimeout(base, timeoutDuration)
+	cancel := func() {
+		cancelExecution()
+		releaseBody()
+	}
 	request := c.Request.Clone(executionCtx)
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.GetBody = func() (io.ReadCloser, error) {

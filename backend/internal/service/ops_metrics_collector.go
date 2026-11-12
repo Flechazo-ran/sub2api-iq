@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -362,6 +363,15 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 		DBConnIdle:            intPtr(idle),
 		GoroutineCount:        intPtr(goroutines),
 		ConcurrencyQueueDepth: concurrencyQueueDepth,
+	}
+	if budget, ok := httputil.TakeActiveBodyMemoryBudgetStats(); ok {
+		limitMB := budget.LimitBytes >> 20
+		// Round the peak up so any buffered body shows as at least 1 MB.
+		peakMB := (budget.PeakBytes + (1 << 20) - 1) >> 20
+		rejected := budget.Rejected
+		input.RequestBodyBudgetLimitMB = &limitMB
+		input.RequestBodyBudgetPeakMB = &peakMB
+		input.RequestBodyBudgetRejected = &rejected
 	}
 
 	return c.opsRepo.InsertSystemMetrics(ctx, input)

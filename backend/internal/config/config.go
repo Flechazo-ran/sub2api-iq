@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/sysutil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/upstreamroute"
 	"github.com/spf13/viper"
 	"golang.org/x/net/http/httpguts"
@@ -1185,6 +1186,10 @@ type GatewayConfig struct {
 	MaxBodySize int64 `mapstructure:"max_body_size"`
 	// TextMaxBodySize limits endpoints that cannot carry inline image/video payloads.
 	TextMaxBodySize int64 `mapstructure:"text_max_body_size"`
+	// RequestBodyMemoryBudgetBytes bounds buffered ingress request bodies across
+	// all gateway routes of this instance; exhaustion answers 503 with Retry-After.
+	// Unset: a quarter of the memory limit (see autoRequestBodyMemoryBudget). 0 disables it.
+	RequestBodyMemoryBudgetBytes int64 `mapstructure:"request_body_memory_budget_bytes"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
 	UpstreamResponseReadMaxBytes int64 `mapstructure:"upstream_response_read_max_bytes"`
 	// 上游模型列表响应体读取上限（字节）
@@ -2054,6 +2059,25 @@ func LoadForBootstrap() (*Config, error) {
 	return load(true)
 }
 
+// detectMemoryLimitBytes is replaced in tests so defaults do not depend on the host.
+var detectMemoryLimitBytes = sysutil.MemoryLimitBytes
+
+const (
+	defaultRequestBodyMemoryBudgetBytes = int64(1 << 30)
+	// requestBodyMemoryBudgetDivisor leaves the rest of memory for conversion
+	// state, SSE buffers, caches and GC headroom.
+	requestBodyMemoryBudgetDivisor = 4
+)
+
+// autoRequestBodyMemoryBudget sizes the unconfigured ingress budget to a
+// quarter of the process memory limit (the smallest of physical memory, the
+// cgroup limit and GOMEMLIMIT). It never goes below 1 GiB, matching the
+// downstream CN gateway (lumai-beijing/sub2api c004c962a).
+func autoRequestBodyMemoryBudget(memoryLimitBytes uint64) int64 {
+	// uint64 / 4 always fits in int64.
+	return max(int64(memoryLimitBytes/requestBodyMemoryBudgetDivisor), defaultRequestBodyMemoryBudgetBytes)
+}
+
 func load(allowMissingJWTSecret bool) (*Config, error) {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -2095,6 +2119,15 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		cfg.Security.ForwardedClientIPHeaders = normalizeStringSlice(strings.Split(forwardedClientIPHeadersEnv, ","))
 	}
 	cfg.Server.TrustedProxiesConfigured = trustedProxiesConfigured
+	// Mirror viper's own precedence: an empty environment variable is ignored by
+	// viper, so it must not pin the static default either (e.g. Compose ${VAR:-}).
+	if !viper.InConfig("gateway.request_body_memory_budget_bytes") && os.Getenv("GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES") == "" {
+		memoryLimit := detectMemoryLimitBytes()
+		cfg.Gateway.RequestBodyMemoryBudgetBytes = autoRequestBodyMemoryBudget(memoryLimit)
+		slog.Info("gateway.request_body_memory_budget_bytes auto-sized from memory limit",
+			"budget_bytes", cfg.Gateway.RequestBodyMemoryBudgetBytes,
+			"memory_limit_bytes", memoryLimit)
+	}
 	if cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs == 0 {
 		cfg.Gateway.OpenAIScheduler.StickyEscapeTTFTMs = 15000
 	}
@@ -2812,6 +2845,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
+	// Registered so AutomaticEnv can reach it; load() replaces it with a value
+	// sized from the memory limit unless the config file or env sets it.
+	viper.SetDefault("gateway.request_body_memory_budget_bytes", defaultRequestBodyMemoryBudgetBytes)
 	viper.SetDefault("gateway.upstream_response_read_max_bytes", DefaultUpstreamResponseReadMaxBytes)
 	viper.SetDefault("gateway.models_list_read_max_bytes", DefaultModelsListReadMaxBytes)
 	viper.SetDefault("gateway.proxy_probe_response_read_max_bytes", int64(1024*1024))
@@ -3652,6 +3688,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.TextMaxBodySize <= 0 || c.Gateway.TextMaxBodySize > c.Gateway.MaxBodySize {
 		return fmt.Errorf("gateway.text_max_body_size must be positive and no greater than gateway.max_body_size")
+	}
+	if c.Gateway.RequestBodyMemoryBudgetBytes < 0 {
+		return fmt.Errorf("gateway.request_body_memory_budget_bytes must be non-negative")
 	}
 	if c.Gateway.UpstreamResponseReadMaxBytes <= 0 {
 		return fmt.Errorf("gateway.upstream_response_read_max_bytes must be positive")

@@ -7,7 +7,16 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/gin-gonic/gin"
 )
+
+// rejectRequestBodyMemoryOverload answers an exhausted request body memory
+// budget (#16) with 503 + Retry-After. Callers check it before classifying a
+// read error as 400/413; any other error is left to their existing handling.
+func rejectRequestBodyMemoryOverload(c *gin.Context, err error) bool {
+	return middleware2.RejectRequestBodyMemoryOverload(c, err)
+}
 
 func extractMaxBytesError(err error) (*http.MaxBytesError, bool) {
 	var maxErr *http.MaxBytesError

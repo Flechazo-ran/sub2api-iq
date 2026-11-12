@@ -761,6 +761,29 @@ const redisMiddleClass = computed(() => {
   return 'text-gray-900 dark:text-white'
 })
 
+const requestBodyBudgetLimitValue = computed<number | null>(() => {
+  const v = systemMetrics.value?.request_body_budget_limit_mb
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+})
+
+const requestBodyBudgetPeakValue = computed<number | null>(() => {
+  const v = systemMetrics.value?.request_body_budget_peak_mb
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
+})
+
+const requestBodyBudgetRejectedValue = computed<number>(() => {
+  const v = systemMetrics.value?.request_body_budget_rejected
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0
+})
+
+const requestBodyBudgetClass = computed(() => {
+  if (requestBodyBudgetRejectedValue.value > 0) return 'text-rose-600 dark:text-rose-400'
+  const limit = requestBodyBudgetLimitValue.value
+  const peak = requestBodyBudgetPeakValue.value
+  if (limit != null && peak != null && peak / limit >= 0.7) return 'text-yellow-600 dark:text-yellow-400'
+  return 'text-gray-500 dark:text-gray-400'
+})
+
 const goroutineCountValue = computed<number | null>(() => {
   const v = systemMetrics.value?.goroutine_count
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -1485,6 +1508,19 @@ function handleToolbarRefresh() {
                 ? '-'
                 : `${formatMemorySizeMB(systemMetrics.memory_used_mb)} / ${formatMemorySizeMB(systemMetrics.memory_total_mb)}`
             }}
+          </div>
+          <div
+            v-if="!props.fullscreen && requestBodyBudgetLimitValue != null"
+            class="mt-0.5 text-[10px]"
+            :class="requestBodyBudgetClass"
+            :title="t('admin.ops.tooltips.requestBodyBudget')"
+            data-testid="ops-request-body-budget"
+          >
+            {{ t('admin.ops.requestBodyBudget') }}
+            <span class="font-mono">{{ formatMemorySizeMB(requestBodyBudgetPeakValue ?? 0) }} / {{ formatMemorySizeMB(requestBodyBudgetLimitValue) }}</span>
+            <span v-if="requestBodyBudgetRejectedValue > 0">
+              · {{ t('admin.ops.requestBodyBudgetRejected') }} <span class="font-mono">{{ requestBodyBudgetRejectedValue }}</span>
+            </span>
           </div>
         </div>
 

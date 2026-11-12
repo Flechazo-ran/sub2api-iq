@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -1211,9 +1212,17 @@ func (v openAIRequestView) HasPatches() bool {
 	return !v.patchesDisabled && len(v.patches) > 0
 }
 
-func (v openAIRequestView) ApplyPatches() ([]byte, error) {
+// ApplyPatches materializes the patched body. Its output is charged to the
+// request body memory budget in ctx (#16) when there is room; a full budget
+// never fails a request that was already admitted, the copy then goes
+// uncharged. The charge belongs to the innermost budget scope in ctx.
+func (v openAIRequestView) ApplyPatches(ctx context.Context) ([]byte, error) {
 	if v.patchesDisabled || len(v.patches) == 0 {
 		return nil, errors.New("openai request patches disabled")
+	}
+	reserved := int64(len(v.body))
+	if !httputil.TryReserveRequestBodyMemory(ctx, reserved) {
+		reserved = 0
 	}
 	body := v.body
 	for _, patch := range v.patches {
@@ -1224,7 +1233,16 @@ func (v openAIRequestView) ApplyPatches() ([]byte, error) {
 			body, err = sjson.SetBytes(body, patch.path, patch.value)
 		}
 		if err != nil {
+			httputil.ReleaseRequestBodyMemory(ctx, reserved)
 			return nil, err
+		}
+	}
+	if reserved > 0 {
+		// Settle the estimate to the output's exact size.
+		if extra := int64(len(body)) - reserved; extra > 0 {
+			httputil.TryReserveRequestBodyMemory(ctx, extra)
+		} else if extra < 0 {
+			httputil.ReleaseRequestBodyMemory(ctx, -extra)
 		}
 	}
 	return body, nil

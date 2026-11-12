@@ -280,6 +280,11 @@ export interface OpsSystemMetricsSnapshot {
   goroutine_count?: number | null
   concurrency_queue_depth?: number | null
   account_switch_count?: number | null
+
+  // Request body memory budget over the collection window (null when disabled).
+  request_body_budget_limit_mb?: number | null
+  request_body_budget_peak_mb?: number | null
+  request_body_budget_rejected?: number | null
 }
 
 export interface OpsJobHeartbeat {

@@ -708,6 +708,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	bodyReadDone()
 	if err != nil {
+		if rejectRequestBodyMemoryOverload(c, err) {
+			return
+		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
@@ -1526,6 +1529,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	bodyReadDone()
 	if err != nil {
+		if rejectRequestBodyMemoryOverload(c, err) {
+			return
+		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			h.anthropicErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return

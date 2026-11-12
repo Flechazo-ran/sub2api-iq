@@ -77,7 +77,11 @@ INSERT INTO ops_system_metrics (
   db_conn_waiting,
 
   goroutine_count,
-  concurrency_queue_depth
+  concurrency_queue_depth,
+
+  request_body_budget_limit_mb,
+  request_body_budget_peak_mb,
+  request_body_budget_rejected
 ) VALUES (
   $1,$2,$3,$4,
   $5,$6,$7,$8,
@@ -89,7 +93,8 @@ INSERT INTO ops_system_metrics (
   $32,$33,
   $34,$35,
   $36,$37,$38,
-  $39,$40
+  $39,$40,
+  $41,$42,$43
 )`
 
 	_, err := r.db.ExecContext(
@@ -145,6 +150,10 @@ INSERT INTO ops_system_metrics (
 
 		opsNullMetricInt(input.GoroutineCount),
 		opsNullMetricInt(input.ConcurrencyQueueDepth),
+
+		opsNullMetricInt64(input.RequestBodyBudgetLimitMB),
+		opsNullMetricInt64(input.RequestBodyBudgetPeakMB),
+		opsNullMetricInt64(input.RequestBodyBudgetRejected),
 	)
 	return err
 }
@@ -180,7 +189,10 @@ SELECT
 
   goroutine_count,
   concurrency_queue_depth,
-  account_switch_count
+  account_switch_count,
+  request_body_budget_limit_mb,
+  request_body_budget_peak_mb,
+  request_body_budget_rejected
 FROM ops_system_metrics
 WHERE window_minutes = $1
   AND platform IS NULL
@@ -203,6 +215,9 @@ LIMIT 1`
 	var goroutines sql.NullInt64
 	var queueDepth sql.NullInt64
 	var accountSwitchCount sql.NullInt64
+	var bodyBudgetLimit sql.NullInt64
+	var bodyBudgetPeak sql.NullInt64
+	var bodyBudgetRejected sql.NullInt64
 
 	if err := r.db.QueryRowContext(ctx, q, windowMinutes).Scan(
 		&out.ID,
@@ -222,6 +237,9 @@ LIMIT 1`
 		&goroutines,
 		&queueDepth,
 		&accountSwitchCount,
+		&bodyBudgetLimit,
+		&bodyBudgetPeak,
+		&bodyBudgetRejected,
 	); err != nil {
 		return nil, err
 	}
@@ -281,6 +299,18 @@ LIMIT 1`
 	if accountSwitchCount.Valid {
 		v := accountSwitchCount.Int64
 		out.AccountSwitchCount = &v
+	}
+	if bodyBudgetLimit.Valid {
+		v := bodyBudgetLimit.Int64
+		out.RequestBodyBudgetLimitMB = &v
+	}
+	if bodyBudgetPeak.Valid {
+		v := bodyBudgetPeak.Int64
+		out.RequestBodyBudgetPeakMB = &v
+	}
+	if bodyBudgetRejected.Valid {
+		v := bodyBudgetRejected.Int64
+		out.RequestBodyBudgetRejected = &v
 	}
 
 	return &out, nil
