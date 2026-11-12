@@ -2338,6 +2338,7 @@ func setDefaults() {
 	viper.SetDefault("runtime.serverless_endpoint", "")
 	viper.SetDefault("runtime.serverless_region", "")
 	viper.SetDefault("runtime.serverless_secret", "")
+	viper.SetDefault("runtime.serverless_response_header_timeout", 0)
 	viper.SetDefault("server.graceful_shutdown_timeout", 5)
 	viper.SetDefault("server.shutdown_drain_delay", 0)
 	viper.SetDefault("run_mode", RunModeStandard)
@@ -2407,6 +2408,7 @@ func setDefaults() {
 		"api.minimaxi.com", // MiniMax CN quota + inference
 		"api.minimax.io",   // MiniMax intl; frozen allowlists must add this host to use the intl site
 		"opencode.ai",
+		"api.mistral.ai",
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",
 		"*.openai.azure.com",

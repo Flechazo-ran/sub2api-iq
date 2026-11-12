@@ -47,6 +47,9 @@ func (q *QualityPolicy) UsesModelResults() bool {
 
 // QualityPolicy is opt-in. Legacy connectivity/HTML tests never modify membership.
 type QualityPolicy struct {
+	// OAuth401MaxRounds removes only an OAuth quality rule after this many
+	// consecutive authentication-failure rounds. Zero preserves legacy behavior.
+	OAuth401MaxRounds    int                         `json:"oauth_401_max_rounds,omitempty"`
 	Admission            *OpenAITwoFAAdmissionConfig `json:"admission,omitempty"`
 	TriggerOnUpstream5xx bool                        `json:"trigger_on_upstream_5xx"`
 	Judge                *QualityJudgeConfig         `json:"judge,omitempty"`
@@ -59,6 +62,7 @@ type QualityPolicy struct {
 	// RecoveryConcurrency is the temporary OAuth concurrency cap applied when
 	// this rule quarantines an account. Zero keeps the safe default of five.
 	RecoveryConcurrency int               `json:"recovery_concurrency,omitempty"`
+	RetestRestMinutes   int               `json:"retest_rest_minutes,omitempty"`
 	AutoRestore         bool              `json:"auto_restore"`
 	BPS                 *QualityBPSPolicy `json:"bps,omitempty"`
 }
@@ -74,6 +78,15 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 	// 字段看护只做「仅记录」或「移出分组（可同时移入指定分组）」，其他处置直接拒绝，不偷偷改。
 	if isOpenAICodexFieldWatchPlan(plan.PelicanConfig) && q.Action != QualityActionObserveOnly && q.Action != "remove_groups" {
 		return fmt.Errorf("字段看护只支持「仅记录」(observe_only) 或「移出分组」(remove_groups，可同时移入 add_group_ids) 处置，不支持 %q", q.Action)
+	}
+	if q.OAuth401MaxRounds < 0 || q.OAuth401MaxRounds > 100 {
+		return fmt.Errorf("OAuth 401 cleanup must be 0-100 rounds")
+	}
+	if q.RetestRestMinutes < 0 || q.RetestRestMinutes > 10080 {
+		return fmt.Errorf("quality retest rest must be 0-10080 minutes")
+	}
+	if !q.UsesRetestRest() {
+		q.RetestRestMinutes = 0
 	}
 	if q.Action == QualityActionOpenAITwoFAAdmission {
 		if q.Admission == nil || !q.Admission.Enabled || q.Admission.Validate() != nil || plan.PelicanConfig.QuestionKind != "candy" || plan.PelicanConfig.ParallelCount != 1 || plan.ModelID != q.Admission.ModelID || plan.PelicanConfig.ReasoningEffort != q.Admission.ReasoningEffort || plan.PelicanConfig.TestChannel == "bps" || q.AutoRestore || plan.AutoRecover || plan.PelicanConfig.Prompt != CandyPrompt {
@@ -187,6 +200,11 @@ func validateQualityPolicy(plan *ScheduledTestPlan) error {
 		added[id] = true
 	}
 	return nil
+}
+
+// BPS has its own recovery interval; observation never quarantines accounts.
+func (q *QualityPolicy) UsesRetestRest() bool {
+	return q.Action == "remove_groups" || q.Action == "disable_scheduling" || q.UsesModelResults()
 }
 
 // One completed wrong answer quarantines; restoration requires every probe to pass.
