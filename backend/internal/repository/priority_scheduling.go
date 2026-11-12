@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -34,7 +35,7 @@ func (r *usageLogRepository) ReadPrioritySchedulingSignals(ctx context.Context, 
 	if qualityModel == "" {
 		qualityModel = query.Model
 	}
-	rows, err := r.sql.QueryContext(ctx, `
+	querySQL := `
  WITH base_usage AS (
   SELECT id, account_id, created_at, stream, first_token_ms, actual_cost,
    COALESCE(account_stats_cost,total_cost) AS base_cost
@@ -124,14 +125,18 @@ func (r *usageLogRepository) ReadPrioritySchedulingSignals(ctx context.Context, 
  ), rounds AS (
   SELECT p.account_id, r.quality_round_id, MAX(r.created_at) AS observed_at,
    bool_or(r.quality_judgment->>'verdict'='incorrect' AND r.status='failed'
-    AND r.error_message IN ('answer_mismatch','state_degraded')) AS failed,
-   bool_and(COALESCE(r.quality_judgment->>'verdict'='correct' AND r.status='success',false)) AS passed
+    AND r.error_message IN ('answer_mismatch','state_degraded')
+    AND (COALESCE(r.pelican_config->>'question_kind','')<>'random_reasoning'
+      OR r.pelican_config->'quality_batch'->>'decision'='peer_passed')) AS failed,
+   bool_and(COALESCE(r.quality_judgment->>'verdict'='correct' AND r.status='success'
+    AND (COALESCE(r.pelican_config->>'question_kind','')<>'random_reasoning'
+      OR r.pelican_config->'quality_batch'->>'decision'='passed'),false)) AS passed
   FROM scheduled_test_plans p JOIN scheduled_test_results r ON r.plan_id=p.id
   WHERE p.account_id=ANY($1) AND p.enabled
    AND COALESCE(NULLIF(r.pelican_config->>'model_id',''),p.model_id)=$10
    AND jsonb_typeof(p.pelican_config->'quality')='object' AND r.quality_round_id<>''
    AND r.created_at >= $4 AND r.created_at >= p.updated_at AND r.created_at <= NOW()
-   AND r.quality_action<>'' AND r.quality_action<>'stale_run'
+   AND r.quality_action NOT IN ('','stale_run','comparison_pending')
   GROUP BY p.account_id,p.id,r.quality_round_id
   HAVING bool_and((r.pelican_config->'parallel_count' IS NULL OR jsonb_typeof(r.pelican_config->'parallel_count')='number')
     AND COALESCE(r.pelican_config->>'parallel_count','1') ~ '^[1-8]$')
@@ -157,7 +162,14 @@ func (r *usageLogRepository) ReadPrioritySchedulingSignals(ctx context.Context, 
  LEFT JOIN errors e ON e.account_id=ids.id
  LEFT JOIN quality q ON q.account_id=ids.id
  LEFT JOIN latest_quality lq ON lq.account_id=ids.id
- `, pq.Array(query.AccountIDs), query.Model, query.UsageSince, query.QualitySince, query.GroupID, query.LatencyPercentile, query.LatencyMeasurement, query.TargetTTFTMs, query.UsageUntil, qualityModel)
+ `
+	args := []any{pq.Array(query.AccountIDs), query.Model, query.UsageSince, query.QualitySince, query.GroupID, query.LatencyPercentile, query.LatencyMeasurement, query.TargetTTFTMs, query.UsageUntil, qualityModel}
+	if query.ObservationEffort != nil {
+		// Exact effort population; no max/xhigh inference or cross-effort fallback.
+		querySQL = strings.Replace(querySQL, "AND group_id IS NOT DISTINCT FROM $5::bigint", "AND group_id IS NOT DISTINCT FROM $5::bigint AND COALESCE(reasoning_effort,'')=$11", 1)
+		args = append(args, *query.ObservationEffort)
+	}
+	rows, err := r.sql.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, err
 	}

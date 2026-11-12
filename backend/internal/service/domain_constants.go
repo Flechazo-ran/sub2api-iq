@@ -53,6 +53,7 @@ const (
 	PlatformTypeSafe    = domain.PlatformTypeSafe
 	PlatformCommandCode = domain.PlatformCommandCode
 	PlatformCline       = domain.PlatformCline
+	PlatformMistral     = domain.PlatformMistral
 	PlatformComposite   = domain.PlatformComposite
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
@@ -92,7 +93,9 @@ const (
 	// Command Code Provider API：Chat Completions / Responses / models 共用 /provider/v1 基址。
 	DefaultCommandCodeBaseURL = "https://api.commandcode.ai/provider/v1"
 	// Cline API：只提供 Chat Completions（{base}/chat/completions）与模型列表。
-	DefaultClineBaseURL = "https://api.cline.bot/api/v1"
+	DefaultClineBaseURL     = "https://api.cline.bot/api/v1"
+	DefaultMistralBaseURL   = "https://api.mistral.ai/v1"
+	DefaultMistralTestModel = "mistral-small-latest"
 )
 
 // 国产供应商 Anthropic 协议端点的默认 base_url（上游路径为 {base}/v1/messages）。
@@ -617,6 +620,9 @@ const (
 	SettingKeyOpenAIImagesOAuthUnavailableCooldownSettings = "openai_images_oauth_unavailable_cooldown_settings"
 	// SettingKeyOpenAIAPIKeyHealthBreakerSettings stores the opt-in OpenAI pool API-key breaker config.
 	SettingKeyOpenAIAPIKeyHealthBreakerSettings = "openai_apikey_health_breaker_settings"
+	// SettingKeyOpenAIResponseHeaderTimeoutSettings stores the admin-configurable
+	// OpenAI/Codex response-header timeout and enable toggle.
+	SettingKeyOpenAIResponseHeaderTimeoutSettings = "openai_response_header_timeout_settings"
 
 	// =========================
 	// Stream Timeout Handling

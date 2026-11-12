@@ -45,9 +45,10 @@ type opsSchedulableAccountLoadRepository interface {
 }
 
 type OpsMetricsCollector struct {
-	opsRepo     OpsRepository
-	settingRepo SettingRepository
-	cfg         *config.Config
+	networkSampler *hostNetworkSampler
+	opsRepo        OpsRepository
+	settingRepo    SettingRepository
+	cfg            *config.Config
 
 	accountRepo        AccountRepository
 	concurrencyService *ConcurrencyService
@@ -179,6 +180,9 @@ func (c *OpsMetricsCollector) collectOnce() {
 
 	if !c.isMonitoringEnabled(ctx) {
 		return
+	}
+	if err := c.collectNetwork(ctx, time.Now().UTC()); err != nil {
+		log.Printf("[OpsMetricsCollector] network metric persistence unavailable: %v", err)
 	}
 
 	release, ok := c.tryAcquireLeaderLock(ctx)
@@ -438,7 +442,7 @@ func (c *OpsMetricsCollector) listSchedulableAccountLoads(ctx context.Context) (
 		}
 		loads = append(loads, AccountWithConcurrency{
 			ID:             account.ID,
-			MaxConcurrency: account.EffectiveLoadFactor(),
+			MaxConcurrency: account.Concurrency,
 		})
 	}
 	return loads, nil

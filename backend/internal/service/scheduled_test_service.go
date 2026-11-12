@@ -156,6 +156,7 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 		cfg.QualityModelOutcomes = nil
 		cfg.QualityModelActions = nil
 		cfg.RandomQuestion = nil
+		cfg.QualityBatch = nil
 		cfg.FieldWatchMismatch = false
 		fieldWatch := isOpenAICodexFieldWatchPlan(cfg)
 		if fieldWatch {
