@@ -1,4 +1,6 @@
+import autoCredit from './autoCredit'
 import accountPerformance from './accountPerformance'
+import apiKeyModelPolicy from './apiKeyModelPolicy'
 import lottery from './lottery'
 import accountTestTiming from './accountTestTiming'
 import openaiAuth from './openaiAuth'
@@ -18,6 +20,8 @@ import proxyAutoSwitch from './proxyAutoSwitch'
 import firstTokenTrend from './firstTokenTrend'
 import proxyScore from './proxyScore'
 import accountOps from './accountOps'
+import aiOps from './aiOps'
+import aiOpsControl from './aiOpsControl'
 import tokenGuard from './tokenGuard'
 import pelicanTests from './pelicanTests'
 import modelTrace from './modelTrace'
@@ -39,6 +43,8 @@ import latencyObservability from './latencyObservability'
 import autoConfig from './autoConfig'
 
 export default {
+  apiKeyModelPolicy,
+  autoCredit,
  accountPerformance,
 	lottery,
   accountTestTiming,
@@ -60,6 +66,8 @@ export default {
   firstTokenTrend,
   proxyScore,
   accountOps,
+  aiOps,
+  aiOpsControl,
   tokenGuard,
   pelicanTests,
   modelTrace,
