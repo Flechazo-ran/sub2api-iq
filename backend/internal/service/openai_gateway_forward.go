@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -460,9 +461,25 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	bodyModified := false
 	clientPromptCacheKey := promptCacheKey
 	var reqBody map[string]any
+	// Each patched body supersedes the previous one, so this attempt holds only
+	// the live output's budget (#16), returned when Forward ends rather than
+	// retained across failover attempts until the handler returns.
+	releasePatchedBodyMemory := func() {}
+	defer func() { releasePatchedBodyMemory() }()
+	applyRequestPatches := func() ([]byte, error) {
+		patchCtx, releasePatch := httputil.WithRequestBodyMemoryScope(ctx)
+		patchedBody, patchErr := requestView.ApplyPatches(patchCtx)
+		if patchErr != nil {
+			releasePatch()
+			return nil, patchErr
+		}
+		releasePatchedBodyMemory()
+		releasePatchedBodyMemory = releasePatch
+		return patchedBody, nil
+	}
 	ensureReqBody := func() (map[string]any, error) {
 		if requestView.HasPatches() {
-			patchedBody, patchErr := requestView.ApplyPatches()
+			patchedBody, patchErr := applyRequestPatches()
 			if patchErr != nil {
 				return nil, patchErr
 			}
@@ -884,7 +901,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	if bodyModified {
 		if requestView.HasPatches() {
-			if patchedBody, patchErr := requestView.ApplyPatches(); patchErr == nil {
+			if patchedBody, patchErr := applyRequestPatches(); patchErr == nil {
 				body = patchedBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil

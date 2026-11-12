@@ -310,6 +310,17 @@ gateway:
   # Pure-text endpoint body limit (embeddings and alpha/search), default 32 MiB.
   # 纯文本端点请求体上限（embeddings、alpha/search），默认 32 MiB。
   text_max_body_size: 33554432
+  # Per-instance request body memory budget shared by all gateway routes (#16).
+  # Buffered bodies are charged before allocation (chunks, the contiguous copy, decoded
+  # output, JSON normalization, the zstd window, per-attempt rewritten bodies); final
+  # bodies stay charged until the handler returns. A full budget answers 503 with
+  # Retry-After: 1; a single oversized request is still 413. Accounting errs on the side
+  # of admitting: work that was already accepted is never failed by it.
+  # Unset (default): 1/4 of the memory limit (min of RAM, cgroup limit, GOMEMLIMIT), at least 1 GiB.
+  # 实例级请求体内存总额度（所有网关路由共用）；额度用满返回 503 + Retry-After，0 禁用。
+  # 不配置时自动取内存上限（物理内存 / cgroup 限额 / GOMEMLIMIT 的最小值）的 1/4，最低 1GiB；
+  # 显式配置后不再自适应。环境变量：GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES。
+  # request_body_memory_budget_bytes: 1073741824
   # Max bytes to read for non-stream upstream responses (default: 8MB)
   # 非流式上游响应体读取上限（默认 8MB）
   upstream_response_read_max_bytes: 8388608
