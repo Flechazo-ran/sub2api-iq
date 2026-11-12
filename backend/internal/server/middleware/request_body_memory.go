@@ -20,10 +20,23 @@ const requestBodyMemoryOverloadLogInterval = 10 * time.Second
 
 var requestBodyMemoryOverloadLastLog atomic.Int64
 
+// RejectRequestBodyReadError handles early ingress termination before the route
+// handler runs. Cancelled clients have no response body and an uncommitted
+// response is marked 499, matching the gateway handler's cancellation path.
+func RejectRequestBodyReadError(c *gin.Context, err error) bool {
+	if err != nil && c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+		if !c.Writer.Written() {
+			c.Status(499)
+		}
+		c.Abort()
+		return true
+	}
+	return RejectRequestBodyMemoryOverload(c, err)
+}
+
 // RejectRequestBodyMemoryOverload keeps temporary capacity errors distinct
 // from invalid JSON and the per-request 413 size limit: an exhausted budget
-// answers 503 with Retry-After so the client retries. Any other error returns
-// false and is left to the caller's existing handling.
+// answers 503 with Retry-After so the client retries.
 func RejectRequestBodyMemoryOverload(c *gin.Context, err error) bool {
 	if c == nil || !errors.Is(err, pkghttputil.ErrRequestBodyMemoryBudget) {
 		return false
@@ -38,7 +51,8 @@ func RejectRequestBodyMemoryOverload(c *gin.Context, err error) bool {
 // requestBodyMemoryOverloadErrorWriter picks the protocol format the same way
 // as groupModelAllowlistErrorWriter, except that OpenAI clients get a
 // server_error: the shared OpenAIErrorWriter labels everything model_not_found,
-// which must not reach a client (or a downstream gateway) for a capacity error.
+// and a downstream gateway would then count a capacity error as a client error
+// or a missing model instead of failing over.
 func requestBodyMemoryOverloadErrorWriter(c *gin.Context) GatewayErrorWriter {
 	path := ""
 	if c.Request != nil && c.Request.URL != nil {

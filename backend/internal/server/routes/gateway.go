@@ -59,12 +59,11 @@ func RegisterGatewayRoutes(
 		trafficRecorder = h.Admin.Usage
 	}
 	traffic := middleware.UserTraffic(trafficRecorder)
-	// 请求体内存总额度（#16）：所有网关路由共用一个额度，超额返回 503 让客户端重试。
-	// 额度为 0 时不挂预占记录，行为与没有额度时完全一样。
-	bodyMemoryBudget := pkghttputil.NewBodyMemoryBudget(cfg.Gateway.RequestBodyMemoryBudgetBytes)
-	pkghttputil.PublishBodyMemoryBudget(bodyMemoryBudget)
-	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize, bodyMemoryBudget)
-	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize, bodyMemoryBudget)
+	bodyBudget := pkghttputil.NewBodyMemoryBudget(cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	// 运维页读取额度用量（峰值、拒绝次数），不影响准入（#16）。
+	pkghttputil.PublishBodyMemoryBudget(bodyBudget)
+	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize, bodyBudget)
+	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize, bodyBudget)
 	imageAdmission := middleware.ExcelBPSImageAdmission()
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
@@ -687,7 +686,7 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 
 		body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 		if err != nil {
-			if middleware.RejectRequestBodyMemoryOverload(c, err) {
+			if middleware.RejectRequestBodyReadError(c, err) {
 				return
 			}
 			status := http.StatusBadRequest

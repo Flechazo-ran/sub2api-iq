@@ -65,7 +65,7 @@ func (h *GatewayHandler) geminiCachedContentsPreamble(c *gin.Context, component 
 func readGeminiCachedContentBody(c *gin.Context) ([]byte, bool) {
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware.RejectRequestBodyReadError(c, err) {
 			return nil, false
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {

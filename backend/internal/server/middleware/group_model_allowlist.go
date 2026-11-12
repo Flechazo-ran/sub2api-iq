@@ -149,7 +149,7 @@ func groupModelAllowlistModelsFromBody(c *gin.Context) ([]string, bool) {
 func readAdmissionRequestBody(c *gin.Context) ([]byte, bool) {
 	body, err := httputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
-		if RejectRequestBodyMemoryOverload(c, err) {
+		if RejectRequestBodyReadError(c, err) {
 			return nil, false
 		}
 		status := http.StatusBadRequest

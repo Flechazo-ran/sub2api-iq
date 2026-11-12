@@ -94,7 +94,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	if endpoint.RequiresRequestBody() {
 		body, err = pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 		if err != nil {
-			if rejectRequestBodyMemoryOverload(c, err) {
+			if middleware2.RejectRequestBodyReadError(c, err) {
 				return
 			}
 			if maxErr, ok := extractMaxBytesError(err); ok {

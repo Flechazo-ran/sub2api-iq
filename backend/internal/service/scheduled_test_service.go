@@ -166,6 +166,11 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 			// 字段看护不下发题目、不用判题模型：复核时由执行器换成内置糖果题。
 			normalizeQualityFieldWatchPlan(plan)
 		}
+		cfg.PelicanQuestion = nil
+		cfg.ActualPrompt = ""
+		if err := validatePelicanPromptMode(cfg); err != nil {
+			return time.Time{}, err
+		}
 		if cfg.QuestionKind == QualityRandomQuestionKind {
 			if cfg.Quality == nil {
 				return time.Time{}, fmt.Errorf("random questions require a quality rule")
@@ -209,7 +214,7 @@ func nextPlanRun(plan *ScheduledTestPlan, now time.Time) (time.Time, error) {
 			plan.ModelID = models[0]
 		}
 		// 探针题型不需要题目文本；其余题型题目必填。
-		if isOpenAICodexStateProbePlan(cfg) || isOpenAICodexAstraProbePlan(cfg) || isOpenAICodexFieldWatchPlan(cfg) || cfg.QuestionKind == QualityRandomQuestionKind {
+		if isOpenAICodexStateProbePlan(cfg) || isOpenAICodexAstraProbePlan(cfg) || isOpenAICodexFieldWatchPlan(cfg) || cfg.QuestionKind == QualityRandomQuestionKind || cfg.PromptMode == PelicanPromptModeRandom {
 			if len(cfg.Prompt) > 32000 || strings.TrimSpace(plan.ModelID) == "" || len(plan.ModelID) > 100 {
 				return time.Time{}, fmt.Errorf("probe model is required (maximum 32000/100 bytes)")
 			}

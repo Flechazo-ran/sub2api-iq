@@ -7,31 +7,19 @@ import (
 	"sync/atomic"
 )
 
-// 请求体内存总额度：移植自 lumai-beijing/sub2api（CN 站，lmuai-0.2.21.1；主体来自上游
-// Wei-Shaw/sub2api 457602c8f / 957a83f32 / 0853d1603），见本仓库 #16。
-//
-// 本实例是兜底服务，记账宁可少算也不多算：算不准的地方一律放行，只有额度确实用满时才拒绝。
-// 与 CN 的差别：
-//   - 已关闭的预占（handler 已返回）再预占时直接放行、不记账，CN 是拒绝。handler 返回后
-//     还在跑的后台工作因此不会因为记账收到 503，最多少算。
-//   - 已接下的工作（异步任务的 Detach、转发时的改写副本 TryReserve）额度不够时不记账、
-//     照常执行，不报错；CN 是返回 503。
-//   - 读请求体时不因 ctx 已取消而报错，保持读体原有行为；CN 会提前返回 ctx 错误。
-//   - 额外记录峰值与拒绝次数，供运维指标读取（CN 没有用量指标）。
-
 // ErrRequestBodyMemoryBudget means this instance cannot buffer another request
 // body yet. It is transient overload, not a malformed or oversized request.
 var ErrRequestBodyMemoryBudget = errors.New("request body memory budget exhausted")
 
 // BodyMemoryBudget bounds buffered ingress allocations across requests. It
-// counts chunks, their contiguous copy, decoded output, JSON normalization, the
-// zstd decoder window and per-attempt rewritten bodies; it is not a bound on the
-// application's total heap or protocol conversion.
+// counts chunks, their contiguous copy, decoded output and the decoder window;
+// it is not a bound on the application's total heap or protocol conversion.
 type BodyMemoryBudget struct {
 	mu    sync.Mutex
 	limit int64
 	used  int64
-	// peak and rejected cover the interval since the last TakeStats.
+	// peak and rejected cover the interval since the last TakeStats; they feed
+	// the ops dashboard (#16) and never change admission decisions.
 	peak     int64
 	rejected int64
 }
@@ -110,10 +98,6 @@ type bodyMemoryReservation struct {
 	budget *BodyMemoryBudget
 	bytes  int64
 	closed bool
-	// bestEffort reservations belong to work that was already accepted (an
-	// async task). They charge while the budget has room and otherwise
-	// proceed uncharged, so accepted work is never failed by accounting.
-	bestEffort bool
 }
 
 type bodyMemoryReservationKey struct{}
@@ -134,30 +118,26 @@ func WithRequestBodyMemoryBudget(ctx context.Context, budget *BodyMemoryBudget) 
 // for representations that die before the handler returns, such as one upstream
 // attempt's rewritten body. Release returns only the scope's bytes and is
 // idempotent. Without a request budget in ctx it is a no-op; a scope opened after
-// the request released its budget does not charge anything.
+// the request released its budget rejects every reservation.
 func WithRequestBodyMemoryScope(ctx context.Context) (context.Context, func()) {
 	parent, _ := ctx.Value(bodyMemoryReservationKey{}).(*bodyMemoryReservation)
 	if parent == nil {
 		return ctx, func() {}
 	}
 	parent.mu.Lock()
-	closed, bestEffort := parent.closed, parent.bestEffort
+	closed := parent.closed
 	parent.mu.Unlock()
-	r := &bodyMemoryReservation{budget: parent.budget, closed: closed, bestEffort: bestEffort}
+	r := &bodyMemoryReservation{budget: parent.budget, closed: closed}
 	return context.WithValue(ctx, bodyMemoryReservationKey{}, r), r.release
 }
 
 // DetachRequestBodyMemory opens a reservation on the request's budget for work
 // that keeps request-derived buffers after the handler returns, such as an
 // accepted asynchronous task. It takes over up to n bytes the request already
-// holds for the retained body and charges only the remainder, so the body is
+// holds for the retained body and reserves only the remainder, so the body is
 // never charged twice; reservations made through the returned ctx accumulate on
 // it. The handler's release does not affect it, so the caller owns release and
 // must call it when the work ends. Without a request budget in ctx it is a no-op.
-//
-// Unlike the CN original it never fails: the work was already accepted, so the
-// detached reservation is best effort (see bodyMemoryReservation.bestEffort).
-// The error result is kept for API compatibility and is always nil.
 func DetachRequestBodyMemory(ctx context.Context, n int64) (context.Context, func(), error) {
 	parent, _ := ctx.Value(bodyMemoryReservationKey{}).(*bodyMemoryReservation)
 	if parent == nil {
@@ -174,21 +154,25 @@ func DetachRequestBodyMemory(ctx context.Context, n int64) (context.Context, fun
 	parent.mu.Unlock()
 	r.mu.Lock()
 	r.bytes += moved
-	r.bestEffort = true
 	r.mu.Unlock()
-	if remaining := n - moved; remaining > 0 {
-		_, _ = r.reserve(remaining, false)
+	if err := reserveRequestBodyMemory(detached, n-moved); err != nil {
+		// Hand the body back: the handler still owns it until it returns.
+		r.mu.Lock()
+		r.bytes -= moved
+		r.mu.Unlock()
+		parent.mu.Lock()
+		if parent.closed {
+			parent.budget.mu.Lock()
+			parent.budget.used -= moved
+			parent.budget.mu.Unlock()
+		} else {
+			parent.bytes += moved
+		}
+		parent.mu.Unlock()
+		release()
+		return ctx, func() {}, err
 	}
 	return detached, release, nil
-}
-
-// WithoutRequestBodyMemoryBudget returns ctx with no request budget, so work
-// running under it is never charged and never rejected.
-func WithoutRequestBodyMemoryBudget(ctx context.Context) context.Context {
-	if ctx.Value(bodyMemoryReservationKey{}) == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, bodyMemoryReservationKey{}, (*bodyMemoryReservation)(nil))
 }
 
 func (r *bodyMemoryReservation) release() {
@@ -207,36 +191,20 @@ func (r *bodyMemoryReservation) release() {
 // ReserveRequestBodyMemory reserves n bytes before allocating another buffered
 // representation of the request body. The reservation shares the ingress budget
 // and is retained until the release function of the handler, or of the innermost
-// WithRequestBodyMemoryScope in ctx, runs. Without a budget in ctx, or after the
-// handler released it, it is a no-op. It ignores ctx cancellation: callers that
-// keep working after a client disconnect own that policy.
+// WithRequestBodyMemoryScope in ctx, runs. Without a budget in
+// ctx it is a no-op. Callers must propagate exhaustion instead of allocating
+// through an unbudgeted fallback. Unlike ingress reads, it ignores ctx
+// cancellation: callers that keep working after a client disconnect own that
+// policy.
 func ReserveRequestBodyMemory(ctx context.Context, n int64) error {
 	return reserveBodyMemory(ctx, n)
 }
 
-// reserveRequestBodyMemory is the ingress-read variant. Unlike CN it does not
-// fail on a cancelled ctx: reads keep the behavior they had before the budget,
-// and the handler decides what a cancelled request gets.
 func reserveRequestBodyMemory(ctx context.Context, n int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return reserveBodyMemory(ctx, n)
-}
-
-// TryReserveRequestBodyMemory charges n bytes when the budget has room and
-// reports whether it did. It never fails: work that was already admitted (for
-// example a rewritten body during forwarding) proceeds uncharged on a full
-// budget instead of failing, and the miss is not counted as a rejection. A
-// successful charge must be refunded through ReleaseRequestBodyMemory or the
-// enclosing release, like ReserveRequestBodyMemory.
-func TryReserveRequestBodyMemory(ctx context.Context, n int64) bool {
-	if n <= 0 {
-		return false
-	}
-	r, _ := ctx.Value(bodyMemoryReservationKey{}).(*bodyMemoryReservation)
-	if r == nil {
-		return false
-	}
-	charged, _ := r.reserve(n, false)
-	return charged
 }
 
 func reserveBodyMemory(ctx context.Context, n int64) error {
@@ -244,37 +212,23 @@ func reserveBodyMemory(ctx context.Context, n int64) error {
 	if r == nil || n <= 0 {
 		return nil
 	}
-	_, err := r.reserve(n, true)
-	return err
-}
-
-// reserve charges n bytes. It reports whether bytes were charged; err is
-// ErrRequestBodyMemoryBudget only when the budget is full.
-func (r *bodyMemoryReservation) reserve(n int64, countRejection bool) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		// The owning handler already returned. Whatever still runs under this
-		// ctx is not charged: under-counting admits, never rejects.
-		return false, nil
+		return ErrRequestBodyMemoryBudget
 	}
 	r.budget.mu.Lock()
 	defer r.budget.mu.Unlock()
 	if n > r.budget.limit-r.budget.used {
-		if r.bestEffort {
-			return false, nil
-		}
-		if countRejection {
-			r.budget.rejected++
-		}
-		return false, ErrRequestBodyMemoryBudget
+		r.budget.rejected++
+		return ErrRequestBodyMemoryBudget
 	}
 	r.budget.used += n
 	if r.budget.used > r.budget.peak {
 		r.budget.peak = r.budget.used
 	}
 	r.bytes += n
-	return true, nil
+	return nil
 }
 
 // ReleaseRequestBodyMemory returns up to n bytes previously reserved through ctx,

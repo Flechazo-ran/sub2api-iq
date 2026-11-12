@@ -147,7 +147,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	// 读取请求体
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware2.RejectRequestBodyReadError(c, err) {
 			return
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
@@ -2107,7 +2107,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	// 读取请求体
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware2.RejectRequestBodyReadError(c, err) {
 			return
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {

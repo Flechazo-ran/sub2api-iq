@@ -27,11 +27,15 @@ type PelicanTestConfig struct {
 	FieldWatch bool `json:"field_watch,omitempty"`
 	// FieldWatchMismatch 只在结果快照上设置：字段看护显示降智（连续 3 次无 safety_buffering），
 	// 但糖果题复核答对，未处置，只作警告。
-	FieldWatchMismatch bool   `json:"field_watch_mismatch,omitempty"`
-	TestChannel        string `json:"test_channel,omitempty"`
-	Prompt             string `json:"prompt"`
-	ReasoningEffort    string `json:"reasoning_effort"`
-	ParallelCount      int    `json:"parallel_count"`
+	FieldWatchMismatch bool `json:"field_watch_mismatch,omitempty"`
+	// Empty mode preserves the exact prompt of legacy/custom plans.
+	PromptMode      string           `json:"prompt_mode,omitempty"`
+	PelicanQuestion *PelicanQuestion `json:"pelican_question,omitempty"`
+	ActualPrompt    string           `json:"actual_prompt,omitempty"`
+	TestChannel     string           `json:"test_channel,omitempty"`
+	Prompt          string           `json:"prompt"`
+	ReasoningEffort string           `json:"reasoning_effort"`
+	ParallelCount   int              `json:"parallel_count"`
 	// ModelID is recorded with each result so later edits do not relabel history.
 	ModelID string `json:"model_id,omitempty"`
 	// ModelIDs selects all models in a quality round; old plans use ModelID.

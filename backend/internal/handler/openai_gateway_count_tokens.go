@@ -42,7 +42,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware2.RejectRequestBodyReadError(c, err) {
 			return
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
@@ -144,7 +144,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 func (h *OpenAIGatewayHandler) GrokCountTokens(c *gin.Context) {
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware2.RejectRequestBodyReadError(c, err) {
 			return
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
@@ -218,7 +218,7 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware2.RejectRequestBodyReadError(c, err) {
 			return
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {

@@ -15,7 +15,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -151,7 +150,7 @@ func normalizeDeepSeekResponsesRequestBody(account *Account, body []byte) []byte
 	if account == nil {
 		return body
 	}
-	applyStateless := account.UsesNativeCNResponses()
+	applyStateless := account.UsesNativeCNResponses() && !account.QwenSessionCacheEnabled()
 	applyImages := shouldAliasDeepSeekResponsesInputImages(account)
 	if !applyStateless && !applyImages {
 		return body
@@ -1216,17 +1215,9 @@ func (v openAIRequestView) HasPatches() bool {
 	return !v.patchesDisabled && len(v.patches) > 0
 }
 
-// ApplyPatches materializes the patched body. Its output is charged to the
-// request body memory budget in ctx (#16) when there is room; a full budget
-// never fails a request that was already admitted, the copy then goes
-// uncharged. The charge belongs to the innermost budget scope in ctx.
-func (v openAIRequestView) ApplyPatches(ctx context.Context) ([]byte, error) {
+func (v openAIRequestView) ApplyPatches() ([]byte, error) {
 	if v.patchesDisabled || len(v.patches) == 0 {
 		return nil, errors.New("openai request patches disabled")
-	}
-	reserved := int64(len(v.body))
-	if !httputil.TryReserveRequestBodyMemory(ctx, reserved) {
-		reserved = 0
 	}
 	body := v.body
 	for _, patch := range v.patches {
@@ -1237,16 +1228,7 @@ func (v openAIRequestView) ApplyPatches(ctx context.Context) ([]byte, error) {
 			body, err = sjson.SetBytes(body, patch.path, patch.value)
 		}
 		if err != nil {
-			httputil.ReleaseRequestBodyMemory(ctx, reserved)
 			return nil, err
-		}
-	}
-	if reserved > 0 {
-		// Settle the estimate to the output's exact size.
-		if extra := int64(len(body)) - reserved; extra > 0 {
-			httputil.TryReserveRequestBodyMemory(ctx, extra)
-		} else if extra < 0 {
-			httputil.ReleaseRequestBodyMemory(ctx, -extra)
 		}
 	}
 	return body, nil
@@ -2660,24 +2642,31 @@ func supportsOpenAIReasoningEffortMax(model string) bool {
 	}
 }
 
-// validateGPT61SolCompatRequest runs after model mapping, before conversion can
-// discard unsupported explicit effort selections or disabled thinking.
-func validateGPT61SolCompatRequest(body []byte, model string) error {
-	if !openai.IsGPT61SolModelSpelling(model) {
+// validateGPT61CompatRequest validates the converted request after model
+// mapping and reasoning effort policy application.
+func validateGPT61CompatRequest(body []byte, model string) error {
+	if err := validateGPT61RawEffort(body, model); err != nil {
+		return err
+	}
+	if gjson.GetBytes(body, "thinking.type").String() == "disabled" {
+		return openai.ValidateGPT61ReasoningEffort(model, "none")
+	}
+	return nil
+}
+
+func validateGPT61RawEffort(body []byte, model string) error {
+	if !openai.IsGPT61SolModelSpelling(model) && !openai.IsGPT61TerraModelSpelling(model) {
 		return nil
 	}
 	for _, path := range []string{"reasoning.effort", "reasoning_effort", "output_config.effort"} {
-		if err := openai.ValidateGPT61SolReasoningEffort(model, gjson.GetBytes(body, path).String()); err != nil {
+		if err := openai.ValidateGPT61ReasoningEffort(model, gjson.GetBytes(body, path).String()); err != nil {
 			return err
 		}
 	}
-	if gjson.GetBytes(body, "thinking.type").String() == "disabled" {
-		return openai.ValidateGPT61SolReasoningEffort(model, "none")
-	}
-	requestedModel := gjson.GetBytes(body, "model").String()
+	requestedModel := openai.CanonicalizeOpenAIModelAliasSpelling(gjson.GetBytes(body, "model").String())
 	for _, effort := range []string{"none", "minimal"} {
 		if strings.HasSuffix(strings.ToLower(requestedModel), "-"+effort) {
-			return openai.ValidateGPT61SolReasoningEffort(model, effort)
+			return openai.ValidateGPT61ReasoningEffort(model, effort)
 		}
 	}
 	return nil

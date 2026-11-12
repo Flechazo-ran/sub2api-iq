@@ -519,6 +519,24 @@ func shouldApplyLegacyWeChatEnv(configKey, envKey string) bool {
 	return !hasNewEnv
 }
 
+// detectMemoryLimitBytes is replaced in tests so defaults do not depend on the host.
+var detectMemoryLimitBytes = sysutil.MemoryLimitBytes
+
+const (
+	defaultRequestBodyMemoryBudgetBytes = int64(1 << 30)
+	// requestBodyMemoryBudgetDivisor leaves the rest of memory for conversion
+	// state, SSE buffers, caches and GC headroom.
+	requestBodyMemoryBudgetDivisor = 4
+)
+
+// autoRequestBodyMemoryBudget sizes the unconfigured ingress budget to a
+// quarter of the process memory limit. It never goes below the historical
+// 1 GiB default, so small instances keep their previous behavior.
+func autoRequestBodyMemoryBudget(memoryLimitBytes uint64) int64 {
+	// uint64 / 4 always fits in int64.
+	return max(int64(memoryLimitBytes/requestBodyMemoryBudgetDivisor), defaultRequestBodyMemoryBudgetBytes)
+}
+
 func hasExplicitConfigOrEnv(configKey, envKey string) bool {
 	if viper.InConfig(configKey) {
 		return true
@@ -1186,12 +1204,11 @@ type GatewayConfig struct {
 	OpenAIHighEffortFirstOutputTimeoutSeconds int `mapstructure:"openai_high_effort_first_output_timeout_seconds"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`
+	// RequestBodyMemoryBudgetBytes bounds buffered ingress allocations per instance; 0 disables it.
+	// When unset in config and env it defaults to 1/4 of the memory limit (at least 1 GiB).
+	RequestBodyMemoryBudgetBytes int64 `mapstructure:"request_body_memory_budget_bytes"`
 	// TextMaxBodySize limits endpoints that cannot carry inline image/video payloads.
 	TextMaxBodySize int64 `mapstructure:"text_max_body_size"`
-	// RequestBodyMemoryBudgetBytes bounds buffered ingress request bodies across
-	// all gateway routes of this instance; exhaustion answers 503 with Retry-After.
-	// Unset: a quarter of the memory limit (see autoRequestBodyMemoryBudget). 0 disables it.
-	RequestBodyMemoryBudgetBytes int64 `mapstructure:"request_body_memory_budget_bytes"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
 	UpstreamResponseReadMaxBytes int64 `mapstructure:"upstream_response_read_max_bytes"`
 	// 上游模型列表响应体读取上限（字节）
@@ -1651,6 +1668,9 @@ func (w GatewayOpenAIWSSchedulerScoreWeights) IsValid() bool {
 
 // GatewayOpenAISchedulerConfig OpenAI 高级调度器配置。
 type GatewayOpenAISchedulerConfig struct {
+	// StrictSessionAffinityGroupIDs pins text sessions in these groups to one
+	// account for the sticky TTL, including failures and capacity pressure.
+	StrictSessionAffinityGroupIDs []int64 `mapstructure:"strict_session_affinity_group_ids"`
 	// StickyEscapeEnabled: 是否允许 session_hash sticky 在账号健康度劣化时临时逃逸
 	StickyEscapeEnabled bool `mapstructure:"sticky_escape_enabled"`
 	// StickyEscapeTTFTMs: TTFT EWMA 超过该阈值时跳过 sticky
@@ -2076,25 +2096,6 @@ func Load() (*Config, error) {
 // 启动阶段允许 jwt.secret 先留空，后续由数据库初始化流程补齐并再次完整校验。
 func LoadForBootstrap() (*Config, error) {
 	return load(true)
-}
-
-// detectMemoryLimitBytes is replaced in tests so defaults do not depend on the host.
-var detectMemoryLimitBytes = sysutil.MemoryLimitBytes
-
-const (
-	defaultRequestBodyMemoryBudgetBytes = int64(1 << 30)
-	// requestBodyMemoryBudgetDivisor leaves the rest of memory for conversion
-	// state, SSE buffers, caches and GC headroom.
-	requestBodyMemoryBudgetDivisor = 4
-)
-
-// autoRequestBodyMemoryBudget sizes the unconfigured ingress budget to a
-// quarter of the process memory limit (the smallest of physical memory, the
-// cgroup limit and GOMEMLIMIT). It never goes below 1 GiB, matching the
-// downstream CN gateway (lumai-beijing/sub2api c004c962a).
-func autoRequestBodyMemoryBudget(memoryLimitBytes uint64) int64 {
-	// uint64 / 4 always fits in int64.
-	return max(int64(memoryLimitBytes/requestBodyMemoryBudgetDivisor), defaultRequestBodyMemoryBudgetBytes)
 }
 
 func load(allowMissingJWTSecret bool) (*Config, error) {
@@ -2871,6 +2872,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.antigravity_fallback_cooldown_minutes", 1)
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
+	// Without explicit config or env, load() replaces this with a size derived
+	// from the memory limit (see autoRequestBodyMemoryBudget).
+	viper.SetDefault("gateway.request_body_memory_budget_bytes", defaultRequestBodyMemoryBudgetBytes)
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
 	// Registered so AutomaticEnv can reach it; load() replaces it with a value
 	// sized from the memory limit unless the config file or env sets it.
@@ -3007,6 +3011,7 @@ func setEnvReachableDefaults() {
 	// disable sticky escape, so register the effective default instead. An
 	// explicit false in config or env still wins.
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_enabled", true)
+	viper.SetDefault("gateway.openai_scheduler.strict_session_affinity_group_ids", []int64{})
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_error_rate", 0.0)
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_ttft_ms", 0)
 
@@ -3711,6 +3716,10 @@ func (c *Config) Validate() error {
 	if c.Idempotency.CleanupBatchSize <= 0 {
 		return fmt.Errorf("idempotency.cleanup_batch_size must be positive")
 	}
+	if c.Gateway.RequestBodyMemoryBudgetBytes < 0 {
+		return fmt.Errorf("gateway.request_body_memory_budget_bytes must not be negative")
+	}
+
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
 	}
@@ -4016,6 +4025,14 @@ func (c *Config) Validate() error {
 	}
 	if totalWeightSum := weights.TotalWeightSum(); math.IsNaN(totalWeightSum) || math.IsInf(totalWeightSum, 0) {
 		return fmt.Errorf("gateway.openai_ws.scheduler_score_weights total-weight sum must be finite")
+	}
+	if len(c.Gateway.OpenAIScheduler.StrictSessionAffinityGroupIDs) > 100 {
+		return fmt.Errorf("gateway.openai_scheduler.strict_session_affinity_group_ids supports at most 100 groups")
+	}
+	for _, id := range c.Gateway.OpenAIScheduler.StrictSessionAffinityGroupIDs {
+		if id <= 0 {
+			return fmt.Errorf("gateway.openai_scheduler.strict_session_affinity_group_ids must contain positive IDs")
+		}
 	}
 	if c.Gateway.OpenAIScheduler.StickyEscapeTTFTMs <= 0 {
 		return fmt.Errorf("gateway.openai_scheduler.sticky_escape_ttft_ms must be positive")
