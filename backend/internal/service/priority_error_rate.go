@@ -25,6 +25,8 @@ type priorityAttemptKey struct {
 	accountID int64
 	model     string
 	endpoint  string
+	groupID   int64
+	hasGroup  bool
 }
 
 type priorityAttemptBucket struct {
@@ -117,6 +119,8 @@ type priorityAttemptObservation struct {
 type priorityAttemptScope struct {
 	ctx             context.Context
 	model, endpoint string
+	groupID         int64
+	hasGroup        bool
 	mu              sync.Mutex
 	current         *priorityAttemptObservation
 	disconnected    bool
@@ -126,7 +130,11 @@ func withPriorityAttemptScope(ctx context.Context, model, endpoint string) (cont
 	if current, ok := ctx.Value(priorityAttemptScopeContextKey{}).(*priorityAttemptScope); ok {
 		return ctx, current
 	}
-	scope := &priorityAttemptScope{ctx: ctx, model: model, endpoint: endpoint}
+	identity := priorityObservationFromContext(ctx, model)
+	if identity.endpoint != "" {
+		endpoint = identity.endpoint
+	}
+	scope := &priorityAttemptScope{ctx: ctx, model: identity.model, endpoint: endpoint, groupID: identity.groupID, hasGroup: identity.hasGroup}
 	return context.WithValue(ctx, priorityAttemptScopeContextKey{}, scope), scope
 }
 func (s *priorityAttemptScope) reportLocked(o *priorityAttemptObservation) {
@@ -187,7 +195,7 @@ func (s *OpenAIGatewayService) observePriorityAttempt(req *http.Request, account
 	observation := scope.begin()
 	s.initOpenAIAccountScheduler()
 	stats := s.openaiAccountStats
-	key := priorityAttemptKey{account.ID, scope.model, scope.endpoint}
+	key := priorityAttemptKey{accountID: account.ID, model: scope.model, endpoint: scope.endpoint, groupID: scope.groupID, hasGroup: scope.hasGroup}
 	return func(resp *http.Response, err error) {
 		if err != nil {
 			var netErr net.Error
@@ -220,7 +228,27 @@ func (s *OpenAIGatewayService) observePriorityAttempt(req *http.Request, account
 
 // Used by HTTP adapters whose physical sends bypass the native proxy pipeline.
 func (s *OpenAIGatewayService) doPriorityObservedHTTP(req *http.Request, proxy string, account *Account) (*http.Response, error) {
+	if s.excelOAuthReauth != nil {
+		if err := s.excelOAuthReauth.validateAuthConnectionPolicy(req.Context(), account); err != nil {
+			return nil, err
+		}
+	}
+	if account != nil && account.AuthConnectionID != "" {
+		if s.excelOAuthReauth == nil {
+			return nil, errors.New("authorization connection service unavailable")
+		}
+		if err := s.excelOAuthReauth.ValidateAuthConnectionSend(req.Context(), account); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := s.priorityLatencyBeforeSend(req.Context(), account); err != nil {
+		return nil, err
+	}
 	observe := s.observePriorityAttempt(req, account)
+	if err := s.fenceAuthConnectionEgress(req.Context(), req, account); err != nil {
+		return nil, err
+	}
 	resp, err := s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)
 	observe(resp, err)
 	return resp, err
@@ -427,6 +455,9 @@ func (b *priorityAttemptBody) outcome() (bool, bool) {
 }
 
 func priorityErrorEndpoint(req OpenAIAccountScheduleRequest) string {
+	if req.InboundEndpoint != "" {
+		return req.InboundEndpoint
+	}
 	if req.RequireCompact {
 		return "/v1/responses/compact"
 	}
@@ -436,7 +467,7 @@ func priorityErrorEndpoint(req OpenAIAccountScheduleRequest) string {
 	return "/v1/responses"
 }
 func (s *defaultOpenAIAccountScheduler) priorityErrorEvidence(req OpenAIAccountScheduleRequest, c PrioritySchedulingConfig, id int64, now time.Time) PriorityErrorEvidence {
-	key := priorityAttemptKey{id, req.RequestedModel, priorityErrorEndpoint(req)}
+	key := priorityRequestAttemptKey(req, id)
 	if s.stats == nil {
 		return PriorityErrorEvidence{WindowMinutes: c.ErrorRateWindowMinutes, PriorSamples: max(1, c.ErrorRatePriorSamples), ObservedAt: now, Endpoint: key.endpoint}
 	}

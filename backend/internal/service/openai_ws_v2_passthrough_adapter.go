@@ -913,6 +913,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		return errors.New("openai ws passthrough dialer is nil")
 	}
 
+	latencyCtx, denied := s.beginPriorityLatencyTurn(ctx, c, account, gjson.GetBytes(firstClientMessage, "model").String())
+	if denied != nil {
+		return denied
+	}
+	ctx = latencyCtx
 	agentTaskRecoveryTried := false
 	var upstreamConn openAIWSClientConn
 	statusCode := 0
@@ -1230,6 +1235,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					return payload, nil, err
 				}
 			}
+			var turnLatencyCtx context.Context
+			if isResponseCreate {
+				var denied error
+				turnLatencyCtx, denied = s.nextPriorityLatencyWSTurn(ctx, c, account, model)
+				if denied != nil {
+					return payload, nil, denied
+				}
+			}
 			out, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, model, payload)
 			// 多轮 passthrough usage：仅在成功（non-block / non-err）
 			// 的 response.create 帧上更新 usageMeta，使用
@@ -1254,6 +1267,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				}
 				if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
 					return out, nil, err
+				}
+				if denied := s.priorityLatencyBeforeSend(turnLatencyCtx, account); denied != nil {
+					return out, nil, denied
 				}
 				activePolicyModel.Store(&model)
 				usageMeta.updateFromResponseCreate(out, model, requestModelForThisFrame)
@@ -1284,6 +1300,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			cancel()
 		},
 	}
+	// Recheck after handshake/slot waits, before the first generation write.
+
 	upstreamFirstMessageSent := false
 	latest, admissionErr := s.admitOpenAITurn(ctx, c, account, gjson.GetBytes(firstClientMessage, "model").String(), firstClientMessage)
 	if admissionErr == nil {
@@ -1307,6 +1325,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	if err := regionalMeterBeforeSend(ctx); err != nil {
 		return err
+	}
+	if denied := s.priorityLatencyBeforeSend(ctx, account); denied != nil {
+		return denied
 	}
 	firstWriteCtx, cancelFirstWrite := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
 	firstWriteErr := relayUpstreamFrameConn.WriteFrame(firstWriteCtx, coderws.MessageText, firstClientMessage)
