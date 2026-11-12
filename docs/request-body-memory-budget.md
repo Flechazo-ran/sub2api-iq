@@ -29,7 +29,7 @@
 - 配置项 `gateway.request_body_memory_budget_bytes`，环境变量 `GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES`。
 - 不配置时，启动时自动取「物理内存、cgroup 限额、`GOMEMLIMIT`」三者最小值的 1/4，最低 1GiB，并打一条 `gateway.request_body_memory_budget_bytes auto-sized from memory limit` 日志。
 - 显式配置原样使用；**配 0 关闭额度**：不记账、不返回 503，运维页也不显示这一行（紧急回退用这个，改环境变量后重建容器生效）。
-- 147：容器 8GiB，设 `GOMEMLIMIT=6000MiB` 后额度是 1500MiB；不设 `GOMEMLIMIT` 时是 2GiB。
+- 147：容器 8GiB，设 `GOMEMLIMIT=4000MiB`（11-12 定）后 1/4 是 1000MiB，按下限取 1GiB；不设 `GOMEMLIMIT` 时是 2GiB。
 - 单个请求的大小上限不变：`gateway.max_body_size` 和 `server.max_request_body_size` 都是 256MB。
 
 ## 怎么看用量
