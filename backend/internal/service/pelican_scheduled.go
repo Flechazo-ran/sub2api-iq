@@ -143,6 +143,25 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 	if err != nil || !claimed {
 		return false
 	}
+	// Re-read quota after claiming: the account may have exhausted its quota
+	// since template selection or ListDue. Do not turn a skipped run into a
+	// quality verdict, or disturb ownership used by later recovery rounds.
+	available, quotaErr := s.qualityTemplateQuotaAvailable(ctx, plan)
+	if quotaErr != nil || !available {
+		logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d account=%d skipped: template quota unavailable", plan.ID, plan.AccountID)
+		finishCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stop()
+		var finishErr error
+		if repo, ok := s.planRepo.(QualityQuotaSkipRepository); ok {
+			finishErr = repo.FinishQuotaSkippedPelican(finishCtx, plan, until, time.Now())
+		} else {
+			finishErr = s.planRepo.FinishPelican(finishCtx, plan.ID, until, time.Now())
+		}
+		if finishErr != nil {
+			logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d finish failed: %v", plan.ID, finishErr)
+		}
+		return false
+	}
 	// 账号凭证失效（error）或被停用（disabled）：不检测、不记结果，只推进周期，
 	// 不白发请求。号重新授权、恢复正常后自动恢复检测。
 	if plan.PelicanConfig.Quality != nil && s.accountTestSvc != nil && s.accountTestSvc.accountRepo != nil {
@@ -461,9 +480,12 @@ func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *S
 // the persistence loop with a nil entry. Panic values may contain request data.
 func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan *ScheduledTestPlan) (result *ScheduledTestResult) {
 	started := time.Now()
+	// Own the result metadata; rule/client evidence is not proof of the input
+	// assembled by the answer executor. Probes do not send a question prompt.
+	var snapshot PelicanTestConfig
 	failure := func(message string) *ScheduledTestResult {
 		finished := time.Now()
-		return &ScheduledTestResult{Status: "failed", ErrorMessage: message, StartedAt: started, FinishedAt: finished, LatencyMs: finished.Sub(started).Milliseconds(), PelicanConfig: plan.PelicanConfig}
+		return &ScheduledTestResult{Status: "failed", ErrorMessage: message, StartedAt: started, FinishedAt: finished, LatencyMs: finished.Sub(started).Milliseconds(), PelicanConfig: &snapshot}
 	}
 	defer func() {
 		if recover() != nil {
@@ -471,11 +493,18 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 			logger.LegacyPrintf("service.scheduled_test_runner", "pelican plan=%d account=%d sample panicked", plan.ID, plan.AccountID)
 		}
 	}()
+	snapshot = *plan.PelicanConfig
+	snapshot.ActualPrompt = ""
 	if plan.PelicanConfig.QuestionKind == QualityRandomQuestionKind && (plan.PelicanConfig.RandomQuestion == nil || plan.PelicanConfig.Prompt == "" || plan.PelicanConfig.Quality == nil || plan.PelicanConfig.Quality.ExpectedAnswer == "") {
 		return failure("random_question_not_prepared")
 	}
 	if batch := plan.PelicanConfig.QualityBatch; batch != nil && !time.Now().Before(batch.StartDeadline) {
 		return failure("quality_batch_start_window_closed")
+	}
+	if !isOpenAICodexStateProbePlan(plan.PelicanConfig) && ctx.Err() == nil {
+		// Retain the assembled invocation input even if the adapter fails or
+		// panics before returning evidence; this does not assert delivery.
+		snapshot.ActualPrompt = intelligenceTestPrompt(plan.PelicanConfig)
 	}
 	var err error
 	result, err = s.runPelicanAnswer(ctx, plan)
@@ -485,7 +514,11 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 	if result == nil {
 		return failure("scheduled_test_empty_result: background sample returned no result")
 	}
-	result.PelicanConfig = plan.PelicanConfig
+	if result.PelicanConfig != nil {
+		// The trusted executor's snapshot describes the actual answer call.
+		snapshot = *result.PelicanConfig
+	}
+	result.PelicanConfig = &snapshot
 	// 探针题型的结果自带 correct/incorrect/unknown 判定，不经过判题模型。
 	if plan.PelicanConfig.Quality != nil && result.Status == "success" && !isOpenAICodexStateProbePlan(plan.PelicanConfig) {
 		var judgment *QualityJudgment
