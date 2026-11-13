@@ -79,13 +79,33 @@
 
 没点刷新之前，已保存池子里的停用、过期代理仍会出现在「池子顺序」里（上面的勾选列表里看不到）。换代理时这些代理本来就会被跳过（见上表），不影响判断。
 
+### 池内排序（按测速，2026-11-11 起，提交 `b1ae9eb`、`42f7f93`）
+
+池子里的代理不再按人工上移、下移的顺序排，而是按测速排：服务启动时和之后每小时，对池子里启用、没过期的代理各测一次（取中位数），从快到慢排；没测到的排在后面，同等情况按代理 ID。池子变了（保存了不同的 `candidate_proxy_ids`）会马上重测一次。页面上的「排名」列就是这个顺序。
+
+### 软降级：多个账号判慢的代理排到最后（2026-11-13 11:07 起，提交 `0916015`）
+
+只凭一次换出看不出代理好坏（慢也可能是账号本身的问题），所以按「多个不同账号、一段时间」来判断：
+
+| 情况 | 处理 |
+|---|---|
+| `slow_demotion_window_minutes` 分钟内，有至少 `slow_demotion_min_accounts` 个**不同账号**在这个代理上被判慢 | 排到候选的最后；顺序策略最后才选它，随机和不同地区策略只要有别的候选就不选它 |
+| 同一个账号在这个代理上判慢多次 | 只算一个账号，不降级 |
+| 降级的代理是唯一能用的候选 | 照样选它，不会因为降级而写 `no_candidate` |
+| 过了观察时间 | 自动恢复，不需要人工操作 |
+| 观察时间填 0 | 关闭软降级，选代理和以前一样 |
+
+「被判慢」指这个代理作为 `from_proxy` 出现在 `measuring`、`done`、`no_candidate`、`failed` 记录里，也就是账号在它上面被判慢，不管最后换没换成。降级不会把代理移出池子。页面上的代理池会给降级的代理标「建议移出 · N 个号判慢」，鼠标悬停显示观察时间和账号数，由管理员决定要不要取消勾选。
+
+读降级数据失败时（例如数据库查询出错）当作没有降级，照常按测速选，并写日志 `proxy_autoswitch_slow_demotion_lookup_failed`。
+
 ### 选择策略
 
 | 策略 | 值 | 怎么挑 |
 |---|---|---|
-| 随机 | `random`（默认） | 在候选里随机挑一个 |
-| 顺序 | `sequential` | 按池子的顺序（页面上可以上移、下移），从当前代理在池子里的位置往后找第一个候选，到末尾再从头找；当前代理不在池子里就从头找 |
-| 不同地区 | `region` | 在候选里挑地区和当前代理不同的，随机一个。地区未知的候选跳过；一个都没有就算没候选 |
+| 随机 | `random` | 在候选里随机挑一个；有未降级的候选时只在未降级的里挑 |
+| 顺序 | `sequential`（默认） | 按池内排序（测速从快到慢，降级的排最后）取第一个候选 |
+| 不同地区 | `region` | 在候选里挑地区和当前代理不同的，随机一个；有未降级的就只在未降级的里挑。地区未知的候选跳过；一个都没有就算没候选 |
 
 地区是代理的出口国家代码：先读代理测速缓存和本进程的缓存（6 小时），缺的再对代理做一次出口探测（单轮最多 30 秒；探测失败 30 分钟内不再测）。
 
@@ -161,7 +181,7 @@
 
 ## 配置项
 
-存在 `settings` 表，key 是 `proxy_autoswitch_config`，值是 JSON。只有这 8 项：
+存在 `settings` 表，key 是 `proxy_autoswitch_config`，值是 JSON。共 11 项：
 
 | 字段 | 默认值 | 范围 | 含义 |
 |---|---|---|---|
@@ -171,13 +191,17 @@
 | `min_samples` | `20` | 1–100000 | 窗口里至少几个请求才判断 |
 | `p60_threshold_ms` | `10000` | 1–600000 | 首字 p60 大于多少毫秒（页面上按秒填） |
 | `mean_threshold_ms` | `15000` | 1–600000 | 首字均值大于多少毫秒（页面上按秒填） |
-| `candidate_proxy_ids` | `[]` | 代理必须存在且没删除 | 候选代理池。去重，保持给的顺序（顺序策略按这个顺序） |
-| `strategy` | `random` | `random` `sequential` `region` | 选择策略 |
+| `max_accounts_per_proxy` | `2` | 1–100 | 换代理时目标代理上已有账号数达到这个数就跳过 |
+| `candidate_proxy_ids` | `[]` | 代理必须存在且没删除 | 候选代理池。去重；池内顺序按测速排，不按这里的顺序 |
+| `strategy` | `sequential` | `random` `sequential` `region` | 选择策略 |
+| `slow_demotion_window_minutes` | `1440` | 0–10080 | 软降级观察时间（分钟，页面上按小时填）。0 = 关闭（2026-11-13 11:07 起，`0916015`） |
+| `slow_demotion_min_accounts` | `2` | 1–100 | 观察时间内至少几个不同账号判慢才降级（2026-11-13 11:07 起，`0916015`） |
 
 - 校验不过返回 400，带中文说明，例如「window_minutes 必须在 1 到 60 之间」「代理 99 不存在或已删除」。保存时只查代理存不存在，不查过期、占用，这些在换的时候才查。
 - 读老配置：v1 的 `metric`、`threshold_ms`、`consecutive_checks`、`min_improvement_pct`、`account_cooldown_minutes`、`account_cooldown_hours`、`max_switches_per_hour`、`observe_minutes`、`min_days_to_expiry`、`region_policy` 一律忽略；`candidate_proxy_ids`、`p60_threshold_ms`、`mean_threshold_ms`、`strategy` 老配置里没有，用默认值。`enabled`、`group_ids`、`window_minutes`、`min_samples` 字段名没变，**沿用老配置里存的值**，不会变成 5 / 20。
 - PUT 带了老字段直接忽略，不报错。
-- PUT 是整份覆盖：没带的字段按零值处理（比如没带 `window_minutes` 会 400，没带 `group_ids` 会存成空）。页面每次保存都带全 8 项。
+- PUT 是整份覆盖：没带的字段按零值处理（比如没带 `window_minutes` 会 400，没带 `group_ids` 会存成空）。例外：没带 `slow_demotion_min_accounts` 时按 2 处理；没带 `slow_demotion_window_minutes` 会存成 0，也就是关闭软降级。页面每次保存都带全 11 项。
+- 读老配置：`max_accounts_per_proxy`、`slow_demotion_window_minutes`、`slow_demotion_min_accounts` 老配置里没有时用默认值 2 / 1440 / 2。
 - 库里存的配置解析失败或校验不过时，GET /config 返回错误，后台每一轮也直接报错跳过（日志 `proxy_autoswitch_cycle_failed`），直到重新保存一份合法配置。
 
 ## 接口
@@ -189,7 +213,7 @@
 | GET | `/config` | 无 | 上面 8 个配置字段 |
 | PUT | `/config` | body 是 8 个配置字段 | 保存后的配置（去重、排序后） |
 | GET | `/accounts` | 无 | `window_minutes`；`items[]`：`account_id` `account_name` `group_ids` `proxy_id` `proxy_label` `region` `samples` `p60_ms` `mean_ms` `duration_mean_ms` `state` `last_switch_at` `note` |
-| GET | `/proxies` | 无 | `items[]`：`id` `name` `status` `region` `expires_at` `expired` `account_count` `in_pool`。所有未删除的代理（含停用、过期的，由页面过滤），池子里的排前面（按池子顺序），其余按 ID。`status` 是 IP 管理里的代理状态：`active`、`inactive`（停用），以及到期扫描任务改成的 `expired`；2026-11-09 新增 |
+| GET | `/proxies` | 无 | `items[]`：`id` `name` `status` `region` `expires_at` `expired` `account_count` `in_pool` `slow_accounts` `demoted`。所有未删除的代理（含停用、过期的，由页面过滤），池子里的排前面（按测速排名），其余按 ID。`slow_accounts` 是软降级观察时间内在这个代理上被判慢的不同账号数，`demoted` 表示达到降级门槛（2026-11-13 11:07 起，`0916015`）。`status` 是 IP 管理里的代理状态：`active`、`inactive`（停用），以及到期扫描任务改成的 `expired`；2026-11-09 新增 |
 | GET | `/events` | `before_id`（翻页游标）、`limit`（默认 50，最大 200）、`account_id`（可选） | `items[]`、`next_cursor`（0 表示没有更多）。每条：`id` `created_at` `switched_at` `status` `account_id` `account_name` `group_id` `strategy` `reason` `from_proxy_id` `from_proxy_label` `from_region` `to_proxy_id` `to_proxy_label` `to_region` `window_minutes` `before{samples,p60_ms,mean_ms,duration_mean_ms}` `after{同上}` `from_probe_ms` `to_probe_ms` `after_finished_at`。按 ID 倒序 |
 | GET | `/recent` | `days`（默认 7，最大 90） | `items[]`：每个号最近一条真正换过代理的记录，`account_id` `event_id` `at` `status` `from_proxy_label` `to_proxy_label` `reason`。账号列表的「自动换过」用它 |
 
@@ -313,4 +337,6 @@ v2 没有冷却。新代理上过了几分钟又攒够了请求数、两项又�
 | #13 | `e5198fcd6` | 11-06 | 页面 v2：设置、候选代理池勾选和排序、账号监控、换代理记录前后对比；去掉换回按钮 |
 | — | `39e2447` | 11-09 22:37 | `/proxies` 返回代理 `status`；候选代理池列表只显示启用且没过期的代理；新增「刷新」按钮，把停用、过期的代理移出已保存的池子并立即保存（只改 `candidate_proxy_ids`）。判慢、选代理、换代理的后台逻辑没变 |
 | — | `8a72d1e` | 11-10 11:23 | 修复换完代理后几分钟内连换多次：判慢和账号监控只算换到当前代理之后开始的请求，旧代理上对不上 trace 的请求不再算到新代理头上。换后 10 分钟统计、选代理、配置都没变 |
+| — | `b1ae9eb` `42f7f93` | 11-11 | 代理池按测速排名排序（启动时和每小时测一次，池子变了马上重测）；顺序策略改成取排名第一的候选；新增 `max_accounts_per_proxy`；页面恢复手动加代理的弹窗 |
+| — | `0916015` | 11-13 11:07 | 软降级：观察时间内被多个不同账号判慢的代理排到候选最后，没别的可选才用，不移出池子；新增 `slow_demotion_window_minutes`（默认 1440，0 关闭）、`slow_demotion_min_accounts`（默认 2）；`/proxies` 返回 `slow_accounts`、`demoted`，页面标「建议移出」 |
 | — | `eb03b28` | 11-10 12:06 | 人工在后台换代理（单个编辑、带 `account_ids` 的批量编辑）后也只算换代理之后开始的请求，时间从审计日志读；修复人工刚换的代理被旧请求误判、马上被自动换走。人工选的代理不受保护，自己慢了照样换 |
