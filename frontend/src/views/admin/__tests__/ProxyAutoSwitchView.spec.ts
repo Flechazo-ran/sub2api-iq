@@ -29,6 +29,8 @@ function config(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitch
     max_accounts_per_proxy: 2,
     candidate_proxy_ids: [],
     strategy: 'sequential',
+    slow_demotion_window_minutes: 1440,
+    slow_demotion_min_accounts: 2,
     ...overrides,
   }
 }
@@ -50,6 +52,8 @@ function proxy(id: number, overrides: Partial<ProxyAutoSwitchProxy> = {}): Proxy
     expired: id === 25,
     account_count: id === 68 ? 1 : 0,
     in_pool: false,
+    slow_accounts: 0,
+    demoted: false,
     ...overrides,
   }
 }
@@ -145,6 +149,8 @@ describe('ProxyAutoSwitchView settings', () => {
     expect((wrapper.get('[data-testid="pas-p60_threshold_s"]').element as HTMLInputElement).value).toBe('10')
     expect((wrapper.get('[data-testid="pas-mean_threshold_s"]').element as HTMLInputElement).value).toBe('15')
     expect((wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').element as HTMLInputElement).value).toBe('2')
+    expect((wrapper.get('[data-testid="pas-slow_demotion_hours"]').element as HTMLInputElement).value).toBe('24')
+    expect((wrapper.get('[data-testid="pas-slow_demotion_min_accounts"]').element as HTMLInputElement).value).toBe('2')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toBe('规则：统计过去 5 分钟，窗口里不少于 20 个请求，首字 p60 大于 10 秒且首字均值大于 15 秒，就自动更换代理。首字和耗时都取自使用记录的每个请求。')
 
     await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
@@ -153,6 +159,8 @@ describe('ProxyAutoSwitchView settings', () => {
     await wrapper.get('[data-testid="pas-p60_threshold_s"]').setValue('12.5')
     await wrapper.get('[data-testid="pas-mean_threshold_s"]').setValue('16.5')
     await wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').setValue('3')
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('12')
+    await wrapper.get('[data-testid="pas-slow_demotion_min_accounts"]').setValue('3')
     await wrapper.get('[data-testid="pas-strategy-random"]').trigger('click')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('统计过去 7 分钟')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('不少于 30 个请求')
@@ -172,8 +180,10 @@ describe('ProxyAutoSwitchView settings', () => {
       max_accounts_per_proxy: 3,
       candidate_proxy_ids: [],
       strategy: 'random',
+      slow_demotion_window_minutes: 720,
+      slow_demotion_min_accounts: 3,
     })
-    expect(Object.keys(payload).sort()).toEqual(['candidate_proxy_ids', 'enabled', 'group_ids', 'max_accounts_per_proxy', 'mean_threshold_ms', 'min_samples', 'p60_threshold_ms', 'strategy', 'window_minutes'])
+    expect(Object.keys(payload).sort()).toEqual(['candidate_proxy_ids', 'enabled', 'group_ids', 'max_accounts_per_proxy', 'mean_threshold_ms', 'min_samples', 'p60_threshold_ms', 'slow_demotion_min_accounts', 'slow_demotion_window_minutes', 'strategy', 'window_minutes'])
     expect(payload).not.toHaveProperty('metric')
     expect(payload).not.toHaveProperty('threshold_ms')
     expect(payload).not.toHaveProperty('consecutive_checks')
@@ -242,6 +252,30 @@ describe('ProxyAutoSwitchView settings', () => {
     wrapper = mountView(); await flushPromises()
     // 2 / 2 = 已满
     expect(wrapper.find('[data-proxy-id="68"] [data-testid="pas-proxy-note"]').exists()).toBe(true)
+  })
+
+  it('tags demoted pool proxies with how many accounts were slow on them', async () => {
+    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 42] }))
+    api.listProxies.mockResolvedValue([
+      proxy(68, { in_pool: true, slow_accounts: 3, demoted: true }),
+      proxy(42, { in_pool: true, slow_accounts: 1, demoted: false }),
+    ])
+    wrapper = mountView(); await flushPromises()
+    const tag = wrapper.get('[data-testid="pas-proxy-demoted-68"]')
+    expect(tag.text()).toBe('建议移出 · 3 个号判慢')
+    expect(tag.attributes('title')).toBe('最近 24 小时内有 3 个不同账号在这个代理上被判慢，换代理时已排到最后')
+    expect(wrapper.find('[data-testid="pas-proxy-demoted-42"]').exists()).toBe(false)
+  })
+
+  it('accepts 0 hours to turn soft demotion off and rejects out-of-range values', async () => {
+    wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('0')
+    expect(wrapper.find('[data-testid="pas-invalid"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('169')
+    expect(wrapper.get('[data-testid="pas-invalid"]').text()).toContain('1')
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('24')
+    await wrapper.get('[data-testid="pas-slow_demotion_min_accounts"]').setValue('0')
+    expect(wrapper.find('[data-testid="pas-invalid"]').exists()).toBe(true)
   })
 
   it('switches strategy and shows the right aria-checked', async () => {

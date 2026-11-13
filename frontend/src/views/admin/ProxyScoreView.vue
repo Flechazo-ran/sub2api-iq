@@ -9,7 +9,7 @@
           <p class="workspace-subtitle">{{ t('proxyScore.intro') }}</p>
         </div>
         <div class="heading-actions">
-          <span v-if="loadedAt" class="updated-at">{{ loadedAt }}</span>
+          <span v-if="loaded" class="updated-at" data-testid="psc-computed-at">{{ computedAt ? t('proxyScore.computedAt', { time: fmtTime(computedAt) }) : t('proxyScore.notComputed') }}</span>
           <button type="button" class="icon-button" :disabled="loading" :aria-label="t('proxyScore.refresh')" data-testid="psc-refresh" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': loading }" /></button>
         </div>
       </div>
@@ -90,13 +90,13 @@ import type { ProxyScoreRange, ProxyScoreRow, ProxyScoreGrade, ProxyScoreAdvice 
 
 const { t } = useI18n()
 
-const ranges: ProxyScoreRange[] = ['7d', '30d']
+const ranges: ProxyScoreRange[] = ['3d', '7d', '30d']
 const selectedRange = ref<ProxyScoreRange>('7d')
 const rows = ref<ProxyScoreRow[]>([])
 const loading = ref(false)
 const loaded = ref(false)
 const error = ref('')
-const loadedAt = ref('')
+const computedAt = ref<string | null>(null)
 
 async function load() {
   loading.value = true
@@ -104,8 +104,8 @@ async function load() {
   try {
     const result = await getProxyScore(selectedRange.value)
     rows.value = result.rows
+    computedAt.value = result.computed_at
     loaded.value = true
-    loadedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   } catch (e: unknown) {
     error.value = extractApiErrorMessage(e, t('proxyScore.loadFailed'))
   } finally {
@@ -122,6 +122,12 @@ function switchRange(r: ProxyScoreRange) {
 }
 
 onMounted(load)
+
+function fmtTime(iso: string): string {
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
 function fmtMs(ms: number | null): string {
   if (ms == null) return '—'

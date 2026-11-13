@@ -572,3 +572,106 @@ func TestProxyAutoSwitchV2UpdateFailureRecordsFailed(t *testing.T) {
 	require.Equal(t, ProxyAutoSwitchStatusFailed, e.Status)
 	require.True(t, strings.Contains(e.Reason, "db down"))
 }
+
+// slowEvent records that an account was judged slow and switched away from a proxy.
+func (w *pasWorld) slowEvent(accountID, fromProxyID int64, at time.Time, status string) {
+	from := fromProxyID
+	w.events = append(w.events, ProxyAutoSwitchEvent{
+		ID: int64(len(w.events) + 1000), AccountID: accountID, FromProxyID: &from,
+		Status: status, CreatedAt: at,
+	})
+}
+
+// demotionWorld: account 65 is slow on 96; pool 96/97/98 ranked 97 fastest, then 98.
+func demotionWorld(t *testing.T, strategy string) (*pasWorld, *ProxyAutoSwitchService) {
+	t.Helper()
+	w := newPASWorld()
+	w.addProxy(96, "JP", 30)
+	w.addProxy(97, "JP", 30)
+	w.addProxy(98, "JP", 30)
+	w.addAccount(65, 96)
+	w.setProbe(96, 800)
+	w.setProbe(97, 400)
+	w.setProbe(98, 500)
+	w.addUsages(65, 96, 20, w.now.Add(-time.Minute), 16000)
+	cfg := v2Config()
+	cfg.CandidateProxyIDs = []int64{96, 97, 98}
+	cfg.Strategy = strategy
+	cfg.SlowDemotionWindowMinutes = 1440
+	cfg.SlowDemotionMinAccounts = 2
+	w.saveConfig(cfg)
+	svc := w.service()
+	svc.latencyRank = []int64{97, 98, 96}
+	return w, svc
+}
+
+func TestProxyAutoSwitchSlowDemotion(t *testing.T) {
+	t.Run("two different accounts slow on the fastest proxy: picks the next one", func(t *testing.T) {
+		w, svc := demotionWorld(t, ProxyAutoSwitchStrategySequential)
+		w.slowEvent(70, 97, w.now.Add(-2*time.Hour), ProxyAutoSwitchStatusDone)
+		w.slowEvent(71, 97, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusNoCandidate)
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 98}}, w.updates)
+	})
+	t.Run("one account slow twice is not enough", func(t *testing.T) {
+		w, svc := demotionWorld(t, ProxyAutoSwitchStrategySequential)
+		w.slowEvent(70, 97, w.now.Add(-2*time.Hour), ProxyAutoSwitchStatusDone)
+		w.slowEvent(70, 97, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusDone)
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
+	})
+	t.Run("events outside the window recover the proxy", func(t *testing.T) {
+		w, svc := demotionWorld(t, ProxyAutoSwitchStrategySequential)
+		w.slowEvent(70, 97, w.now.Add(-25*time.Hour), ProxyAutoSwitchStatusDone)
+		w.slowEvent(71, 97, w.now.Add(-26*time.Hour), ProxyAutoSwitchStatusDone)
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
+	})
+	t.Run("demoted proxy is still used when nothing else fits", func(t *testing.T) {
+		w, svc := demotionWorld(t, ProxyAutoSwitchStrategySequential)
+		w.addAccount(66, 98)
+		w.addAccount(67, 98) // 98 full
+		w.slowEvent(70, 97, w.now.Add(-2*time.Hour), ProxyAutoSwitchStatusDone)
+		w.slowEvent(71, 97, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusDone)
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
+	})
+	t.Run("window 0 disables demotion", func(t *testing.T) {
+		w, svc := demotionWorld(t, ProxyAutoSwitchStrategySequential)
+		cfg, err := svc.GetConfig(context.Background())
+		require.NoError(t, err)
+		cfg.SlowDemotionWindowMinutes = 0
+		w.saveConfig(cfg)
+		w.slowEvent(70, 97, w.now.Add(-2*time.Hour), ProxyAutoSwitchStatusDone)
+		w.slowEvent(71, 97, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusDone)
+		runChecks(t, svc, w, 1)
+		require.Equal(t, [][2]int64{{65, 97}}, w.updates)
+	})
+	t.Run("random strategy never picks a demoted proxy while others fit", func(t *testing.T) {
+		for pick := 0; pick < 3; pick++ {
+			w, svc := demotionWorld(t, ProxyAutoSwitchStrategyRandom)
+			svc.randInt = func(n int) int { return pick % n }
+			w.slowEvent(70, 97, w.now.Add(-2*time.Hour), ProxyAutoSwitchStatusDone)
+			w.slowEvent(71, 97, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusDone)
+			runChecks(t, svc, w, 1)
+			require.Equal(t, [][2]int64{{65, 98}}, w.updates, "pick=%d", pick)
+		}
+	})
+	t.Run("proxy list marks the demoted proxy with its account count", func(t *testing.T) {
+		w, svc := demotionWorld(t, ProxyAutoSwitchStrategySequential)
+		w.slowEvent(70, 97, w.now.Add(-2*time.Hour), ProxyAutoSwitchStatusDone)
+		w.slowEvent(71, 97, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusFailed)
+		w.slowEvent(72, 98, w.now.Add(-3*time.Hour), ProxyAutoSwitchStatusDone)
+		list, err := svc.Proxies(context.Background())
+		require.NoError(t, err)
+		byID := map[int64]ProxyAutoSwitchProxyItem{}
+		for _, it := range list.Items {
+			byID[it.ID] = it
+		}
+		require.Equal(t, 2, byID[97].SlowAccounts)
+		require.True(t, byID[97].Demoted)
+		require.Equal(t, 1, byID[98].SlowAccounts)
+		require.False(t, byID[98].Demoted)
+		require.False(t, byID[96].Demoted)
+	})
+}

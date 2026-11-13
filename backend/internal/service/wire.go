@@ -1144,7 +1144,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAccountTokenGuardV2Service,
 	ProvideProxyAutoSwitchService,
 	NewFirstTokenTrendService,
-	NewProxyScoreService,
+	ProvideProxyScoreService,
 	NewEmailService,
 	NewNotificationEmailService,
 	ProvideEmailQueueService,
@@ -1363,6 +1363,13 @@ func ProvideProxyAutoSwitchService(repo ProxyAutoSwitchRepository, settings Sett
 	prober ProxyAutoSwitchProber, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config,
 ) *ProxyAutoSwitchService {
 	svc := NewProxyAutoSwitchService(repo, settings, groups, proxies, admin, latency, exitProber, prober, lockCache, db)
+	startBackgroundService(cfg, svc)
+	return svc
+}
+
+// ProvideProxyScoreService 创建代理评分服务并启动后台预计算（每 10 分钟重算今天，多实例只跑一个）。
+func ProvideProxyScoreService(repo ProxyScoreRepository, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *ProxyScoreService {
+	svc := NewProxyScoreService(repo, lockCache, db)
 	startBackgroundService(cfg, svc)
 	return svc
 }

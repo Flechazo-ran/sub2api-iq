@@ -1,12 +1,15 @@
 export default {
   title: 'Proxy score',
-  description: 'Score each proxy by its first-token performance over the last 7 or 30 days to decide which ones to renew.',
-  intro: 'Read-only dashboard: each proxy is graded S–D based on p50 first-token latency. Three or more slow-switch events in the period drop the grade by one step. Nothing on this page changes any settings.',
+  description: 'Score each proxy by its first-token performance over the last 3, 7 or 30 days to decide which ones to renew.',
+  intro: 'Read-only dashboard: each proxy is graded S–D based on p50 first-token latency. Three or more slow-switch events in the period drop the grade by one step. Data is refreshed in the background every 10 minutes. Nothing on this page changes any settings.',
   refresh: 'Refresh',
   retry: 'Retry',
   loading: 'Loading…',
   loadFailed: 'Failed to load',
+  computedAt: 'Updated {time}',
+  notComputed: 'Still computing in the background, refresh shortly',
   range: {
+    '3d': '3 days',
     '7d': '7 days',
     '30d': '30 days',
   },

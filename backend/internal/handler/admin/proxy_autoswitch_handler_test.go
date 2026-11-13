@@ -162,6 +162,10 @@ func (s *pasHandlerStore) AuditWrites(context.Context, []int64, time.Time, time.
 	return nil, nil
 }
 
+func (s *pasHandlerStore) SlowSwitchAccountCounts(context.Context, time.Time) (map[int64]int, error) {
+	return nil, nil
+}
+
 func (s *pasHandlerStore) LatestEventPerAccount(_ context.Context, since time.Time, statuses []string) ([]service.ProxyAutoSwitchEvent, error) {
 	latest := map[int64]service.ProxyAutoSwitchEvent{}
 	for _, e := range s.events {
@@ -291,7 +295,7 @@ func TestProxyAutoSwitchHandlerConfig(t *testing.T) {
 	data := asMap(t, body["data"])
 	require.Equal(t, []string{
 		"candidate_proxy_ids", "enabled", "group_ids", "max_accounts_per_proxy", "mean_threshold_ms", "min_samples",
-		"p60_threshold_ms", "strategy", "window_minutes",
+		"p60_threshold_ms", "slow_demotion_min_accounts", "slow_demotion_window_minutes", "strategy", "window_minutes",
 	}, sortedKeys(data))
 	require.Equal(t, false, data["enabled"])
 	require.Equal(t, service.ProxyAutoSwitchStrategySequential, data["strategy"])

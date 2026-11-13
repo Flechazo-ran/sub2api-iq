@@ -104,6 +104,39 @@ func (r *proxyAutoSwitchRepository) AuditWrites(ctx context.Context, accountIDs 
 	return (&firstTokenTrendRepository{db: r.db}).AuditWrites(ctx, accountIDs, since, until)
 }
 
+// SlowSwitchAccountCounts counts, per from-proxy, the distinct accounts that
+// were judged slow on it since the given time. Statuses match the proxy-score
+// page: a switch (done), a slow verdict with no candidate, and a failed switch
+// all mean "this account was slow on this proxy".
+func (r *proxyAutoSwitchRepository) SlowSwitchAccountCounts(ctx context.Context, since time.Time) (map[int64]int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT from_proxy_id, count(DISTINCT account_id)
+		FROM proxy_autoswitch_events
+		WHERE created_at >= $1
+		  AND status = ANY($2)
+		  AND from_proxy_id IS NOT NULL
+		GROUP BY from_proxy_id`, since, pq.Array([]string{
+		service.ProxyAutoSwitchStatusMeasuring,
+		service.ProxyAutoSwitchStatusDone,
+		service.ProxyAutoSwitchStatusNoCandidate,
+		service.ProxyAutoSwitchStatusFailed,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[int64]int)
+	for rows.Next() {
+		var proxyID int64
+		var n int
+		if err := rows.Scan(&proxyID, &n); err != nil {
+			return nil, err
+		}
+		out[proxyID] = n
+	}
+	return out, rows.Err()
+}
+
 // ListProxies returns every undeleted proxy with its live account count. The
 // candidate-pool picker needs deleted proxies excluded and the region cache is
 // filled by the service.

@@ -279,14 +279,14 @@ func (p proxyAutoSwitchPoolIssue) emptyReason() string {
 // loadCandidatePool 返回代理池（candidate_proxy_ids）里可用的代理（没删除、active、没过期、
 // 号数没到上限、不是当前代理），按延迟排名排列（还没测过的排最后，按 ID）。
 func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg ProxyAutoSwitchConfig, now time.Time,
-	currentID int64) ([]Proxy, string, error) {
+	currentID int64) ([]Proxy, map[int64]struct{}, string, error) {
 	maxPerProxy := cfg.MaxAccountsPerProxy
 	if maxPerProxy <= 0 {
 		maxPerProxy = 2
 	}
 	proxies, err := s.repo.ListProxies(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	byID := make(map[int64]*ProxyWithAccountCount, len(proxies))
 	for i := range proxies {
@@ -334,9 +334,17 @@ func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg Prox
 		})
 	}
 	if len(eligible) == 0 {
-		return nil, issue.emptyReason(), nil
+		return nil, nil, issue.emptyReason(), nil
 	}
+	demoted := s.slowDemotedProxies(ctx, cfg, now)
 	sort.SliceStable(eligible, func(i, j int) bool {
+		// 软降级：近期被多个不同账号判慢换出的代理排到最后，但仍留在池子里，
+		// 没有别的候选时照样会被选上。
+		_, iDemoted := demoted[eligible[i].ID]
+		_, jDemoted := demoted[eligible[j].ID]
+		if iDemoted != jDemoted {
+			return !iDemoted
+		}
 		ri, iHas := rankIndex[eligible[i].ID]
 		rj, jHas := rankIndex[eligible[j].ID]
 		switch {
@@ -348,17 +356,70 @@ func (s *ProxyAutoSwitchService) loadCandidatePool(ctx context.Context, cfg Prox
 			return eligible[i].ID < eligible[j].ID
 		}
 	})
-	return eligible, "", nil
+	return eligible, demoted, "", nil
+}
+
+// slowSwitchAccountCounts reads, per proxy, how many distinct accounts were
+// judged slow on it within the demotion window. Disabled window or lookup
+// failure yields nil.
+func (s *ProxyAutoSwitchService) slowSwitchAccountCounts(ctx context.Context, cfg ProxyAutoSwitchConfig, now time.Time) map[int64]int {
+	if cfg.SlowDemotionWindowMinutes <= 0 || s.repo == nil {
+		return nil
+	}
+	counts, err := s.repo.SlowSwitchAccountCounts(ctx, now.Add(-time.Duration(cfg.SlowDemotionWindowMinutes)*time.Minute))
+	if err != nil {
+		slog.Warn("proxy_autoswitch_slow_demotion_lookup_failed", "error", err)
+		return nil
+	}
+	return counts
+}
+
+// slowDemotedProxies returns proxies that at least SlowDemotionMinAccounts
+// distinct accounts were judged slow on within SlowDemotionWindowMinutes.
+// A window of 0 disables demotion. Lookup failures fall back to no demotion:
+// ranking is advisory and must never block a switch.
+func (s *ProxyAutoSwitchService) slowDemotedProxies(ctx context.Context, cfg ProxyAutoSwitchConfig, now time.Time) map[int64]struct{} {
+	counts := s.slowSwitchAccountCounts(ctx, cfg, now)
+	if len(counts) == 0 {
+		return nil
+	}
+	minAccounts := cfg.SlowDemotionMinAccounts
+	if minAccounts <= 0 {
+		minAccounts = 2
+	}
+	out := make(map[int64]struct{})
+	for id, n := range counts {
+		if n >= minAccounts {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // selectProxy applies the configured strategy to the already qualified pool.
 // sequential picks the first proxy in the latency-sorted eligible list;
-// random and region pick a random qualified proxy.
+// random and region pick a random qualified proxy. Demoted proxies (sorted to
+// the end by loadCandidatePool) are only used when no other candidate fits.
 func (s *ProxyAutoSwitchService) selectProxy(cfg ProxyAutoSwitchConfig, currentID int64, currentRegion string,
-	eligible []Proxy, regions map[int64]string) (*Proxy, string) {
+	eligible []Proxy, regions map[int64]string, demoted map[int64]struct{}) (*Proxy, string) {
+	preferred := func(list []Proxy) []Proxy {
+		if len(demoted) == 0 {
+			return list
+		}
+		kept := make([]Proxy, 0, len(list))
+		for _, p := range list {
+			if _, ok := demoted[p.ID]; !ok {
+				kept = append(kept, p)
+			}
+		}
+		if len(kept) == 0 {
+			return list
+		}
+		return kept
+	}
 	switch cfg.Strategy {
 	case ProxyAutoSwitchStrategySequential:
-		// eligible 已按延迟排序，从头取第一个可用的
+		// eligible 已按延迟排序（降级的在最后），从头取第一个可用的
 		if len(eligible) > 0 {
 			return &eligible[0], ""
 		}
@@ -375,10 +436,12 @@ func (s *ProxyAutoSwitchService) selectProxy(cfg ProxyAutoSwitchConfig, currentI
 		if len(different) == 0 {
 			return nil, "没有不同地区的候选代理"
 		}
+		different = preferred(different)
 		p := different[s.randPick(len(different))]
 		return &p, ""
 	default: // random
-		p := eligible[s.randPick(len(eligible))]
+		pool := preferred(eligible)
+		p := pool[s.randPick(len(pool))]
 		return &p, ""
 	}
 }
@@ -416,7 +479,7 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 	if err != nil || current == nil {
 		return false, fmt.Errorf("load current proxy %d: %w", currentID, err)
 	}
-	eligible, reason, err := s.loadCandidatePool(ctx, cfg, now, currentID)
+	eligible, demoted, reason, err := s.loadCandidatePool(ctx, cfg, now, currentID)
 	if err != nil {
 		return false, fmt.Errorf("load candidate proxies: %w", err)
 	}
@@ -430,7 +493,7 @@ func (s *ProxyAutoSwitchService) attemptSwitch(ctx context.Context, cfg ProxyAut
 	regionInput = append(regionInput, eligible...)
 	regions := s.resolveRegions(ctx, regionInput)
 	currentRegion := regions[currentID]
-	target, reason := s.selectProxy(cfg, currentID, currentRegion, eligible, regions)
+	target, reason := s.selectProxy(cfg, currentID, currentRegion, eligible, regions, demoted)
 	if target == nil {
 		event := proxyAutoSwitchEventFor(account, cfg, current, currentRegion, stat)
 		return false, s.recordNoCandidate(ctx, event, reason)

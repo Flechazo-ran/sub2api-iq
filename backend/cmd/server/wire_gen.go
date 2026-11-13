@@ -366,7 +366,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	firstTokenTrendService := service.NewFirstTokenTrendService(firstTokenTrendRepository)
 	firstTokenTrendHandler := admin.NewFirstTokenTrendHandler(firstTokenTrendService)
 	proxyScoreRepository := repository.NewProxyScoreRepository(db)
-	proxyScoreService := service.NewProxyScoreService(proxyScoreRepository)
+	proxyScoreService := service.ProvideProxyScoreService(proxyScoreRepository, leaderLockCache, db, configConfig)
 	proxyScoreHandler := admin.NewProxyScoreHandler(proxyScoreService)
 	channelHandler := admin.NewChannelHandler(channelService, billingService, pricingService)
 	channelMonitorHandler := admin.NewChannelMonitorHandler(channelMonitorService)

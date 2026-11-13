@@ -40,6 +40,12 @@
           <p class="rule" data-testid="pas-rule">{{ ruleText }}</p>
 
           <div class="threshold-row">
+            <label class="inline-field" for="pas-slow_demotion_hours"><span class="field-label">{{ t('proxyAutoSwitch.slowDemotionHours') }}</span><input id="pas-slow_demotion_hours" v-model.number="draft.slow_demotion_hours" type="number" class="input num-input" min="0" max="168" step="1" :aria-invalid="fieldError('slow_demotion_hours') ? 'true' : undefined" data-testid="pas-slow_demotion_hours" /><span>{{ t('proxyAutoSwitch.unit.hours') }}</span><span v-if="fieldError('slow_demotion_hours')" class="field-error">{{ fieldError('slow_demotion_hours') }}</span></label>
+            <label class="inline-field" for="pas-slow_demotion_min_accounts"><span class="field-label">{{ t('proxyAutoSwitch.slowDemotionMinAccounts') }}</span><input id="pas-slow_demotion_min_accounts" v-model.number="draft.slow_demotion_min_accounts" type="number" class="input num-input" min="1" max="100" step="1" :aria-invalid="fieldError('slow_demotion_min_accounts') ? 'true' : undefined" data-testid="pas-slow_demotion_min_accounts" /><span>{{ t('proxyAutoSwitch.unit.accounts') }}</span><span v-if="fieldError('slow_demotion_min_accounts')" class="field-error">{{ fieldError('slow_demotion_min_accounts') }}</span></label>
+          </div>
+          <p class="hint" data-testid="pas-slow-demotion-hint">{{ t('proxyAutoSwitch.slowDemotionHint') }}</p>
+
+          <div class="threshold-row">
             <label class="inline-field" for="pas-max_accounts_per_proxy"><span class="field-label">{{ t('proxyAutoSwitch.maxAccountsPerProxy') }}</span><input id="pas-max_accounts_per_proxy" v-model.number="draft.max_accounts_per_proxy" type="number" class="input num-input" min="1" max="100" step="1" :aria-invalid="fieldError('max_accounts_per_proxy') ? 'true' : undefined" data-testid="pas-max_accounts_per_proxy" /><span>{{ t('proxyAutoSwitch.unit.accounts') }}</span><span v-if="fieldError('max_accounts_per_proxy')" class="field-error">{{ fieldError('max_accounts_per_proxy') }}</span></label>
           </div>
 
@@ -67,7 +73,7 @@
               <tbody v-else>
                 <tr v-for="proxy in poolRows" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': !isUsable(proxy) || isFull(proxy) }">
                   <td class="cell-left rank-cell" data-testid="pas-proxy-rank">{{ poolRank.get(proxy.id) ?? '—' }}</td>
-                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="poolNote(proxy)" class="expired-tag" data-testid="pas-proxy-note">{{ poolNote(proxy) }}</span></td>
+                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="poolNote(proxy)" class="expired-tag" data-testid="pas-proxy-note">{{ poolNote(proxy) }}</span><span v-if="proxy.demoted" class="demoted-tag" :title="t('proxyAutoSwitch.demotedTitle', { count: proxy.slow_accounts, hours: savedDemotionHours })" :data-testid="`pas-proxy-demoted-${proxy.id}`">{{ t('proxyAutoSwitch.demotedTag', { count: proxy.slow_accounts }) }}</span></td>
                   <td class="cell-left">{{ proxy.region || '—' }}</td>
                   <td class="cell-left tabular-nums">{{ monthDay(proxy.expires_at) }}</td>
                   <td class="tabular-nums" data-testid="pas-proxy-accounts">{{ proxy.account_count }} / {{ savedMax }}</td>
@@ -198,7 +204,7 @@ const { t, te } = useI18n()
 const PAGE_SIZE = 50
 const strategies: ProxyAutoSwitchStrategy[] = ['random', 'sequential', 'region']
 
-type NumericKey = 'window_minutes' | 'min_samples' | 'p60_threshold_s' | 'mean_threshold_s' | 'max_accounts_per_proxy'
+type NumericKey = 'window_minutes' | 'min_samples' | 'p60_threshold_s' | 'mean_threshold_s' | 'max_accounts_per_proxy' | 'slow_demotion_hours' | 'slow_demotion_min_accounts'
 interface Draft {
   enabled: boolean
   group_ids: number[]
@@ -209,6 +215,9 @@ interface Draft {
   max_accounts_per_proxy: number | string
   candidate_proxy_ids: number[]
   strategy: ProxyAutoSwitchStrategy
+  // 页面上按小时填，保存时换成分钟；0 = 关闭软降级。
+  slow_demotion_hours: number | string
+  slow_demotion_min_accounts: number | string
 }
 
 // 与后端 PUT /config 的校验范围一致：窗口 1–60 分钟、样本 1–100000、两个阈值 1–600000 毫秒。
@@ -218,8 +227,10 @@ const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }>
   p60_threshold_s: { min: 0.001, max: 600, integer: false },
   mean_threshold_s: { min: 0.001, max: 600, integer: false },
   max_accounts_per_proxy: { min: 1, max: 100, integer: true },
+  slow_demotion_hours: { min: 0, max: 168, integer: false },
+  slow_demotion_min_accounts: { min: 1, max: 100, integer: true },
 }
-const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, max_accounts_per_proxy: 2, candidate_proxy_ids: [], strategy: 'sequential' }
+const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, max_accounts_per_proxy: 2, candidate_proxy_ids: [], strategy: 'sequential', slow_demotion_window_minutes: 1440, slow_demotion_min_accounts: 2 }
 
 function finiteNumber(value: unknown, fallback: number): number {
   const parsed = Number(value)
@@ -240,6 +251,8 @@ function normalizeConfig(raw: Partial<ProxyAutoSwitchConfig> | null | undefined)
     max_accounts_per_proxy: finiteNumber(raw?.max_accounts_per_proxy, defaultConfig.max_accounts_per_proxy),
     candidate_proxy_ids: Array.isArray(raw?.candidate_proxy_ids) ? [...new Set(raw.candidate_proxy_ids.map(Number).filter(Number.isFinite))] : [],
     strategy: normalizeStrategy(raw?.strategy),
+    slow_demotion_window_minutes: finiteNumber(raw?.slow_demotion_window_minutes, defaultConfig.slow_demotion_window_minutes),
+    slow_demotion_min_accounts: finiteNumber(raw?.slow_demotion_min_accounts, defaultConfig.slow_demotion_min_accounts),
   }
 }
 function toDraft(config: ProxyAutoSwitchConfig): Draft {
@@ -253,6 +266,8 @@ function toDraft(config: ProxyAutoSwitchConfig): Draft {
     max_accounts_per_proxy: config.max_accounts_per_proxy,
     candidate_proxy_ids: [...config.candidate_proxy_ids],
     strategy: config.strategy,
+    slow_demotion_hours: config.slow_demotion_window_minutes / 60,
+    slow_demotion_min_accounts: config.slow_demotion_min_accounts,
   }
 }
 // 固定键顺序、分组和代理池都去重排序，方便比对是否改过（池内顺序由延迟排名决定，加入顺序不重要）。
@@ -267,6 +282,8 @@ function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchUpdate {
     max_accounts_per_proxy: config.max_accounts_per_proxy,
     candidate_proxy_ids: [...new Set(config.candidate_proxy_ids)].sort((a, b) => a - b),
     strategy: config.strategy,
+    slow_demotion_window_minutes: config.slow_demotion_window_minutes,
+    slow_demotion_min_accounts: config.slow_demotion_min_accounts,
   }
 }
 function toPayload(): ProxyAutoSwitchUpdate {
@@ -280,6 +297,8 @@ function toPayload(): ProxyAutoSwitchUpdate {
     max_accounts_per_proxy: Number(draft.max_accounts_per_proxy),
     candidate_proxy_ids: [...draft.candidate_proxy_ids],
     strategy: draft.strategy,
+    slow_demotion_window_minutes: Math.round(Number(draft.slow_demotion_hours) * 60),
+    slow_demotion_min_accounts: Number(draft.slow_demotion_min_accounts),
   })
 }
 
@@ -299,6 +318,11 @@ function fieldError(key: NumericKey): string {
   if (range.integer) {
     const valid = Number.isInteger(value) && value >= range.min && value <= range.max
     return valid ? '' : t('proxyAutoSwitch.integerError', range)
+  }
+  if (key === 'slow_demotion_hours') {
+    // 按分钟存：0（关闭）到 10080 分钟（7 天）。
+    const minutes = Math.round(value * 60)
+    return minutes >= 0 && minutes <= 10080 ? '' : t('proxyAutoSwitch.rangeError', range)
   }
   const ms = Math.round(value * 1000)
   return ms >= 1 && ms <= 600000 ? '' : t('proxyAutoSwitch.rangeError', range)
@@ -402,6 +426,7 @@ function poolNote(proxy: ProxyAutoSwitchProxy): string {
 }
 // 「已满」按已保存的上限算，和后端换代理时用的一致。
 const savedMax = computed(() => saved.value?.max_accounts_per_proxy ?? defaultConfig.max_accounts_per_proxy)
+const savedDemotionHours = computed(() => Math.round((saved.value?.slow_demotion_window_minutes ?? defaultConfig.slow_demotion_window_minutes) / 6) / 10)
 function isFull(proxy: ProxyAutoSwitchProxy) { return proxy.account_count >= savedMax.value }
 function proxyLabel(proxy: ProxyAutoSwitchProxy) { return proxy.name ? `#${proxy.id} ${proxy.name}` : `#${proxy.id}` }
 function removeFromPool(id: number) { draft.candidate_proxy_ids = draft.candidate_proxy_ids.filter(candidate => candidate !== id) }
@@ -608,6 +633,8 @@ onUnmounted(() => { disposed = true })
 .chip { @apply inline-flex max-w-full cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600 transition-colors hover:border-gray-300 dark:border-dark-600 dark:bg-dark-900 dark:text-gray-300 dark:hover:border-dark-500; overflow-wrap: anywhere; }
 .chip.on { @apply border-primary-300 bg-primary-50 font-medium text-primary-700 dark:border-primary-700 dark:bg-primary-950/40 dark:text-primary-300; }
 .chip:focus-within { @apply ring-2 ring-primary-400 ring-offset-2 dark:ring-offset-dark-900; }
+.hint { @apply text-xs leading-5 text-gray-500 dark:text-gray-400; }
+.demoted-tag { @apply ml-2 inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300; }
 .rule { @apply rounded-lg border border-dashed border-gray-200 bg-gray-50/70 px-3 py-2 text-[13px] leading-6 text-gray-600 dark:border-dark-600 dark:bg-dark-800/50 dark:text-gray-300; }
 .subsection-heading { @apply flex items-start justify-between gap-3; }
 .subsection-heading h4 { @apply text-sm font-semibold; }
