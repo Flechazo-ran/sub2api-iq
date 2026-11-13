@@ -263,6 +263,7 @@ func loadCodexGroupCatalogAccounts(ctx context.Context, repo AccountRepository, 
 			PlatformDeepseek,
 			PlatformMiniMax,
 			PlatformOpenCodeGo,
+			PlatformMistral, PlatformQwen,
 		},
 		false,
 	)
@@ -504,7 +505,7 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 	}
 
 	if isClaudeCodexModel(modelID) {
-		if claude.IsOpus55(modelID) || claude.IsSonnet55(modelID) || claude.IsHaiku55(modelID) {
+		if claude.IsOpus55(modelID) || claude.IsSonnet55(modelID) || claude.IsHaiku55(modelID) || claude.IsFable52(modelID) || claude.IsMythos52(modelID) {
 			descriptor.ContextWindow = 1_000_000
 			descriptor.MaxContextWindow = 1_000_000
 		}
@@ -513,7 +514,7 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		descriptor.SupportsParallelToolCalls = true
 		if levels := configuredCodexClaudeReasoningLevels(modelID); len(levels) > 0 {
 			defaultReasoningLevel := claudeCodexDefaultReasoningLevel(levels)
-			if claude.IsSonnet55(modelID) {
+			if claude.IsSonnet55(modelID) || claude.IsFable52(modelID) || claude.IsMythos52(modelID) {
 				defaultReasoningLevel = "high"
 			}
 			descriptor.DefaultReasoningLevel = &defaultReasoningLevel
@@ -672,6 +673,9 @@ func configuredCodexGPTReasoningLevels(modelID string) []configuredCodexReasonin
 			Description: "Maximum reasoning with automatic task delegation",
 		})
 	}
+	if openai.IsGPT61TerraModelSpelling(modelID) {
+		levels = append([]configuredCodexReasoningLevel{{Effort: "none", Description: "No reasoning"}}, levels...)
+	}
 	return levels
 }
 
@@ -772,6 +776,24 @@ func openaiCodexDisplayName(modelID string) string {
 			return model.DisplayName
 		}
 	}
+	// Legacy models may still be explicitly configured on API-key accounts.
+	switch normalized {
+	case "gpt-5.2":
+		return "GPT-5.2"
+	case "gpt-5.3-codex-spark":
+		return "GPT-5.3 Codex Spark"
+	case "gpt-5.5":
+		return "GPT-5.5"
+	case "gpt-5.4":
+		return "GPT-5.4"
+	case "gpt-5.4-mini":
+		return "GPT-5.4 Mini"
+	case "gpt-image-1":
+		return "GPT Image 1"
+	case "gpt-image-1.5":
+		return "GPT Image 1.5"
+	}
+
 	return modelID
 }
 
@@ -1159,7 +1181,7 @@ func groupCodexModelSupportsImageInput(
 			return false
 		}
 	}
-	if platform != PlatformOpenAI && platform != PlatformGrok && platform != PlatformDeepseek && platform != PlatformOpenCodeGo {
+	if platform != PlatformOpenAI && platform != PlatformGrok && platform != PlatformDeepseek && platform != PlatformOpenCodeGo && platform != PlatformMistral && platform != PlatformQwen {
 		return false
 	}
 
@@ -1298,7 +1320,7 @@ func accountCodexModelSupportsImageInput(account *Account, upstreamModel string)
 		return false
 	}
 	switch account.Platform {
-	case PlatformOpenAI, PlatformDeepseek, PlatformOpenCodeGo:
+	case PlatformOpenAI, PlatformDeepseek, PlatformOpenCodeGo, PlatformMistral, PlatformQwen:
 		if metadata, ok := account.GetUpstreamModelMetadata(upstreamModel); ok {
 			if modalities := normalizeCodexInputModalities(metadata.InputModalities); len(modalities) > 0 {
 				// Official GPT-6 Astra metadata briefly shipped with a stale
@@ -1311,7 +1333,7 @@ func accountCodexModelSupportsImageInput(account *Account, upstreamModel string)
 				return stringSliceContains(modalities, "image")
 			}
 		}
-		if strings.EqualFold(strings.TrimSpace(upstreamModel), "deepseek-v4-flash-vision-exp") {
+		if account.Platform != PlatformMistral && strings.EqualFold(strings.TrimSpace(upstreamModel), "deepseek-v4-flash-vision-exp") {
 			return account.Type == AccountTypeAPIKey
 		}
 		if account.Platform != PlatformOpenAI || !isOpenAICodexImageInputModel(upstreamModel) {
@@ -1716,6 +1738,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 }
 
 func (s *OpenAIGatewayService) fetchNativeCodexModelsManifest(ctx context.Context, account *Account, clientVersion, ifNoneMatch string) (*OpenAIModelsResponse, error) {
+	useCache := !isFreshOpenAICredentialProbe(ctx)
 	if account == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_ACCOUNT_REQUIRED", "account is required")
 	}
@@ -1816,7 +1839,14 @@ func (s *OpenAIGatewayService) fetchNativeCodexModelsManifest(ctx context.Contex
 		accountConcurrency:  account.Concurrency,
 		useAPIKeyUpstream:   useAPIKeyUpstream,
 	}
+	if !useCache {
+		request.headers.Del("If-None-Match")
+		request.headers.Set("Cache-Control", "no-cache")
+	}
 	if useAPIKeyUpstream {
+		if !useCache {
+			return s.fetchCodexModelsManifestUpstream(ctx, request, "")
+		}
 		return s.fetchCachedOpenAIModels(ctx, request, s.fetchCodexModelsManifestUpstreamForRequest(request), ifNoneMatch)
 	}
 	// OAuth 账号同样经过账号级缓存；闭包保留 agent identity 任务恢复逻辑，
@@ -1844,6 +1874,12 @@ func (s *OpenAIGatewayService) fetchNativeCodexModelsManifest(ctx context.Contex
 		}
 		setOpenAIChatGPTAccountHeaders(request.headers, credAccount)
 		return s.fetchCodexModelsManifestUpstream(fetchCtx, request, ifNoneMatch)
+	}
+	if !useCache {
+		// Credential inspection must observe this request's upstream response.
+		// Neither cached success, stale fallback nor an independent background
+		// refresh can verify the current token or the current inspection lease.
+		return oauthFetch(ctx, "")
 	}
 	return s.fetchCachedOpenAIModels(ctx, request, oauthFetch, ifNoneMatch)
 }
@@ -1930,6 +1966,11 @@ func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, requ
 
 func (s *OpenAIGatewayService) refreshCachedOpenAIModels(cacheKey string, request openAIModelsRequest, fetch func(ctx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error)) <-chan singleflight.Result {
 	return s.openAIModelsCache.refresh.DoChan(cacheKey, func() (any, error) {
+		cached, state := s.openAIModelsCache.get(cacheKey, time.Now())
+		// 调用方读缓存之后、进入 singleflight 之前，上一轮刷新可能已写入新鲜结果：直接复用，不重复请求上游。
+		if state == openAIModelsCacheFresh {
+			return cached, nil
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), codexModelsManifestRequestTimeout)
 		defer cancel()
 		return s.fetchAndCacheOpenAIModels(ctx, cacheKey, fetch)
@@ -2006,7 +2047,7 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 	}
 	if err != nil {
 		return nil, &codexModelsManifestUpstreamError{
-			err:       infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest request failed: %v", err),
+			err:       infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "模型列表请求失败，请稍后重试"),
 			retryable: isRetryableCodexModelsManifestTransportError(err),
 		}
 	}
@@ -2018,12 +2059,26 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		body = s.redactAgentIdentitySensitiveBody(reqCtx, request.credentialAccount, body)
-		message := strings.TrimSpace(string(body))
-		if message == "" {
-			message = resp.Status
+		publicErr := infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest upstream error %d: [redacted]", resp.StatusCode).WithMetadata(map[string]string{"upstream_status": fmt.Sprint(resp.StatusCode)})
+		if resp.StatusCode == http.StatusUnauthorized {
+			credentialState := "rejected"
+			var envelope struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(body, &envelope) == nil {
+				switch envelope.Error.Code {
+				case "token_revoked", "token_invalidated":
+					credentialState = "revoked"
+				}
+			}
+			// Keep 502: this is the selected upstream credential, not the
+			// administrator's login. Never return provider text or arbitrary codes.
+			publicErr = infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_CREDENTIALS_INVALID", "模型列表凭据已失效或被拒绝，请在账号管理中检查凭据并重新授权；此错误不表示封号或模型不支持").WithMetadata(map[string]string{"upstream_status": "401", "credential_state": credentialState})
 		}
 		return nil, &codexModelsManifestUpstreamError{
-			err:        infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "codex models manifest upstream error %d: %s", resp.StatusCode, message),
+			err:        publicErr,
 			statusCode: resp.StatusCode,
 			headers:    resp.Header.Clone(),
 			body:       body,
@@ -2035,7 +2090,7 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
 	if err != nil {
 		return nil, &codexModelsManifestUpstreamError{
-			err:       infraerrors.Newf(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "read codex models manifest response: %v", err),
+			err:       infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_UPSTREAM_FAILED", "无法读取模型列表响应"),
 			retryable: isRetryableCodexModelsManifestTransportError(err),
 		}
 	}
@@ -2247,6 +2302,10 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 		metadataModels[id] = capabilityModel
 		capabilities := accountCodexToolCapabilities(account, capabilityModel)
 		applyCodexToolCapabilities(capabilities, entry, true)
+		if account != nil && account.IsOpenAI() && shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+			capabilities["multi_agent_version"] = json.RawMessage("null")
+			capabilities["multi_agent_reasoning_effort"] = json.RawMessage("null")
+		}
 		modelMetadata[id] = codexModelMetadataOverride{UpstreamModelMetadata: UpstreamModelMetadata{
 			CodexToolCapabilities: capabilities,
 		}}
@@ -2497,6 +2556,11 @@ func completeAPIKeyCodexModelsManifestMetadata(body []byte, completeAll bool, ac
 		}
 		capabilities := accountCodexToolCapabilities(account, capabilityModel)
 		modelChanged := applyCodexToolCapabilities(model, capabilities, false)
+		if account != nil && account.IsOpenAI() && shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+			modelChanged = applyCodexToolCapabilities(model, map[string]json.RawMessage{
+				"multi_agent_version": json.RawMessage("null"), "multi_agent_reasoning_effort": json.RawMessage("null"),
+			}, true) || modelChanged
+		}
 		if completeDescriptor {
 			merged, err := mergeMissingCodexModelFields(model, defaults)
 			if err != nil {

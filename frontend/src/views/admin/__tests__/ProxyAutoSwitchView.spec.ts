@@ -29,6 +29,8 @@ function config(overrides: Partial<ProxyAutoSwitchConfig> = {}): ProxyAutoSwitch
     max_accounts_per_proxy: 2,
     candidate_proxy_ids: [],
     strategy: 'sequential',
+    slow_demotion_window_minutes: 1440,
+    slow_demotion_min_accounts: 2,
     ...overrides,
   }
 }
@@ -50,6 +52,8 @@ function proxy(id: number, overrides: Partial<ProxyAutoSwitchProxy> = {}): Proxy
     expired: id === 25,
     account_count: id === 68 ? 1 : 0,
     in_pool: false,
+    slow_accounts: 0,
+    demoted: false,
     ...overrides,
   }
 }
@@ -145,6 +149,8 @@ describe('ProxyAutoSwitchView settings', () => {
     expect((wrapper.get('[data-testid="pas-p60_threshold_s"]').element as HTMLInputElement).value).toBe('10')
     expect((wrapper.get('[data-testid="pas-mean_threshold_s"]').element as HTMLInputElement).value).toBe('15')
     expect((wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').element as HTMLInputElement).value).toBe('2')
+    expect((wrapper.get('[data-testid="pas-slow_demotion_hours"]').element as HTMLInputElement).value).toBe('24')
+    expect((wrapper.get('[data-testid="pas-slow_demotion_min_accounts"]').element as HTMLInputElement).value).toBe('2')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toBe('规则：统计过去 5 分钟，窗口里不少于 20 个请求，首字 p60 大于 10 秒且首字均值大于 15 秒，就自动更换代理。首字和耗时都取自使用记录的每个请求。')
 
     await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
@@ -153,6 +159,8 @@ describe('ProxyAutoSwitchView settings', () => {
     await wrapper.get('[data-testid="pas-p60_threshold_s"]').setValue('12.5')
     await wrapper.get('[data-testid="pas-mean_threshold_s"]').setValue('16.5')
     await wrapper.get('[data-testid="pas-max_accounts_per_proxy"]').setValue('3')
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('12')
+    await wrapper.get('[data-testid="pas-slow_demotion_min_accounts"]').setValue('3')
     await wrapper.get('[data-testid="pas-strategy-random"]').trigger('click')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('统计过去 7 分钟')
     expect(wrapper.get('[data-testid="pas-rule"]').text()).toContain('不少于 30 个请求')
@@ -172,8 +180,10 @@ describe('ProxyAutoSwitchView settings', () => {
       max_accounts_per_proxy: 3,
       candidate_proxy_ids: [],
       strategy: 'random',
+      slow_demotion_window_minutes: 720,
+      slow_demotion_min_accounts: 3,
     })
-    expect(Object.keys(payload).sort()).toEqual(['candidate_proxy_ids', 'enabled', 'group_ids', 'max_accounts_per_proxy', 'mean_threshold_ms', 'min_samples', 'p60_threshold_ms', 'strategy', 'window_minutes'])
+    expect(Object.keys(payload).sort()).toEqual(['candidate_proxy_ids', 'enabled', 'group_ids', 'max_accounts_per_proxy', 'mean_threshold_ms', 'min_samples', 'p60_threshold_ms', 'slow_demotion_min_accounts', 'slow_demotion_window_minutes', 'strategy', 'window_minutes'])
     expect(payload).not.toHaveProperty('metric')
     expect(payload).not.toHaveProperty('threshold_ms')
     expect(payload).not.toHaveProperty('consecutive_checks')
@@ -242,6 +252,30 @@ describe('ProxyAutoSwitchView settings', () => {
     wrapper = mountView(); await flushPromises()
     // 2 / 2 = 已满
     expect(wrapper.find('[data-proxy-id="68"] [data-testid="pas-proxy-note"]').exists()).toBe(true)
+  })
+
+  it('tags demoted pool proxies with how many accounts were slow on them', async () => {
+    api.getConfig.mockResolvedValue(config({ candidate_proxy_ids: [68, 42] }))
+    api.listProxies.mockResolvedValue([
+      proxy(68, { in_pool: true, slow_accounts: 3, demoted: true }),
+      proxy(42, { in_pool: true, slow_accounts: 1, demoted: false }),
+    ])
+    wrapper = mountView(); await flushPromises()
+    const tag = wrapper.get('[data-testid="pas-proxy-demoted-68"]')
+    expect(tag.text()).toBe('建议移出 · 3 个号判慢')
+    expect(tag.attributes('title')).toBe('最近 24 小时内有 3 个不同账号在这个代理上被判慢，换代理时已排到最后')
+    expect(wrapper.find('[data-testid="pas-proxy-demoted-42"]').exists()).toBe(false)
+  })
+
+  it('accepts 0 hours to turn soft demotion off and rejects out-of-range values', async () => {
+    wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('0')
+    expect(wrapper.find('[data-testid="pas-invalid"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('169')
+    expect(wrapper.get('[data-testid="pas-invalid"]').text()).toContain('1')
+    await wrapper.get('[data-testid="pas-slow_demotion_hours"]').setValue('24')
+    await wrapper.get('[data-testid="pas-slow_demotion_min_accounts"]').setValue('0')
+    expect(wrapper.find('[data-testid="pas-invalid"]').exists()).toBe(true)
   })
 
   it('switches strategy and shows the right aria-checked', async () => {
@@ -329,6 +363,151 @@ describe('ProxyAutoSwitchView account monitor', () => {
     expect(wrapper.get('[data-account-id="107"] [data-testid="pas-account-p60"]').text()).toBe('6.1s')
     expect(wrapper.get('[data-account-id="107"] [data-testid="pas-account-mean"]').text()).toBe('7.9s')
     expect(wrapper.get('[data-account-id="107"] [data-testid="pas-account-duration"]').text()).toBe('13.2s')
+  })
+
+  const accountRowIds = () => wrapper.findAll('[data-testid="pas-accounts"] tbody [data-account-id]').map(row => Number(row.attributes('data-account-id')))
+  const stateChip = (state: string) => wrapper.get(`[data-testid="pas-accounts-states"] [data-state-filter="${state}"]`)
+
+  it('pages 20 accounts per page by default, remembers the page size and keeps the page after a reload', async () => {
+    localStorage.removeItem('pas.accountPageSize')
+    const items = Array.from({ length: 45 }, (_, i) => account(1000 + i, 'ok'))
+    api.listAccounts.mockResolvedValue({ items, window_minutes: 5 })
+    wrapper = mountView(); await flushPromises()
+
+    expect(accountRowIds()).toHaveLength(20)
+    expect(accountRowIds()[0]).toBe(1000)
+    expect(wrapper.get('[data-testid="pas-accounts-page"]').text()).toBe('1 / 3')
+    expect(wrapper.get('[data-testid="pas-accounts-range"]').text()).toBe('第 1–20 条 · 共 45 条')
+    expect(wrapper.get('[data-testid="pas-accounts-prev"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="pas-accounts-next"]').trigger('click')
+    await wrapper.get('[data-testid="pas-accounts-next"]').trigger('click')
+    expect(accountRowIds()).toEqual([1040, 1041, 1042, 1043, 1044])
+    expect(wrapper.get('[data-testid="pas-accounts-next"]').attributes('disabled')).toBeDefined()
+
+    // 保存后重新加载：账号变少，页码退到最后一页。
+    api.listAccounts.mockResolvedValue({ items: items.slice(0, 30), window_minutes: 5 })
+    api.updateConfig.mockImplementation(async (payload: ProxyAutoSwitchConfig) => payload)
+    await wrapper.get('[data-testid="pas-enabled"]').trigger('click')
+    await wrapper.get('[data-testid="pas-settings"]').trigger('submit'); await flushPromises()
+    expect(api.listAccounts).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="pas-accounts-page"]').text()).toBe('2 / 2')
+    expect(accountRowIds()[0]).toBe(1020)
+
+    await wrapper.get('[data-testid="pas-accounts-page-size"]').setValue('50')
+    expect(accountRowIds()).toHaveLength(30)
+    expect(wrapper.get('[data-testid="pas-accounts-page"]').text()).toBe('1 / 1')
+    expect(localStorage.getItem('pas.accountPageSize')).toBe('50')
+    localStorage.removeItem('pas.accountPageSize')
+  })
+
+  it('searches by account id, account name and proxy, and goes back to page 1', async () => {
+    const items = [
+      ...Array.from({ length: 25 }, (_, i) => account(200 + i, 'ok')),
+      account(301, 'ok', { account_name: 'Team-Alpha', proxy_id: 19, proxy_label: 'JP东京-19' }),
+      account(302, 'no_proxy', { account_name: 'team-beta' }),
+    ]
+    api.listAccounts.mockResolvedValue({ items, window_minutes: 5 })
+    wrapper = mountView(); await flushPromises()
+    await wrapper.get('[data-testid="pas-accounts-next"]').trigger('click')
+    expect(wrapper.get('[data-testid="pas-accounts-page"]').text()).toBe('2 / 2')
+
+    const search = wrapper.get('[data-testid="pas-accounts-search"]')
+    await search.setValue('TEAM')
+    expect(accountRowIds()).toEqual([301, 302])
+    expect(wrapper.get('[data-testid="pas-accounts-page"]').text()).toBe('1 / 1')
+    await search.setValue('#301')
+    expect(accountRowIds()).toEqual([301])
+    await search.setValue('#19')
+    expect(accountRowIds()).toEqual([301])
+    await search.setValue('东京')
+    expect(accountRowIds()).toEqual([301])
+
+    await search.setValue('nobody')
+    expect(accountRowIds()).toEqual([])
+    expect(wrapper.find('[data-testid="pas-accounts-empty"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pas-accounts-no-match"]').text()).toContain('没有符合筛选条件的账号')
+    expect(wrapper.find('[data-testid="pas-accounts-pager"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="pas-accounts-clear"]').trigger('click')
+    expect(accountRowIds()).toHaveLength(20)
+  })
+
+  it('filters by state with per-state counts that follow the search', async () => {
+    api.listAccounts.mockResolvedValue({
+      window_minutes: 5,
+      items: [account(1, 'slow'), account(2, 'slow', { account_name: 'x-2' }), account(3, 'ok', { account_name: 'x-3' }), account(4, 'insufficient'), account(5, 'no_proxy'), account(6, 'unavailable')],
+    })
+    wrapper = mountView(); await flushPromises()
+
+    expect(stateChip('all').text()).toBe('全部6')
+    expect(stateChip('slow').text()).toBe('偏慢2')
+    expect(stateChip('ok').text()).toBe('正常1')
+    expect(stateChip('insufficient').text()).toBe('样本不足1')
+    expect(stateChip('no_proxy').text()).toBe('没有代理1')
+    expect(stateChip('unavailable').text()).toBe('不可用1')
+
+    await stateChip('slow').trigger('click')
+    expect(stateChip('slow').attributes('aria-pressed')).toBe('true')
+    expect(accountRowIds()).toEqual([1, 2])
+
+    // 数量按搜索后的结果算；状态和搜索同时生效。
+    await wrapper.get('[data-testid="pas-accounts-search"]').setValue('x-')
+    expect(stateChip('all').text()).toBe('全部2')
+    expect(stateChip('slow').text()).toBe('偏慢1')
+    expect(stateChip('ok').text()).toBe('正常1')
+    expect(accountRowIds()).toEqual([2])
+
+    await stateChip('all').trigger('click')
+    expect(accountRowIds()).toEqual([2, 3])
+  })
+
+  it('shows a group filter only when more than one group is configured', async () => {
+    api.listAccounts.mockResolvedValue({
+      window_minutes: 5,
+      items: [account(1, 'ok', { group_ids: [16] }), account(2, 'ok', { group_ids: [20] }), account(3, 'ok', { group_ids: [16, 20] })],
+    })
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.find('[data-testid="pas-accounts-group"]').exists()).toBe(false)
+    wrapper.unmount()
+
+    api.getConfig.mockResolvedValue(config({ group_ids: [16, 20] }))
+    wrapper = mountView(); await flushPromises()
+    const select = wrapper.get('[data-testid="pas-accounts-group"]')
+    expect(select.findAll('option').map(option => option.text())).toEqual(['全部分组', 'GPT-速刷-AUTO', '1028GPT-PRO'])
+    await select.setValue('20')
+    expect(accountRowIds()).toEqual([2, 3])
+    expect(stateChip('all').text()).toBe('全部2')
+    await select.setValue('16')
+    expect(accountRowIds()).toEqual([1, 3])
+  })
+
+  it('sorts by clicking a column header: descending, ascending, then back to account order; empty values stay last', async () => {
+    api.listAccounts.mockResolvedValue({
+      window_minutes: 5,
+      items: [
+        account(1, 'ok', { p60_ms: 5000, last_switch_at: '2026-11-12T08:00:00Z' }),
+        account(2, 'unavailable', { last_switch_at: null }),
+        account(3, 'slow', { p60_ms: 12000, last_switch_at: '2026-11-13T08:00:00Z' }),
+        account(4, 'ok', { p60_ms: 8000, last_switch_at: null }),
+      ],
+    })
+    wrapper = mountView(); await flushPromises()
+    const header = (key: string) => wrapper.get(`[data-testid="pas-accounts"] [data-sort-key="${key}"]`)
+    expect(accountRowIds()).toEqual([1, 2, 3, 4])
+
+    await header('p60_ms').trigger('click')
+    expect(accountRowIds()).toEqual([3, 4, 1, 2])
+    expect(header('p60_ms').text()).toContain('↓')
+    expect(header('p60_ms').element.parentElement?.getAttribute('aria-sort')).toBe('descending')
+    await header('p60_ms').trigger('click')
+    expect(accountRowIds()).toEqual([1, 4, 3, 2])
+    expect(header('p60_ms').text()).toContain('↑')
+    await header('p60_ms').trigger('click')
+    expect(accountRowIds()).toEqual([1, 2, 3, 4])
+    expect(header('p60_ms').element.parentElement?.getAttribute('aria-sort')).toBe('none')
+
+    await header('last_switch_at').trigger('click')
+    expect(accountRowIds()).toEqual([3, 1, 2, 4])
   })
 })
 

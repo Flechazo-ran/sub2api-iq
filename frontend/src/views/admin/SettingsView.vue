@@ -18,36 +18,74 @@
             :aria-label="t('admin.settings.title')"
           >
             <div class="settings-tabs">
-              <button
-                v-for="tab in settingsTabs"
-                :key="tab.key"
-                :id="`settings-tab-${tab.key}`"
-                type="button"
-                role="tab"
-                :aria-selected="activeTab === tab.key"
-                :tabindex="activeTab === tab.key ? 0 : -1"
-                :class="[
-                  'settings-tab',
-                  activeTab === tab.key && 'settings-tab-active',
-                ]"
-                @click="selectSettingsTab(tab.key)"
-                @keydown="handleSettingsTabKeydown($event, tab.key)"
-              >
-                <span class="settings-tab-icon">
-                  <Icon :name="tab.icon" size="sm" />
-                </span>
-                <span class="settings-tab-label">{{
-                  t(`admin.settings.tabs.${tab.key}`)
-                }}</span>
-              </button>
+              <template v-for="tab in settingsTabs" :key="tab.key">
+                <button
+                  :id="`settings-tab-${tab.key}`"
+                  type="button"
+                  role="tab"
+                  :aria-selected="activeTab === tab.key"
+                  :tabindex="activeTab === tab.key ? 0 : -1"
+                  :class="[
+                    'settings-tab',
+                    activeTab === tab.key && 'settings-tab-active',
+                  ]"
+                  @click="selectSettingsTab(tab.key)"
+                  @keydown="handleSettingsTabKeydown($event, tab.key)"
+                >
+                  <span class="settings-tab-icon">
+                    <Icon :name="tab.icon" size="sm" />
+                  </span>
+                  <span class="settings-tab-label">{{
+                    t(`admin.settings.tabs.${tab.key}`)
+                  }}</span>
+                </button>
+                <NewFeatureBadge
+                  v-if="tab.key === 'features'"
+                  :notice-id="NEW_FEATURE_NOTICES.protocolFeatureSwitches"
+                  :user-id="authStore.user?.id"
+                  class="settings-tab-badge"
+                />
+                <NewFeatureBadge
+                  v-if="tab.key === 'email'"
+                  :notice-id="NEW_FEATURE_NOTICES.balanceForecast"
+                  :user-id="authStore.user?.id"
+                  class="settings-tab-badge"
+                />
+                <NewFeatureBadge
+                  v-if="tab.key === 'gateway'"
+                  :notice-id="NEW_FEATURE_NOTICES.openai409OmitEncryptedHistory"
+                  :user-id="authStore.user?.id"
+                  class="settings-tab-badge"
+                />
+                <NewFeatureBadge
+                  v-if="tab.key === 'gateway'"
+                  :notice-id="NEW_FEATURE_NOTICES.deepSeekSearch"
+                  :user-id="authStore.user?.id"
+                  class="settings-tab-badge"
+                />
+                <NewFeatureBadge
+                  v-if="tab.key === 'gateway'"
+                  :notice-id="NEW_FEATURE_NOTICES.serverlessIPRouting"
+                  :user-id="authStore.user?.id"
+                  class="settings-tab-badge"
+                />
+                <NewFeatureBadge
+                  v-if="tab.key === 'payment'"
+                  :notice-id="NEW_FEATURE_NOTICES.bepusdtPayment"
+                  :user-id="authStore.user?.id"
+                  class="settings-tab-badge"
+                />
+              </template>
             </div>
           </nav>
         </div>
 
         <!-- Tab: Security — Admin API Key -->
         <div v-show="activeTab === 'security'" class="space-y-6">
-          <!-- Admin API Key Settings -->
-          <div class="card">
+          <AdminAccessKeysSettings />
+          <!-- 已有全权密钥只提供轮换和删除入口。 -->
+          <details v-if="adminApiKeyExists" class="card">
+            <summary class="cursor-pointer px-6 py-4 font-medium">{{ t("adminAccessKeys.legacy") }}</summary>
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
@@ -84,48 +122,6 @@
                   class="h-4 w-4 animate-spin rounded-full border-b-2 border-primary-600"
                 ></div>
                 {{ t("common.loading") }}
-              </div>
-
-              <!-- No Key Configured -->
-              <div
-                v-else-if="!adminApiKeyExists"
-                class="flex items-center justify-between"
-              >
-                <span class="text-gray-500 dark:text-gray-400">
-                  {{ t("admin.settings.adminApiKey.notConfigured") }}
-                </span>
-                <button
-                  type="button"
-                  @click="createAdminApiKey"
-                  :disabled="adminApiKeyOperating"
-                  class="btn btn-primary btn-sm"
-                >
-                  <svg
-                    v-if="adminApiKeyOperating"
-                    class="mr-1 h-4 w-4 animate-spin"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      class="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      stroke-width="4"
-                    ></circle>
-                    <path
-                      class="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    ></path>
-                  </svg>
-                  {{
-                    adminApiKeyOperating
-                      ? t("admin.settings.adminApiKey.creating")
-                      : t("admin.settings.adminApiKey.create")
-                  }}
-                </button>
               </div>
 
               <!-- Key Exists -->
@@ -197,13 +193,13 @@
                 </div>
               </div>
             </div>
-          </div>
+          </details>
         </div>
         <!-- /Tab: Security — Admin API Key -->
 
         <!-- Tab: Gateway -->
         <div v-show="activeTab === 'gateway'" class="space-y-6">
-          <ServerlessSettings v-if="activeTab === 'gateway'" />
+          <ServerlessSettings v-if="activeTab === 'gateway'" :user-id="authStore.user?.id" />
           <div class="card" data-testid="prism-browser-settings">
             <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
               <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Prism 浏览器桥</h2>
@@ -603,6 +599,89 @@
                         ? t("common.saving")
                         : t("common.save")
                     }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+              <h2 id="settings-section-account-performance" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t('accountPerformance.settings.title') }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('accountPerformance.settings.description') }}</p>
+            </div>
+            <AccountPerformanceSettings />
+          </div>
+
+          <!-- OpenAI Response Header Timeout -->
+          <div class="card">
+            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+              <h2 id="settings-section-openai-response-header-timeout" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t("admin.settings.openaiResponseHeaderTimeout.title") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ t("admin.settings.openaiResponseHeaderTimeout.description") }}
+              </p>
+            </div>
+            <div class="space-y-5 p-6">
+              <div v-if="openAIResponseHeaderTimeoutLoading" class="flex items-center gap-2 text-gray-500">
+                <div class="h-4 w-4 animate-spin rounded-full border-b-2 border-primary-600"></div>
+                {{ t("common.loading") }}
+              </div>
+              <div v-else-if="openAIResponseHeaderTimeoutLoadFailed" role="alert">
+                {{ t("admin.settings.openaiResponseHeaderTimeout.loadFailed") }}
+                <button type="button" @click="loadOpenAIResponseHeaderTimeoutSettings" class="btn btn-secondary btn-sm">{{ t("common.refresh") }}</button>
+              </div>
+              <template v-else>
+                <div class="flex items-center justify-between">
+                  <div>
+                    <label class="font-medium text-gray-900 dark:text-white">{{ t("admin.settings.openaiResponseHeaderTimeout.enabled") }}</label>
+                    <p class="text-sm text-gray-500 dark:text-gray-400">{{ t("admin.settings.openaiResponseHeaderTimeout.enabledHint") }}</p>
+                  </div>
+                  <Toggle v-model="openAIResponseHeaderTimeoutForm.enabled" data-testid="openai-header-timeout-enabled" />
+                </div>
+                <div v-if="openAIResponseHeaderTimeoutForm.enabled">
+                  <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {{ t("admin.settings.openaiResponseHeaderTimeout.seconds") }}
+                  </label>
+                  <input data-testid="openai-header-timeout-seconds" v-model.number="openAIResponseHeaderTimeoutForm.seconds" type="number" min="1" max="600" class="input w-32" />
+                  <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">{{ t("admin.settings.openaiResponseHeaderTimeout.secondsHint") }}</p>
+                </div>
+                <div v-if="openAIResponseHeaderTimeoutForm.enabled" class="space-y-4 border-t border-gray-100 pt-4 dark:border-dark-700">
+                  <div>
+                    <h3 class="flex items-center gap-2 font-medium text-gray-900 dark:text-white">
+                      {{ t("admin.settings.openaiResponseHeaderTimeout.imageTitle") }}
+                      <NewFeatureBadge
+                        :notice-id="NEW_FEATURE_NOTICES.openaiImageHeaderTimeoutGroups"
+                        :user-id="authStore.user?.id"
+                      />
+                    </h3>
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t("admin.settings.openaiResponseHeaderTimeout.imageHint") }}</p>
+                  </div>
+                  <GroupSelector
+                    v-model="openAIResponseHeaderTimeoutForm.image_group_ids"
+                    data-testid="openai-image-header-timeout-groups"
+                    :groups="openAIImageTimeoutGroups"
+                    :label="t('admin.settings.openaiResponseHeaderTimeout.imageGroups')"
+                    platform="openai"
+                  />
+                  <div>
+                    <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ t("admin.settings.openaiResponseHeaderTimeout.imageSeconds") }}
+                    </label>
+                    <input data-testid="openai-image-header-timeout-seconds" v-model.number="openAIResponseHeaderTimeoutForm.image_seconds" type="number" min="1" max="600" class="input w-32" />
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">{{ t("admin.settings.openaiResponseHeaderTimeout.imageSecondsHint") }}</p>
+                  </div>
+                </div>
+                <div class="flex justify-end border-t border-gray-100 pt-4 dark:border-dark-700">
+                  <button data-testid="openai-header-timeout-save" type="button" @click="saveOpenAIResponseHeaderTimeoutSettings" :disabled="openAIResponseHeaderTimeoutSaving" class="btn btn-primary btn-sm">
+                    <svg v-if="openAIResponseHeaderTimeoutSaving" class="mr-1 h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    {{ openAIResponseHeaderTimeoutSaving ? t("common.saving") : t("common.save") }}
                   </button>
                 </div>
               </template>
@@ -5148,6 +5227,12 @@
                         >
                           {{ platform }}
                         </label>
+                        <NewFeatureBadge
+                          v-if="platform === 'mistral'"
+                          :notice-id="NEW_FEATURE_NOTICES.mistralBudgetUsage"
+                          :user-id="authStore.user?.id"
+                          class="ml-2"
+                        />
                         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
                           {{
                             t(
@@ -5447,6 +5532,11 @@
                     data-testid="grok-video-source-url-toggle"
                   />
                 </div>
+
+              <EncryptedHistory409Settings
+                v-model="form.openai_409_omit_encrypted_history_enabled"
+                :user-id="authStore.user?.id"
+              />
 
               <!-- OpenAI Responses 首 token 统计 -->
               <div class="border-b border-gray-100 pb-5 dark:border-dark-700 md:col-span-2">
@@ -6019,9 +6109,12 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 id="settings-section-web-search-emulation" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
-                {{ t("admin.settings.webSearchEmulation.title") }}
-              </h2>
+              <div class="flex items-center gap-2">
+                <h2 id="settings-section-web-search-emulation" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+                  {{ t("admin.settings.webSearchEmulation.title") }}
+                </h2>
+                <NewFeatureBadge :notice-id="NEW_FEATURE_NOTICES.deepSeekSearch" :user-id="authStore.user?.id" />
+              </div>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                 {{ t("admin.settings.webSearchEmulation.description") }}
               </p>
@@ -6096,8 +6189,15 @@
                         :options="[
                           { value: 'brave', label: 'Brave Search' },
                           { value: 'tavily', label: 'Tavily' },
+                          { value: 'deepseek', label: 'DeepSeek' },
                         ]"
                         class="w-36"
+                        @click.stop
+                      />
+                      <NewFeatureBadge
+                        v-if="provider.type === 'deepseek'"
+                        :notice-id="NEW_FEATURE_NOTICES.deepSeekSearch"
+                        :user-id="authStore.user?.id"
                         @click.stop
                       />
                       <!-- Quota summary (always visible) -->
@@ -6140,6 +6240,9 @@
                     v-if="expandedProviders[pIdx]"
                     class="space-y-3 border-t border-gray-100 px-4 pb-4 pt-3 dark:border-dark-700"
                   >
+                    <p v-if="provider.type === 'deepseek'" class="text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.webSearchEmulation.deepSeekHint") }}
+                    </p>
                     <!-- API Key with inline show/copy -->
                     <div>
                       <label class="text-xs text-gray-500">{{
@@ -7022,20 +7125,52 @@
                 </div>
 
                 <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <!-- Label -->
+                  <!-- Localized labels -->
                   <div>
                     <label
                       class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
                     >
-                      {{ t("admin.settings.customMenu.name") }}
+                      {{ t("admin.settings.customMenu.nameZh") }}
+                    </label>
+                    <input
+                      v-model="item.label_zh"
+                      type="text"
+                      class="input text-sm"
+                      maxlength="50"
+                      :placeholder="t('admin.settings.customMenu.nameZhPlaceholder')"
+                      data-testid="custom-menu-label-zh"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                    >
+                      {{ t("admin.settings.customMenu.nameEn") }}
+                    </label>
+                    <input
+                      v-model="item.label_en"
+                      type="text"
+                      class="input text-sm"
+                      maxlength="50"
+                      :placeholder="t('admin.settings.customMenu.nameEnPlaceholder')"
+                      data-testid="custom-menu-label-en"
+                    />
+                  </div>
+
+                  <!-- Legacy label fallback -->
+                  <div>
+                    <label
+                      class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                    >
+                      {{ t("admin.settings.customMenu.fallbackName") }}
                     </label>
                     <input
                       v-model="item.label"
                       type="text"
                       class="input text-sm"
-                      :placeholder="
-                        t('admin.settings.customMenu.namePlaceholder')
-                      "
+                      maxlength="50"
+                      :placeholder="t('admin.settings.customMenu.fallbackNamePlaceholder')"
+                      data-testid="custom-menu-label-fallback"
                     />
                   </div>
 
@@ -7107,6 +7242,7 @@
               <button
                 type="button"
                 class="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 py-3 text-sm text-gray-500 transition-colors hover:border-primary-400 hover:text-primary-600 dark:border-dark-600 dark:text-gray-400 dark:hover:border-primary-500 dark:hover:text-primary-400"
+                data-testid="custom-menu-add"
                 @click="addMenuItem"
               >
                 <svg
@@ -7333,9 +7469,16 @@
 
         <!-- Tab: Features (功能开关) -->
         <div v-show="activeTab === 'features'" class="space-y-6">
+        <SmartOpsSidebarSettings v-model="form.smart_ops_hidden_menu_items" />
         <div class="card" data-testid="protocol-feature-switches">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">协议功能</h2>
+            <h2 class="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+              协议功能
+              <NewFeatureBadge
+                :notice-id="NEW_FEATURE_NOTICES.protocolFeatureSwitches"
+                :user-id="authStore.user?.id"
+              />
+            </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">关闭后立即停止使用对应协议，并隐藏账号编辑中的相关选项。</p>
           </div>
           <div class="space-y-5 p-6">
@@ -8531,8 +8674,8 @@
                           ) || 1
                       "
                       type="number"
-                      step="0.01"
-                      min="0.01"
+                      step="0.000001"
+                      min="0.000001"
                       class="input"
                     />
                     <p class="mt-0.5 text-xs text-gray-400">
@@ -8547,10 +8690,10 @@
                     >
                       {{
                         t("admin.settings.payment.balanceRechargePreview", {
-                          usd: (
+                          usd: formatBalanceRechargeMultiplier(
                             Number(form.payment_balance_recharge_multiplier) ||
-                            1
-                          ).toFixed(2),
+                              1,
+                          ),
                         })
                       }}
                     </p>
@@ -8590,6 +8733,7 @@
                     <div class="relative">
                       <input
                         :value="form.payment_recharge_fee_rate ?? ''"
+                        data-testid="payment-global-fee-rate"
                         @input="
                           form.payment_recharge_fee_rate = Math.min(
                             100,
@@ -8831,20 +8975,30 @@
                     t("admin.settings.payment.enabledPaymentTypes")
                   }}</label>
                   <div class="mt-1.5 flex flex-wrap gap-2">
-                    <button
+                    <div
                       v-for="pt in allPaymentTypes"
                       :key="pt.value"
-                      type="button"
-                      @click="togglePaymentType(pt.value)"
-                      :class="[
-                        'rounded-lg border px-3 py-1.5 text-sm font-medium transition-all',
-                        isPaymentTypeEnabled(pt.value)
-                          ? 'border-primary-500 bg-primary-500 text-white shadow-sm'
-                          : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400 hover:bg-gray-50 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:hover:border-dark-500',
-                      ]"
+                      class="inline-flex items-center gap-2"
                     >
-                      {{ pt.label }}
-                    </button>
+                      <button
+                        type="button"
+                        :data-testid="pt.value === 'bepusdt' ? 'bepusdt-payment-type' : undefined"
+                        @click="togglePaymentType(pt.value)"
+                        :class="[
+                          'rounded-lg border px-3 py-1.5 text-sm font-medium transition-all',
+                          isPaymentTypeEnabled(pt.value)
+                            ? 'border-primary-500 bg-primary-500 text-white shadow-sm'
+                            : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400 hover:bg-gray-50 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:hover:border-dark-500',
+                        ]"
+                      >
+                        {{ pt.label }}
+                      </button>
+                      <NewFeatureBadge
+                        v-if="pt.value === 'bepusdt'"
+                        :notice-id="NEW_FEATURE_NOTICES.bepusdtPayment"
+                        :user-id="authStore.user?.id"
+                      />
+                    </div>
                   </div>
                   <p class="mt-2 text-xs text-gray-400 dark:text-gray-500">
                     {{ t("admin.settings.payment.enabledPaymentTypesHint") }}
@@ -8913,14 +9067,20 @@
           />
 
           <!-- Provider Management -->
+          <BEpusdtManager
+            v-if="form.payment_enabled && form.payment_enabled_types.includes('bepusdt')"
+            :user-id="authStore.user?.id"
+          />
           <PaymentProviderList
             v-if="form.payment_enabled"
             :providers="providers"
+            :global-fee-rate="savedPaymentFeeRate"
             :loading="providersLoading"
             :can-create="hasAnyPaymentTypeEnabled"
             :enabled-payment-types="form.payment_enabled_types"
             :all-payment-types="allPaymentTypes"
             :redirect-label="t('admin.settings.payment.easypayRedirect')"
+            :user-id="authStore.user?.id"
             @refresh="loadProviders"
             @create="openCreateProvider"
             @edit="openEditProvider"
@@ -9214,6 +9374,13 @@
 
           <EmailTemplateEditor />
 
+          <BalanceForecastSettings
+            v-model:enabled="form.balance_forecast_enabled"
+            v-model:threshold-hours="form.balance_forecast_threshold_hours"
+            v-model:max-notifications="form.balance_forecast_max_notifications"
+            :user-id="authStore.user?.id"
+          />
+
           <!-- Balance Low Notification -->
           <div class="card">
             <div
@@ -9357,8 +9524,9 @@
           <BackupSettings />
         </div>
 
-        <!-- Save Button -->
-        <div v-show="activeTab !== 'backup'" class="flex justify-end">
+        <!-- Save dock — sticky so long tabs never require scrolling to the end -->
+        <div v-show="activeTab !== 'backup'" class="settings-save-dock">
+          <NewFeatureBadge :notice-id="NEW_FEATURE_NOTICES.settingsSaveDock" :user-id="authStore.user?.id" />
           <button
             type="submit"
             :disabled="saving || loadFailed"
@@ -9399,10 +9567,12 @@
         :show="showProviderDialog"
         :saving="providerSaving"
         :editing="editingProvider"
+        :global-fee-rate="savedPaymentFeeRate"
         :all-key-options="providerKeyOptions"
         :enabled-key-options="enabledProviderKeyOptions"
         :all-payment-types="allPaymentTypes"
         :redirect-label="t('admin.settings.payment.easypayRedirect')"
+        :user-id="authStore.user?.id"
         @close="showProviderDialog = false"
         @save="handleSaveProvider"
       />
@@ -9431,6 +9601,7 @@
 </template>
 
 <script setup lang="ts">
+import EncryptedHistory409Settings from "@/components/settings/EncryptedHistory409Settings.vue";
 import { excelBPSImageLimits } from "@/utils/excelBPSImageLimits";
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { listPlatformIds } from "@/constants/platformCatalog";
@@ -9490,9 +9661,11 @@ import {
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import PaymentProviderList from "@/components/payment/PaymentProviderList.vue";
 import PaymentProviderDialog from "@/components/payment/PaymentProviderDialog.vue";
+import BEpusdtManager from "@/components/payment/BEpusdtManager.vue";
 import GroupBadge from "@/components/common/GroupBadge.vue";
 import GroupOptionItem from "@/components/common/GroupOptionItem.vue";
 import RequestTimezoneSettings from "@/components/settings/RequestTimezoneSettings.vue";
+import AccountPerformanceSettings from "@/components/settings/AccountPerformanceSettings.vue";
 import Toggle from "@/components/common/Toggle.vue";
 import ProxySelector from "@/components/common/ProxySelector.vue";
 import ImageUpload from "@/components/common/ImageUpload.vue";
@@ -9515,11 +9688,19 @@ import {
   isStepUpBlocked,
   stepUpBlockReason,
 } from "@/composables/useStepUp";
+import AdminAccessKeysSettings from "@/components/admin/settings/AdminAccessKeysSettings.vue";
 import TotpStepUpDialog from "@/components/auth/TotpStepUpDialog.vue";
 import { affiliatesAPI, type AffiliateAdminEntry, type SimpleUser as AffiliateSimpleUser } from "@/api/admin/affiliates";
 import { extractApiErrorMessage, extractI18nErrorMessage } from "@/utils/apiError";
-import { useAppStore } from "@/stores";
+import { useAppStore, useAuthStore } from "@/stores";
+import { formatBalanceRechargeMultiplier } from "@/utils/rechargeBonus";
 import { useAdminSettingsStore } from "@/stores/adminSettings";
+import BalanceForecastSettings from "@/components/settings/BalanceForecastSettings.vue";
+import SmartOpsSidebarSettings from "@/components/settings/SmartOpsSidebarSettings.vue";
+import NewFeatureBadge from "@/components/common/NewFeatureBadge.vue";
+import GroupSelector from "@/components/common/GroupSelector.vue";
+import { NEW_FEATURE_NOTICES } from "@/constants/newFeatureNotices";
+import { DEFAULT_SMART_OPS_HIDDEN_MENU_ITEMS } from "@/constants/smartOpsMenu";
 import { normalizeVisibleMethod } from "@/components/payment/paymentFlow";
 import {
   isRegistrationEmailSuffixDomainValid,
@@ -9536,6 +9717,7 @@ import {
 
 const { t, locale } = useI18n();
 const appStore = useAppStore();
+const authStore = useAuthStore();
 // 关闭 step-up 开关是敏感操作：后端返回 STEP_UP_REQUIRED 时弹 TOTP 码重试
 const settingsStepUp = useStepUp();
 const adminSettingsStore = useAdminSettingsStore();
@@ -9637,6 +9819,7 @@ const adminApiKeyMasked = ref("");
 const adminApiKeyOperating = ref(false);
 const newAdminApiKey = ref("");
 const subscriptionGroups = ref<AdminGroup[]>([]);
+const openAIImageTimeoutGroups = ref<AdminGroup[]>([]);
 // Upstream billing probe state
 const upstreamBillingProbeLoading = ref(true);
 const upstreamBillingProbeSaving = ref(false);
@@ -9697,6 +9880,17 @@ const streamTimeoutForm = reactive({
   temp_unsched_minutes: 5,
   threshold_count: 3,
   threshold_window_minutes: 10,
+});
+
+// OpenAI Response Header Timeout 状态
+const openAIResponseHeaderTimeoutLoading = ref(true);
+const openAIResponseHeaderTimeoutLoadFailed = ref(false);
+const openAIResponseHeaderTimeoutSaving = ref(false);
+const openAIResponseHeaderTimeoutForm = reactive({
+  enabled: false,
+  seconds: 20,
+  image_group_ids: [] as number[],
+  image_seconds: 180,
 });
 
 // Rectifier 状态
@@ -10318,6 +10512,8 @@ const form = reactive<SettingsForm>({
   custom_menu_items: [] as Array<{
     id: string;
     label: string;
+    label_zh?: string;
+    label_en?: string;
     icon_svg: string;
     url: string;
     visibility: "user" | "admin";
@@ -10452,6 +10648,7 @@ const form = reactive<SettingsForm>({
   grok_cross_client_model_map_enabled: false,
   grok_default_base_url_mode: "cli",
   grok_video_source_url_enabled: false,
+  openai_409_omit_encrypted_history_enabled: false,
   // Identity patch (Claude -> Gemini)
   enable_identity_patch: true,
   identity_patch_prompt: "",
@@ -10512,6 +10709,9 @@ const form = reactive<SettingsForm>({
   codex_cli_only_allow_app_server_clients: false,
   codex_cli_only_engine_fingerprint_signals: "",
   // 余额、订阅到期与账号限额通知
+  balance_forecast_enabled: false,
+  balance_forecast_threshold_hours: 12,
+  balance_forecast_max_notifications: 3,
   balance_low_notify_enabled: false,
   balance_low_notify_threshold: 0,
   balance_low_notify_recharge_url: "",
@@ -10547,6 +10747,7 @@ const form = reactive<SettingsForm>({
   usage_show_cache_rate: true,
   usage_show_cache_rate_to_users: false,
   usage_show_upstream_response_model_to_users: false,
+  smart_ops_hidden_menu_items: [...DEFAULT_SMART_OPS_HIDDEN_MENU_ITEMS],
   request_capture_enabled: false,
   request_capture_quota_mib: 1024,
   request_capture_retention_days: 7,
@@ -11341,6 +11542,8 @@ function addMenuItem() {
   form.custom_menu_items.push({
     id: "",
     label: "",
+    label_zh: "",
+    label_en: "",
     icon_svg: "",
     url: "",
     visibility: "user",
@@ -11543,6 +11746,10 @@ async function loadSettings() {
   loadFailed.value = false;
   try {
     const settings = await adminAPI.settings.getSettings();
+    savedPaymentFeeRate.value = settings.payment_recharge_fee_rate ?? 0;
+    settings.balance_forecast_enabled ??= false;
+    settings.balance_forecast_threshold_hours ??= 12;
+    settings.balance_forecast_max_notifications ??= 3;
     settings.payment_load_balance_strategy =
       settings.payment_load_balance_strategy || "round-robin";
     // Only assign non-null values from backend (null means unconfigured, keep defaults)
@@ -11551,6 +11758,7 @@ async function loadSettings() {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    form.smart_ops_hidden_menu_items = [...(settings.smart_ops_hidden_menu_items ?? DEFAULT_SMART_OPS_HIDDEN_MENU_ITEMS)];
     // For this optional override, null explicitly selects per-account rates.
     if (settings.openai_oauth_scheduling_rate_multiplier === null) {
       form.openai_oauth_scheduling_rate_multiplier = null;
@@ -11821,6 +12029,10 @@ const siteBillingModeHint = computed(() =>
 );
 
 async function saveSettings() {
+  if (!Number.isFinite(form.balance_forecast_threshold_hours) || form.balance_forecast_threshold_hours <= 0 || form.balance_forecast_threshold_hours > 168 || !Number.isInteger(form.balance_forecast_max_notifications) || form.balance_forecast_max_notifications < 1 || form.balance_forecast_max_notifications > 10) {
+    appStore.showError(t('admin.settings.balanceForecast.invalid'));
+    return;
+  }
   saving.value = true;
   try {
     const imageBaseUrl = form.excel_bps_image_base_url.trim();
@@ -12075,7 +12287,10 @@ async function saveSettings() {
       hide_ccs_import_button: form.hide_ccs_import_button,
       table_default_page_size: form.table_default_page_size,
       table_page_size_options: form.table_page_size_options,
-      custom_menu_items: form.custom_menu_items,
+      custom_menu_items: form.custom_menu_items.map((item) => ({
+        ...item,
+        label: item.label.trim() || item.label_zh?.trim() || item.label_en?.trim() || "",
+      })),
       custom_endpoints: form.custom_endpoints,
       frontend_url: form.frontend_url,
       smtp_host: form.smtp_host,
@@ -12204,6 +12419,7 @@ async function saveSettings() {
         form.grok_cross_client_model_map_enabled,
       grok_default_base_url_mode: form.grok_default_base_url_mode,
       grok_video_source_url_enabled: form.grok_video_source_url_enabled,
+      openai_409_omit_encrypted_history_enabled: form.openai_409_omit_encrypted_history_enabled,
       enable_identity_patch: form.enable_identity_patch,
       identity_patch_prompt: form.identity_patch_prompt,
       min_claude_code_version: form.min_claude_code_version,
@@ -12326,6 +12542,9 @@ async function saveSettings() {
       openai_advanced_scheduler_weight_session_sticky:
         form.openai_advanced_scheduler_weight_session_sticky.trim(),
       // 余额、订阅到期与账号限额通知
+      balance_forecast_enabled: form.balance_forecast_enabled,
+      balance_forecast_threshold_hours: form.balance_forecast_threshold_hours,
+      balance_forecast_max_notifications: form.balance_forecast_max_notifications,
       balance_low_notify_enabled: form.balance_low_notify_enabled,
       balance_low_notify_threshold:
         Number(form.balance_low_notify_threshold) || 0,
@@ -12370,6 +12589,7 @@ async function saveSettings() {
       usage_show_cache_rate: form.usage_show_cache_rate,
       usage_show_cache_rate_to_users: form.usage_show_cache_rate_to_users,
       usage_show_upstream_response_model_to_users: form.usage_show_upstream_response_model_to_users,
+      smart_ops_hidden_menu_items: form.smart_ops_hidden_menu_items,
       request_capture_enabled: form.request_capture_enabled,
       request_capture_quota_mib: form.request_capture_quota_mib,
       request_capture_retention_days: form.request_capture_retention_days,
@@ -12432,12 +12652,15 @@ async function saveSettings() {
     const updated = await settingsStepUp.run(() =>
       adminAPI.settings.updateSettings(payload),
     );
+    savedPaymentFeeRate.value = updated.payment_recharge_fee_rate ?? savedPaymentFeeRate.value;
+    adminSettingsStore.smartOpsHiddenMenuItems = [...(updated.smart_ops_hidden_menu_items ?? DEFAULT_SMART_OPS_HIDDEN_MENU_ITEMS)];
     for (const [key, value] of Object.entries(updated)) {
       if (key === "openai_fast_policy_settings") continue;
       if (value !== null && value !== undefined) {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    form.smart_ops_hidden_menu_items = [...adminSettingsStore.smartOpsHiddenMenuItems];
     if (updated.openai_oauth_scheduling_rate_multiplier === null) {
       form.openai_oauth_scheduling_rate_multiplier = null;
     }
@@ -12617,15 +12840,17 @@ async function loadAdminApiKey() {
 }
 
 async function createAdminApiKey() {
+  if (!adminApiKeyExists.value) return;
   adminApiKeyOperating.value = true;
   try {
-    const result = await adminAPI.settings.regenerateAdminApiKey();
+    const result = await settingsStepUp.run(() => adminAPI.settings.regenerateAdminApiKey());
     newAdminApiKey.value = result.key;
     adminApiKeyExists.value = true;
     adminApiKeyMasked.value =
       result.key.substring(0, 10) + "..." + result.key.slice(-4);
     appStore.showSuccess(t("admin.settings.adminApiKey.keyGenerated"));
   } catch (error: unknown) {
+    if (isStepUpCancelled(error)) return;
     appStore.showError(extractApiErrorMessage(error, t("common.error")));
   } finally {
     adminApiKeyOperating.value = false;
@@ -12641,12 +12866,13 @@ async function deleteAdminApiKey() {
   if (!confirm(t("admin.settings.adminApiKey.deleteConfirm"))) return;
   adminApiKeyOperating.value = true;
   try {
-    await adminAPI.settings.deleteAdminApiKey();
+    await settingsStepUp.run(() => adminAPI.settings.deleteAdminApiKey());
     adminApiKeyExists.value = false;
     adminApiKeyMasked.value = "";
     newAdminApiKey.value = "";
     appStore.showSuccess(t("admin.settings.adminApiKey.keyDeleted"));
   } catch (error: unknown) {
+    if (isStepUpCancelled(error)) return;
     appStore.showError(extractApiErrorMessage(error, t("common.error")));
   } finally {
     adminApiKeyOperating.value = false;
@@ -12902,6 +13128,47 @@ async function saveStreamTimeoutSettings() {
   }
 }
 
+// OpenAI Response Header Timeout 方法
+async function loadOpenAIResponseHeaderTimeoutSettings() {
+  openAIResponseHeaderTimeoutLoading.value = true;
+  openAIResponseHeaderTimeoutLoadFailed.value = false;
+  try {
+    const [settings, groups] = await Promise.all([
+      adminAPI.settings.getOpenAIResponseHeaderTimeoutSettings(),
+      adminAPI.groups.getAll(),
+    ]);
+    Object.assign(openAIResponseHeaderTimeoutForm, settings);
+    openAIImageTimeoutGroups.value = groups;
+  } catch (_error: unknown) {
+    openAIResponseHeaderTimeoutLoadFailed.value = true;
+  } finally {
+    openAIResponseHeaderTimeoutLoading.value = false;
+  }
+}
+
+async function saveOpenAIResponseHeaderTimeoutSettings() {
+  openAIResponseHeaderTimeoutSaving.value = true;
+  try {
+    const updated = await adminAPI.settings.updateOpenAIResponseHeaderTimeoutSettings({
+      enabled: openAIResponseHeaderTimeoutForm.enabled,
+      seconds: openAIResponseHeaderTimeoutForm.seconds,
+      image_group_ids: openAIResponseHeaderTimeoutForm.image_group_ids,
+      image_seconds: openAIResponseHeaderTimeoutForm.image_seconds,
+    });
+    Object.assign(openAIResponseHeaderTimeoutForm, updated);
+    appStore.showSuccess(t("admin.settings.openaiResponseHeaderTimeout.saved"));
+  } catch (error: unknown) {
+    appStore.showError(
+      extractApiErrorMessage(
+        error,
+        t("admin.settings.openaiResponseHeaderTimeout.saveFailed"),
+      ),
+    );
+  } finally {
+    openAIResponseHeaderTimeoutSaving.value = false;
+  }
+}
+
 // Rectifier 方法
 async function loadRectifierSettings() {
   rectifierLoading.value = true;
@@ -13147,6 +13414,7 @@ async function saveBetaPolicySettings() {
 // ==================== Provider Management ====================
 
 const allPaymentTypes = computed(() => [
+  { value: "bepusdt", label: t("admin.settings.payment.providerBEpusdt") },
   { value: "easypay", label: t("payment.methods.easypay") },
   { value: "alipay", label: t("payment.methods.alipay") },
   { value: "wxpay", label: t("payment.methods.wxpay") },
@@ -13195,6 +13463,8 @@ function slog(...args: unknown[]) {
 const providersLoading = ref(false);
 const providerSaving = ref(false);
 const providers = ref<ProviderInstance[]>([]);
+// Provider dialogs save independently; unsaved global form edits are not effective rates.
+const savedPaymentFeeRate = ref<number>();
 const showProviderDialog = ref(false);
 const showDeleteProviderDialog = ref(false);
 const editingProvider = ref<ProviderInstance | null>(null);
@@ -13204,6 +13474,7 @@ const providerDialogRef = ref<InstanceType<
 > | null>(null);
 
 const providerKeyOptions = computed(() => [
+  { value: "bepusdt", label: t("admin.settings.payment.providerBEpusdt") },
   { value: "easypay", label: t("admin.settings.payment.providerEasypay") },
   { value: "alipay", label: t("admin.settings.payment.providerAlipay") },
   { value: "wxpay", label: t("admin.settings.payment.providerWxpay") },
@@ -13515,6 +13786,7 @@ onMounted(() => {
   loadRateLimit429CooldownSettings();
   loadPanelRateLimitSettings();
   loadStreamTimeoutSettings();
+  loadOpenAIResponseHeaderTimeoutSettings();
   loadRectifierSettings();
   loadBetaPolicySettings();
   loadProviders();
@@ -13940,11 +14212,7 @@ h2[id^="settings-section-"]:target {
   }
 
   .settings-tab {
-    @apply min-w-0 flex-1 basis-0 overflow-hidden px-2 text-[13px];
-  }
-
-  .settings-tab-icon {
-    @apply h-6 w-6;
+    @apply min-w-0 flex-1 basis-0 overflow-hidden px-1.5 text-[13px];
   }
 }
 
@@ -13986,7 +14254,7 @@ h2[id^="settings-section-"]:target {
 }
 
 .settings-tab-icon {
-  @apply flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors duration-200 dark:text-gray-400;
+  @apply flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors duration-200 dark:text-gray-400 md:h-6 md:w-6;
 }
 
 .settings-tab:hover .settings-tab-icon,
@@ -14000,6 +14268,20 @@ h2[id^="settings-section-"]:target {
 
 .settings-tab-label {
   @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap leading-none;
+}
+
+/* The badge is a normal flex item: its width follows the locale's text, and
+   dismissing it hands the space back to the tabs. */
+.settings-tab-badge {
+  @apply -ml-0.5 mr-0.5;
+}
+
+/* ============ 系统设置 保存浮标 ============ */
+.settings-save-dock {
+  @apply sticky bottom-3 z-20 ml-auto flex w-fit items-center rounded-full border border-white/80 bg-white/90 p-1.5 backdrop-blur-xl;
+  box-shadow:
+    0 10px 26px rgb(15 23 42 / 0.12),
+    0 1px 0 rgb(255 255 255 / 0.9) inset;
 }
 </style>
 
@@ -14023,5 +14305,13 @@ h2[id^="settings-section-"]:target {
   box-shadow:
     0 12px 26px rgb(0 0 0 / 0.22),
     0 1px 0 rgb(255 255 255 / 0.08) inset;
+}
+
+.dark .settings-save-dock {
+  border-color: rgb(51 65 85 / 0.65);
+  background: rgb(15 23 42 / 0.86);
+  box-shadow:
+    0 14px 32px rgb(0 0 0 / 0.34),
+    0 1px 0 rgb(255 255 255 / 0.06) inset;
 }
 </style>

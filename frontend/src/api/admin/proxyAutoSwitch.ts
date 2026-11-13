@@ -17,6 +17,9 @@ export interface ProxyAutoSwitchConfig {
   // 代理池：人工从 IP 管理里选进来的代理 ID，换代理只从这里挑。
   candidate_proxy_ids: number[]
   strategy: ProxyAutoSwitchStrategy
+  // 软降级：窗口内被这么多个不同账号判慢的代理，换代理时排到最后（不移出池子）。窗口 0 = 关闭。
+  slow_demotion_window_minutes: number
+  slow_demotion_min_accounts: number
 }
 
 export type ProxyAutoSwitchUpdate = ProxyAutoSwitchConfig
@@ -104,6 +107,9 @@ export interface ProxyAutoSwitchProxy {
   account_count: number
   // 已保存的代理池里有没有它（页面上的草稿以 candidate_proxy_ids 为准）
   in_pool: boolean
+  // 软降级窗口内有几个不同账号在它上面被判慢；达到门槛时 demoted 为 true
+  slow_accounts: number
+  demoted: boolean
 }
 
 export interface ProxyAutoSwitchRecent {

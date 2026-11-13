@@ -15,6 +15,7 @@ type PelicanTestConfig struct {
 	QualityModelActions      map[string]string         `json:"quality_model_actions,omitempty"`
 	TriggerSource            string                    `json:"trigger_source,omitempty"`
 	RandomQuestion           *QualityRandomQuestion    `json:"random_question,omitempty"`
+	QualityBatch             *QualityBatchEvidence     `json:"quality_batch,omitempty"`
 	// Filled only on saved result snapshots: the signature of the candy prompt used for this run.
 	CandyVariant string `json:"candy_variant,omitempty"`
 	// BPSRecoveryPending is filled from persisted ownership when the runner
@@ -26,11 +27,15 @@ type PelicanTestConfig struct {
 	FieldWatch bool `json:"field_watch,omitempty"`
 	// FieldWatchMismatch 只在结果快照上设置：字段看护显示降智（连续 3 次无 safety_buffering），
 	// 但糖果题复核答对，未处置，只作警告。
-	FieldWatchMismatch bool   `json:"field_watch_mismatch,omitempty"`
-	TestChannel        string `json:"test_channel,omitempty"`
-	Prompt             string `json:"prompt"`
-	ReasoningEffort    string `json:"reasoning_effort"`
-	ParallelCount      int    `json:"parallel_count"`
+	FieldWatchMismatch bool `json:"field_watch_mismatch,omitempty"`
+	// Empty mode preserves the exact prompt of legacy/custom plans.
+	PromptMode      string           `json:"prompt_mode,omitempty"`
+	PelicanQuestion *PelicanQuestion `json:"pelican_question,omitempty"`
+	ActualPrompt    string           `json:"actual_prompt,omitempty"`
+	TestChannel     string           `json:"test_channel,omitempty"`
+	Prompt          string           `json:"prompt"`
+	ReasoningEffort string           `json:"reasoning_effort"`
+	ParallelCount   int              `json:"parallel_count"`
 	// ModelID is recorded with each result so later edits do not relabel history.
 	ModelID string `json:"model_id,omitempty"`
 	// ModelIDs selects all models in a quality round; old plans use ModelID.
@@ -39,6 +44,10 @@ type PelicanTestConfig struct {
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
+	// Populated only from the repository's one-shot manual trigger marker.
+	ManualQualityRun      bool              `json:"-"`
+	QualityBatchEvaluated bool              `json:"-"`
+	QualityBatchModels    map[string]string `json:"-"`
 	// Request-only: importing configuration preserves this target's ownership.
 	PreserveQualityState     bool                      `json:"-"`
 	QualityRestoreDiagnostic *QualityRestoreDiagnostic `json:"-"`
@@ -68,6 +77,10 @@ type ScheduledTestPlan struct {
 
 // ScheduledTestResult represents a single test execution result.
 type ScheduledTestResult struct {
+	// Runtime-only; set solely from an actual own-credential OAuth HTTP 401.
+	DirectOAuth401        bool `json:"-"`
+	DirectOAuthRevoked401 bool `json:"-"`
+
 	QualityRoundID  string             `json:"quality_round_id,omitempty"`
 	QualityJudgment *QualityJudgment   `json:"quality_judgment,omitempty"`
 	QualityAction   string             `json:"quality_action,omitempty"`

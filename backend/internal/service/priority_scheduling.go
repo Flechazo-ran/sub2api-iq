@@ -12,7 +12,13 @@ import (
 
 const prioritySchedulingSettingKey = "priority_scheduling_v1"
 
-// PrioritySchedulingConfig only controls freely selectable OpenAI text requests.
+const (
+	PriorityLatencyDeprioritize = "deprioritize"
+	PriorityLatencyStop         = "stop"
+)
+
+// PrioritySchedulingConfig controls OpenAI text routing and optional scoped
+// new-request stops. A stopped owner is rejected rather than reassigned.
 // Account eligibility, continuity, profit gates and concurrency acquisition stay authoritative.
 type PrioritySchedulingConfig struct {
 	ErrorRateWeight            float64  `json:"error_rate_weight"`
@@ -31,6 +37,8 @@ type PrioritySchedulingConfig struct {
 	LatencyMeasurement         string   `json:"latency_measurement"`
 	RecoveryExplorationPercent int      `json:"recovery_exploration_percent"`
 	TargetTTFTMs               int      `json:"target_ttft_ms"`
+	TargetTPS                  float64  `json:"target_tps"`
+	LatencyPenaltyMode         string   `json:"latency_penalty_mode"`
 	LatencyPenaltyMinutes      int      `json:"latency_penalty_minutes"`
 	MaxLoadPercent             int      `json:"max_load_percent"`
 	MinQualityPercent          int      `json:"min_quality_percent"`
@@ -42,10 +50,13 @@ type PrioritySchedulingConfig struct {
 }
 
 func DefaultPrioritySchedulingConfig() PrioritySchedulingConfig {
-	return PrioritySchedulingConfig{ErrorRateWeight: 25, ErrorRateWindowMinutes: 10, ErrorRatePriorSamples: 5, OAuthQuotaThreshold: 90, BalanceProtocols: true, Mode: "balanced", GroupIDs: []int64{}, Models: []string{}, WindowMinutes: 60, MinSamples: 5, TargetTTFTMs: 15000, LatencyPercentile: 90, LatencyMeasurement: "legacy_forward", LatencyPenaltyMinutes: 10, MaxLoadPercent: 80, MinQualityPercent: 90, QualityMaxAgeHours: 24, QualityWeight: 30, LatencyWeight: 25, LoadWeight: 25, CostWeight: 20}
+	return PrioritySchedulingConfig{ErrorRateWeight: 25, ErrorRateWindowMinutes: 10, ErrorRatePriorSamples: 5, OAuthQuotaThreshold: 90, BalanceProtocols: true, Mode: "balanced", GroupIDs: []int64{}, Models: []string{}, WindowMinutes: 60, MinSamples: 5, TargetTTFTMs: 15000, TargetTPS: 30, LatencyPercentile: 90, LatencyMeasurement: "legacy_forward", LatencyPenaltyMode: PriorityLatencyDeprioritize, LatencyPenaltyMinutes: 10, MaxLoadPercent: 80, MinQualityPercent: 90, QualityMaxAgeHours: 24, QualityWeight: 30, LatencyWeight: 25, LoadWeight: 25, CostWeight: 20}
 }
 
 func ValidatePrioritySchedulingConfig(c PrioritySchedulingConfig) error {
+	if math.IsNaN(c.TargetTPS) || math.IsInf(c.TargetTPS, 0) || c.TargetTPS < 0 || c.TargetTPS > 1e6 {
+		return errors.New("target TPS outside allowed range")
+	}
 	if math.IsNaN(c.ErrorRateWeight) || math.IsInf(c.ErrorRateWeight, 0) || c.ErrorRateWeight < 0 || c.ErrorRateWeight > 100 || c.ErrorRateWindowMinutes < 1 || c.ErrorRateWindowMinutes > 60 || c.ErrorRatePriorSamples < 1 || c.ErrorRatePriorSamples > 1000 {
 		return errors.New("error rate parameters outside allowed range")
 	}
@@ -57,6 +68,9 @@ func ValidatePrioritySchedulingConfig(c PrioritySchedulingConfig) error {
 	}
 	if c.RecoveryExplorationPercent < 0 || c.RecoveryExplorationPercent > 10 {
 		return errors.New("recovery exploration must be between 0 and 10 percent")
+	}
+	if c.LatencyPenaltyMode != "" && c.LatencyPenaltyMode != PriorityLatencyDeprioritize && c.LatencyPenaltyMode != PriorityLatencyStop {
+		return errors.New("invalid latency penalty mode")
 	}
 	if c.LatencyPenaltyMinutes < 0 || c.LatencyPenaltyMinutes > 1440 {
 		return errors.New("latency penalty must be between 0 and 1440 minutes")
@@ -139,6 +153,9 @@ func (s *SettingService) GetPrioritySchedulingConfig(ctx context.Context) (Prior
 	return c, ValidatePrioritySchedulingConfig(c)
 }
 func (s *SettingService) SavePrioritySchedulingConfig(ctx context.Context, c PrioritySchedulingConfig) error {
+	if c.LatencyPenaltyMode == "" {
+		c.LatencyPenaltyMode = PriorityLatencyDeprioritize
+	}
 	if err := ValidatePrioritySchedulingConfig(c); err != nil {
 		return err
 	}
@@ -204,34 +221,41 @@ func (s *OpenAIGatewayService) prioritySchedulingRuntimeConfig() PrioritySchedul
 }
 
 type PrioritySchedulingSignal struct {
-	SelectedTTFTMs         *float64   `json:"selected_ttft_ms"`
-	P50TTFTMs              float64    `json:"p50_ttft_ms"`
-	P70TTFTMs              float64    `json:"p70_ttft_ms"`
-	P95TTFTMs              float64    `json:"p95_ttft_ms"`
-	LatencyPercentile      int        `json:"latency_percentile"`
-	LatencyMeasurement     string     `json:"latency_measurement"`
-	LatencyEvidenceVersion int        `json:"latency_evidence_version"`
-	LatencyUnknownSamples  int        `json:"latency_unknown_samples"`
-	ExperienceSamples      int        `json:"experience_samples"`
-	ExperienceP90Ms        float64    `json:"experience_p90_ms"`
-	LatestBadLatencyAt     *time.Time `json:"latest_bad_latency_at,omitempty"`
-	LatestLatencyAt        *time.Time `json:"latest_latency_at,omitempty"`
-	LatestQualityPassed    *bool      `json:"latest_quality_passed,omitempty"`
-	Revenue                float64    `json:"revenue"`
-	BaseCost               float64    `json:"-"`
-	ProfitSamples          int        `json:"profit_samples"`
-	Samples                int        `json:"samples"`
-	P90TTFTMs              float64    `json:"p90_ttft_ms"`
-	QualityPassed          int        `json:"quality_passed"`
-	QualitySamples         int        `json:"quality_samples"`
+	Performance            *AccountPerformance `json:"performance,omitempty"`
+	SelectedTTFTMs         *float64            `json:"selected_ttft_ms"`
+	LatestBadLatencyAt     *time.Time          `json:"latest_bad_latency_at,omitempty"`
+	LatestLatencyAt        *time.Time          `json:"latest_latency_at,omitempty"`
+	LatestQualityPassed    *bool               `json:"latest_quality_passed,omitempty"`
+	P50TTFTMs              float64             `json:"p50_ttft_ms"`
+	P70TTFTMs              float64             `json:"p70_ttft_ms"`
+	P90TTFTMs              float64             `json:"p90_ttft_ms"`
+	P95TTFTMs              float64             `json:"p95_ttft_ms"`
+	P99TTFTMs              float64             `json:"p99_ttft_ms"`
+	ExperienceP90Ms        float64             `json:"experience_p90_ms"`
+	Revenue                float64             `json:"revenue"`
+	BaseCost               float64             `json:"-"`
+	LatencyPercentile      int                 `json:"latency_percentile"`
+	LatencyMeasurement     string              `json:"latency_measurement"`
+	LatencyEvidenceVersion int                 `json:"latency_evidence_version"`
+	LatencyUnknownSamples  int                 `json:"latency_unknown_samples"`
+	ExperienceSamples      int                 `json:"experience_samples"`
+	ProfitSamples          int                 `json:"profit_samples"`
+	Samples                int                 `json:"samples"`
+	SlowSamples            int                 `json:"slow_samples"`
+	ErrorSamples           int                 `json:"error_samples"`
+	UpstreamErrorRate      float64             `json:"upstream_error_rate"`
+	QualityPassed          int                 `json:"quality_passed"`
+	QualitySamples         int                 `json:"quality_samples"`
 }
 
 type PrioritySchedulingQuery struct {
+	ObservationEffort  *string
 	LatencyPercentile  int
 	LatencyMeasurement string
 	TargetTTFTMs       int
 	AccountIDs         []int64
-	Model              string
+	Model              string // public requested model in persisted usage
+	QualityModel       string // routing model used by account quality probes; defaults to Model
 	GroupID            *int64
 	UsageUntil         time.Time
 	UsageSince         time.Time
@@ -246,6 +270,7 @@ type PrioritySchedulingScore struct {
 	ErrorPenalty        float64    `json:"error_penalty"`
 	BaseScore           float64    `json:"base_score"`
 	LatencyPenaltyUntil *time.Time `json:"latency_penalty_until,omitempty"`
+	LatencyStopped      bool       `json:"latency_stopped"`
 	LatencyRecovery     bool       `json:"latency_recovery,omitempty"`
 	OAuthQuotaRole      string     `json:"oauth_quota_role,omitempty"`
 	HistoryStatus       string     `json:"history_status"`
@@ -271,8 +296,11 @@ type PrioritySchedulingScore struct {
 	PrioritySchedulingSignal
 }
 type PrioritySchedulingSnapshot struct {
+	PerformanceSource  string                    `json:"performance_source"`
 	LatencyPercentile  int                       `json:"latency_percentile"`
 	LatencyMeasurement string                    `json:"latency_measurement"`
+	LatencyPenaltyMode string                    `json:"latency_penalty_mode"`
+	LatencyFallback    bool                      `json:"latency_fallback"`
 	MinSamples         int                       `json:"min_samples"`
 	WindowMinutes      int                       `json:"window_minutes"`
 	HistoryWindowEnd   *time.Time                `json:"history_window_end,omitempty"`
@@ -291,21 +319,20 @@ type PrioritySchedulingSnapshot struct {
 	Candidates         []PrioritySchedulingScore `json:"candidates"`
 }
 
-func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandidateScore, signal PrioritySchedulingSignal, now time.Time) PrioritySchedulingScore {
-	// Only unversioned legacy P90 inputs may use the old field. Attributed or
-	// non-P90 evidence must never silently fall back to a different population.
-	if signal.LatencyEvidenceVersion == 0 && c.LatencyMeasurement == "legacy_forward" && c.LatencyPercentile == 90 {
-		if signal.Samples > 0 && signal.P90TTFTMs > 0 {
-			value := signal.P90TTFTMs
-			signal.SelectedTTFTMs = &value
+func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandidateScore, signal PrioritySchedulingSignal, _ time.Time) PrioritySchedulingScore {
+	// The aliases remain in snapshots for older clients. Scoring uses the
+	// account-performance metrics, never a separate model/quantile population.
+	metrics := cloneAccountPerformance(signal.Performance)
+	signal.Performance = metrics
+	signal.Samples, signal.QualitySamples, signal.QualityPassed = 0, 0, 0
+	signal.SelectedTTFTMs = nil
+	signal.LatencyPercentile, signal.LatencyMeasurement = 0, "account_performance"
+	if metrics != nil {
+		signal.Samples, signal.SelectedTTFTMs = metrics.TTFTSamples, metrics.AvgTTFTMs
+		signal.QualitySamples = metrics.QualitySamples
+		if metrics.DegradationPercent != nil {
+			signal.QualityPassed = int(math.Round(float64(metrics.QualitySamples) * (1 - clamp01(*metrics.DegradationPercent/100))))
 		}
-		signal.LatencyPercentile = 90
-		signal.LatencyMeasurement = "legacy_forward"
-	} else if signal.LatencyPercentile != c.LatencyPercentile || signal.LatencyMeasurement != c.LatencyMeasurement {
-		signal.Samples = 0
-		signal.SelectedTTFTMs = nil
-		signal.LatencyPercentile = c.LatencyPercentile
-		signal.LatencyMeasurement = c.LatencyMeasurement
 	}
 	selectedLatency := 0.0
 	if signal.SelectedTTFTMs != nil {
@@ -317,10 +344,10 @@ func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandid
 	if item.loadInfo != nil {
 		out.Waiting = max(0, item.loadInfo.WaitingCount)
 	}
-	quality, latency, load, cost := 0.5, 0.5, 0.5, 0.5
+	quality, latency, throughput, cost := 0.5, 0.5, 0.5, 0.5
 	degraded, unknown := false, false
-	if signal.QualitySamples > 0 {
-		quality = clamp01(float64(signal.QualityPassed) / float64(signal.QualitySamples))
+	if metrics != nil && metrics.QualitySamples > 0 && validPerformanceMetric(metrics.DegradationPercent) && *metrics.DegradationPercent <= 100 {
+		quality = 1 - *metrics.DegradationPercent/100
 		if quality*100 < float64(c.MinQualityPercent) {
 			degraded = true
 			out.Reasons = append(out.Reasons, "quality_below_target")
@@ -329,28 +356,26 @@ func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandid
 		unknown = true
 		out.Reasons = append(out.Reasons, "quality_unknown")
 	}
-	if signal.Samples >= c.MinSamples && selectedLatency > 0 {
+	if signal.Samples >= c.MinSamples && validPerformanceMetric(signal.SelectedTTFTMs) {
 		latency = 1 / (1 + selectedLatency/float64(c.TargetTTFTMs))
 		if selectedLatency > float64(c.TargetTTFTMs) {
-			// Renew only on a genuinely bad sample, never arbitrary new traffic.
-			// Missing timestamps retain the penalty rather than invent recovery.
-			badAt := signal.LatestBadLatencyAt
-			if c.LatencyPenaltyMinutes > 0 && badAt != nil {
-				until := badAt.Add(time.Duration(c.LatencyPenaltyMinutes) * time.Minute)
-				out.LatencyPenaltyUntil = &until
-				out.LatencyRecovery = !now.Before(until)
-			}
-			if out.LatencyRecovery {
-				unknown = true
-				out.Reasons = append(out.Reasons, "latency_recovery")
-			} else {
-				degraded = true
-				out.Reasons = append(out.Reasons, "latency_above_target")
-			}
+			degraded = true
+			out.Reasons = append(out.Reasons, "latency_above_target")
+			out.LatencyStopped = c.LatencyPenaltyMode == PriorityLatencyStop
 		}
 	} else {
 		unknown = true
 		out.Reasons = append(out.Reasons, "latency_insufficient")
+	}
+	if metrics != nil && metrics.TPSSamples >= c.MinSamples && validPerformanceMetric(metrics.AvgTPS) {
+		target := c.TargetTPS
+		if target == 0 {
+			target = DefaultPrioritySchedulingConfig().TargetTPS
+		}
+		throughput = *metrics.AvgTPS / (*metrics.AvgTPS + target)
+	} else {
+		unknown = true
+		out.Reasons = append(out.Reasons, "tps_insufficient")
 	}
 	if item.loadKnown && item.loadInfo != nil {
 		percent := 0
@@ -358,16 +383,10 @@ func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandid
 			percent = int(100 * float64(item.loadInfo.CurrentConcurrency) / float64(item.account.Concurrency))
 		}
 		out.LoadPercent = &percent
-		// A configured load factor may express a routing preference, but must
-		// not make a nearly full account look idle to this capacity policy.
-		load = (1 - clamp01(float64(item.loadInfo.CurrentConcurrency)/float64(max(1, item.account.Concurrency)))) / (1 + float64(max(0, item.loadInfo.WaitingCount)))
 		if percent >= c.MaxLoadPercent || item.loadInfo.WaitingCount > 0 {
 			degraded = true
 			out.Reasons = append(out.Reasons, "busy")
 		}
-	} else {
-		unknown = true
-		out.Reasons = append(out.Reasons, "load_unknown")
 	}
 	if signal.ProfitSamples >= c.MinSamples && signal.Revenue >= 0 && theoreticalCost >= 0 && signal.Revenue+theoreticalCost > 0 {
 		// Round the multiplication before subtracting, matching the displayed
@@ -399,18 +418,20 @@ func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandid
 		out.EconomicsSource = "unknown"
 		out.Reasons = append(out.Reasons, "profit_insufficient")
 	}
-	// Realtime failures are an additional penalty, never inferred from zero-cost logs.
-	if c.ErrorRateWeight == 0 && item.errorRate > 0.2 {
-		degraded = true
-		out.Reasons = append(out.Reasons, "recent_errors")
-	}
 	w := c.weights()
 	sum := w[0] + w[1] + w[2] + w[3]
-	out.BaseScore = 100 * (w[0]*quality + w[1]*latency + w[2]*load + w[3]*cost) / sum
-	out.PriorityErrorEvidence = item.priorityErrors
-	out.ErrorPenalty = 1 - clamp01(item.errorRate)
-	if c.ErrorRateWeight > 0 {
-		out.ErrorPenalty = priorityErrorPenalty(c, item.priorityErrors)
+	out.BaseScore = 100 * (w[0]*quality + w[1]*latency + w[2]*throughput + w[3]*cost) / sum
+	out.ErrorPenalty = 1
+	if metrics != nil {
+		if rate := performanceUpstreamErrorRate(metrics.UpstreamError); rate != nil {
+			out.PriorityErrorEvidence = PriorityErrorEvidence{ErrorRate: rate, SmoothedRate: *rate, Failures: metrics.UpstreamError.Failures, Successes: metrics.UpstreamError.Total - metrics.UpstreamError.Failures, ObservedAt: metrics.WindowEnd, WindowMinutes: int(metrics.WindowEnd.Sub(metrics.WindowStart) / time.Minute)}
+			out.ErrorSamples = int(metrics.UpstreamError.Failures)
+			out.ErrorPenalty = math.Max(.1, 1-c.ErrorRateWeight/100**rate)
+			if c.ErrorRateWeight > 0 && *rate > .2 {
+				degraded = true
+				out.Reasons = append(out.Reasons, "recent_errors")
+			}
+		}
 	}
 	out.Score = out.BaseScore * out.ErrorPenalty
 	if degraded {
@@ -423,13 +444,12 @@ func scorePriorityCandidate(c PrioritySchedulingConfig, item openAIAccountCandid
 
 func (s *defaultOpenAIAccountScheduler) applyPriorityScheduling(req OpenAIAccountScheduleRequest, plan *openAIAccountLoadPlan) bool {
 	c := s.service.prioritySchedulingRuntimeConfig()
-	if req.Platform != PlatformOpenAI || req.RequiredImageCapability != "" || !req.UseUpstreamTokenCost || !c.applies(req.GroupID, req.RequestedModel) {
+	if req.Platform != PlatformOpenAI || req.RequiredImageCapability != "" || !req.UseUpstreamTokenCost || !priorityApplies(c, req) {
 		return false
 	}
 	history := s.service.priorityHistory(req, c, plan.candidates)
 	now := time.Now()
 	for i := range plan.candidates {
-		plan.candidates[i].priorityErrors = s.priorityErrorEvidence(req, c, plan.candidates[i].account.ID, now)
 		applyPriorityCandidate(c, &plan.candidates[i], history.signals[plan.candidates[i].account.ID], now)
 	}
 	plan.priorityScheduling = true
@@ -442,6 +462,11 @@ func (s *defaultOpenAIAccountScheduler) applyPriorityScheduling(req OpenAIAccoun
 
 func (s *defaultOpenAIAccountScheduler) recordPrioritySnapshot(req OpenAIAccountScheduleRequest, c PrioritySchedulingConfig, pool []openAIAccountCandidateScore, now time.Time) {
 	input := newPrioritySnapshotInput(req, c, pool, now)
+	if req.priorityLatencyPool != nil && req.priorityLatencyPool.fallbackActive() {
+		input.fallback = true
+	} else {
+		input.fallback = priorityPoolNeedsFallback(pool)
+	}
 	state := &s.service.priorityScheduling
 	state.mu.Lock()
 	// A slower earlier selection must not replace a newer observation.
@@ -451,10 +476,27 @@ func (s *defaultOpenAIAccountScheduler) recordPrioritySnapshot(req OpenAIAccount
 	state.mu.Unlock()
 }
 
+// A pool needs an explicit fallback when it contains no normal candidate at
+// all. Recovery and actively penalized accounts remain selectable, but only
+// after every normal candidate has lost its slot race. The dashboard must say
+// so: otherwise a recovery-period account looks like ordinary capacity.
+func priorityPoolNeedsFallback(pool []openAIAccountCandidateScore) bool {
+	if len(pool) == 0 {
+		return false
+	}
+	for _, item := range pool {
+		if !item.priorityUnhealthy && !item.priorityLatencyPenalty && !item.priorityLatencyRecovery {
+			return false
+		}
+	}
+	return true
+}
+
 func applyPriorityCandidate(c PrioritySchedulingConfig, item *openAIAccountCandidateScore, signal PrioritySchedulingSignal, now time.Time) PrioritySchedulingScore {
 	score := scorePriorityCandidate(c, *item, signal, now)
 	item.priorityUnhealthy = slices.Contains(score.Reasons, "quality_below_target") ||
 		slices.Contains(score.Reasons, "recent_errors") || slices.Contains(score.Reasons, "historical_loss")
+	item.priorityLatencyPenalty = slices.Contains(score.Reasons, "latency_above_target")
 	item.priorityLatencyFactor = 1
 	if score.Samples >= c.MinSamples && score.SelectedTTFTMs != nil && *score.SelectedTTFTMs > 0 {
 		ratio := *score.SelectedTTFTMs / float64(c.TargetTTFTMs)
@@ -469,7 +511,12 @@ func applyPriorityCandidate(c PrioritySchedulingConfig, item *openAIAccountCandi
 	case "eligible":
 		offset = 400
 	case "insufficient":
-		offset = 200
+		// Recovery is still latency-limited; keep it in the same internal
+		// cohort as an active penalty so weighted diversity can choose the
+		// least slow fallback instead of promoting every recovery account.
+		if !score.LatencyRecovery {
+			offset = 200
+		}
 	}
 	item.score = offset + score.Score
 	qualityReady := score.QualitySamples > 0 &&
@@ -477,7 +524,7 @@ func applyPriorityCandidate(c PrioritySchedulingConfig, item *openAIAccountCandi
 	item.priorityRecoveryExplorationPercent = c.RecoveryExplorationPercent
 	item.priorityLatencyRecovery = score.LatencyRecovery
 	item.priorityExploration = (!score.LatencyRecovery || c.RecoveryExplorationPercent > 0) && (item.account.IsOpenAIOAuth() || item.account.IsOpenAIApiKey()) &&
-		score.Tier == "insufficient" && qualityReady && (c.ErrorRateWeight == 0 || item.priorityErrors.SmoothedRate <= .2) &&
+		score.Tier == "insufficient" && qualityReady && !slices.Contains(score.Reasons, "recent_errors") &&
 		(!score.LatencyRecovery || (score.LatestQualityPassed != nil && *score.LatestQualityPassed)) &&
 		(score.ProfitSamples < c.MinSamples || score.Samples < c.MinSamples || score.LatencyRecovery) &&
 		item.loadKnown && score.LoadPercent != nil && *score.LoadPercent < c.MaxLoadPercent

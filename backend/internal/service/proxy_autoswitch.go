@@ -100,19 +100,28 @@ type ProxyAutoSwitchConfig struct {
 	// 字段名和 v2 之前一样，老配置里的池子原样沿用。
 	CandidateProxyIDs []int64 `json:"candidate_proxy_ids"`
 	Strategy          string  `json:"strategy"`
+	// SlowDemotionWindowMinutes 是判定代理「最近被多个账号嫌慢」的滚动时间窗口，单位分钟。
+	// 在这个窗口内，若有 SlowDemotionMinAccounts 个或以上**不同**账号因慢换出了某个代理，
+	// 该代理在候选池排序时会被排到末尾（软降级），但不会被移出池子。
+	// 0 表示关闭软降级。默认 1440（24 小时）。
+	SlowDemotionWindowMinutes int `json:"slow_demotion_window_minutes"`
+	// SlowDemotionMinAccounts 是触发软降级所需的最少换出账号数。默认 2。
+	SlowDemotionMinAccounts int `json:"slow_demotion_min_accounts"`
 }
 
 func DefaultProxyAutoSwitchConfig() ProxyAutoSwitchConfig {
 	return ProxyAutoSwitchConfig{
-		Enabled:             false,
-		GroupIDs:            []int64{proxyAutoSwitchDefaultGroupID},
-		WindowMinutes:       5,
-		MinSamples:          20,
-		P60ThresholdMS:      10000,
-		MeanThresholdMS:     15000,
-		MaxAccountsPerProxy: 2,
-		CandidateProxyIDs:   []int64{},
-		Strategy:            ProxyAutoSwitchStrategySequential,
+		Enabled:                   false,
+		GroupIDs:                  []int64{proxyAutoSwitchDefaultGroupID},
+		WindowMinutes:             5,
+		MinSamples:                20,
+		P60ThresholdMS:            10000,
+		MeanThresholdMS:           15000,
+		MaxAccountsPerProxy:       2,
+		CandidateProxyIDs:         []int64{},
+		Strategy:                  ProxyAutoSwitchStrategySequential,
+		SlowDemotionWindowMinutes: 1440,
+		SlowDemotionMinAccounts:   2,
 	}
 }
 
@@ -141,6 +150,11 @@ func normalizeProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) ProxyAutoSwitchCo
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
 	cfg.GroupIDs = groups
+	// 软降级最少账号数没填（旧页面、旧 API 调用不带这个字段）时用默认值 2；
+	// 时间窗口 0 是「关闭软降级」，原样保留。
+	if cfg.SlowDemotionMinAccounts == 0 {
+		cfg.SlowDemotionMinAccounts = 2
+	}
 	return cfg
 }
 
@@ -162,6 +176,12 @@ func ValidateProxyAutoSwitchConfig(cfg ProxyAutoSwitchConfig) error {
 		if r.value < r.min || r.value > r.max {
 			return fmt.Errorf("%s 必须在 %d 到 %d 之间", r.name, r.min, r.max)
 		}
+	}
+	if cfg.SlowDemotionWindowMinutes < 0 || cfg.SlowDemotionWindowMinutes > 10080 {
+		return errors.New("slow_demotion_window_minutes 必须在 0 到 10080 之间（0 表示关闭）")
+	}
+	if cfg.SlowDemotionMinAccounts < 1 || cfg.SlowDemotionMinAccounts > 100 {
+		return errors.New("slow_demotion_min_accounts 必须在 1 到 100 之间")
 	}
 	switch cfg.Strategy {
 	case ProxyAutoSwitchStrategyRandom, ProxyAutoSwitchStrategySequential, ProxyAutoSwitchStrategyRegion:
@@ -268,6 +288,10 @@ type ProxyAutoSwitchProxyItem struct {
 	Expired      bool       `json:"expired"`
 	AccountCount int64      `json:"account_count"`
 	InPool       bool       `json:"in_pool"`
+	// SlowAccounts 是软降级窗口内有多少个不同账号在这个代理上被判慢（换出或没候选）。
+	SlowAccounts int `json:"slow_accounts"`
+	// Demoted 表示达到软降级门槛：换代理时排到最后，页面提示「建议移出」。
+	Demoted bool `json:"demoted"`
 }
 
 type ProxyAutoSwitchProxyList struct {
@@ -319,6 +343,10 @@ type ProxyAutoSwitchRepository interface {
 	// AuditWrites reads the admin account-edit audit rows the first-token-trend
 	// board uses, so manual proxy changes are known to the switcher too.
 	AuditWrites(ctx context.Context, accountIDs []int64, since, until time.Time) ([]FirstTokenTrendAuditWrite, error)
+	// SlowSwitchAccountCounts returns, for each proxy that accounts were switched
+	// away from since the given time (status done / no_candidate / failed), how
+	// many distinct accounts did so. Used for soft demotion in candidate ranking.
+	SlowSwitchAccountCounts(ctx context.Context, since time.Time) (map[int64]int, error)
 }
 
 // ProxyAutoSwitchProbeResult is one fresh-connection request through a proxy

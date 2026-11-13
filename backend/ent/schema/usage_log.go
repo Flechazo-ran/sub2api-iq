@@ -88,6 +88,10 @@ func (UsageLog) Fields() []ent.Field {
 			Default(0),
 		field.Int("cache_creation_1h_tokens").
 			Default(0),
+		field.Int("cache_creation_30m_tokens").
+			Default(0),
+		field.Int("cache_creation_12h_tokens").
+			Default(0),
 
 		// 成本字段
 		field.Float("input_cost").
@@ -132,6 +136,10 @@ func (UsageLog) Fields() []ent.Field {
 		field.Int("first_token_ms").
 			Optional().
 			Nillable(),
+		field.Int("queue_wait_ms").
+			Optional().
+			Nillable().
+			Comment("请求到达网关到开始转发的等待毫秒数"),
 		field.String("user_agent").
 			MaxLen(512).
 			Optional().
@@ -180,6 +188,8 @@ func (UsageLog) Fields() []ent.Field {
 		// Cache TTL Override 标记（管理员强制替换了缓存 TTL 计费）
 		field.Bool("cache_ttl_overridden").
 			Default(false),
+
+		field.JSON("queue_timing", map[string]any{}).Optional().Comment("Explicit measured server/forward boundaries; NULL means unknown"),
 
 		// 时间戳（只有 created_at，日志不可修改）
 		field.Time("created_at").

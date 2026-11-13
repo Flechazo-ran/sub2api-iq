@@ -179,7 +179,7 @@ func (s *adminServiceImpl) ensureNotLastAdmin(ctx context.Context) error {
 		return fmt.Errorf("count admin users: %w", err)
 	}
 	if result == nil || result.Total <= 1 {
-		return errors.New("cannot demote the last admin user")
+		return infraerrors.BadRequest("LAST_ADMIN_DEMOTE_FORBIDDEN", "cannot demote the last admin user")
 	}
 	return nil
 }
@@ -229,7 +229,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 
 	// Protect admin users: cannot disable admin accounts
 	if user.Role == "admin" && input.Status == "disabled" {
-		return nil, errors.New("cannot disable admin user")
+		return nil, infraerrors.BadRequest("ADMIN_DISABLE_FORBIDDEN", "cannot disable admin user; change the role to user first")
 	}
 
 	oldConcurrency := user.Concurrency
@@ -430,7 +430,7 @@ func (s *adminServiceImpl) DeleteUser(ctx context.Context, id int64) error {
 		return err
 	}
 	if user.Role == "admin" {
-		return errors.New("cannot delete admin user")
+		return infraerrors.BadRequest("ADMIN_DELETE_FORBIDDEN", "cannot delete admin user; change the role to user first")
 	}
 
 	apiKeys, err := s.listUserAPIKeysForDeletion(ctx, id)
@@ -581,6 +581,9 @@ func (s *adminServiceImpl) BatchUpdateLimits(ctx context.Context, userIDs []int6
 }
 
 func (s *adminServiceImpl) UpdateUserBalance(ctx context.Context, userID int64, balance float64, operation string, notes string) (*User, error) {
+	if s.lottery != nil {
+		return s.updateUserBalanceLottery(ctx, userID, balance, operation, notes)
+	}
 	// 余额调整必须走原子接口：先读后整行写回会把并发的计费扣款覆盖掉。
 	var (
 		change BalanceChange
@@ -766,8 +769,15 @@ func (s *adminServiceImpl) GetUserUsageStats(ctx context.Context, userID int64, 
 // GetUserBalanceHistory returns paginated balance/concurrency change records for a user.
 func (s *adminServiceImpl) GetUserBalanceHistory(ctx context.Context, userID int64, page, pageSize int, codeType string) ([]RedeemCode, int64, float64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
-	if codeType == RedeemTypeAffiliateBalance {
-		codes, total, err := s.listAffiliateBalanceHistory(ctx, userID, params)
+	if codeType == RedeemTypeAffiliateBalance || codeType == BalanceHistoryTypeAutoCredit {
+		var codes []RedeemCode
+		var total int64
+		var err error
+		if codeType == BalanceHistoryTypeAutoCredit {
+			codes, total, err = s.listAutoCreditBalanceHistory(ctx, userID, params.Offset(), params.Limit())
+		} else {
+			codes, total, err = s.listAffiliateBalanceHistory(ctx, userID, params)
+		}
 		if err != nil {
 			return nil, 0, 0, err
 		}
@@ -809,13 +819,17 @@ func (s *adminServiceImpl) getAllUserBalanceHistory(ctx context.Context, userID 
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	codes := mergeBalanceHistoryCodes(redeemCodes, affiliateCodes, params)
+	autoCreditCodes, autoCreditTotal, err := s.listAutoCreditBalanceHistory(ctx, userID, 0, needed)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	codes := mergeBalanceHistoryCodes(redeemCodes, affiliateCodes, params, autoCreditCodes)
 
 	totalRecharged, err := s.redeemCodeRepo.SumPositiveBalanceByUser(ctx, userID)
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	return codes, redeemTotal + affiliateTotal, totalRecharged, nil
+	return codes, redeemTotal + affiliateTotal + autoCreditTotal, totalRecharged, nil
 }
 
 func (s *adminServiceImpl) listRedeemBalanceHistoryForMerge(ctx context.Context, userID int64, needed int) ([]RedeemCode, int64, error) {
@@ -952,8 +966,11 @@ WHERE user_id = $1
 	return total.Int64, nil
 }
 
-func mergeBalanceHistoryCodes(redeemCodes, affiliateCodes []RedeemCode, params pagination.PaginationParams) []RedeemCode {
+func mergeBalanceHistoryCodes(redeemCodes, affiliateCodes []RedeemCode, params pagination.PaginationParams, additional ...[]RedeemCode) []RedeemCode {
 	combined := append(append([]RedeemCode{}, redeemCodes...), affiliateCodes...)
+	for _, codes := range additional {
+		combined = append(combined, codes...)
+	}
 	sort.SliceStable(combined, func(i, j int) bool {
 		return redeemCodeHistoryTime(combined[i]).After(redeemCodeHistoryTime(combined[j]))
 	})

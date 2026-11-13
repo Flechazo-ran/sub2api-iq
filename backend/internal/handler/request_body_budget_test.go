@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -14,56 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAsyncImageContextHoldsBodyBudgetUntilCancel(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	budget := pkghttputil.NewBodyMemoryBudget(1 << 20)
-	ctx, releaseRequest := pkghttputil.WithRequestBodyMemoryBudget(t.Context(), budget)
-
-	payload := bytes.Repeat([]byte{'x'}, 4096)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations/async", bytes.NewReader(payload)).WithContext(ctx)
-	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
-	require.NoError(t, err)
-
-	taskCtx, _, cancel := newAsyncImageContext(c, body, time.Minute)
-	releaseRequest() // Submit returns while the task still runs.
-	require.Equal(t, int64(len(body)), budget.Stats().UsedBytes, "the task keeps the body on its own reservation")
-
-	// The task replays the request; its re-read is charged to the task, never rejected.
-	replayed, err := pkghttputil.ReadRequestBodyWithPrealloc(taskCtx.Request)
-	require.NoError(t, err)
-	require.Equal(t, payload, replayed)
-	require.Greater(t, budget.Stats().UsedBytes, int64(len(body)))
-
-	cancel()
-	cancel()
-	require.Zero(t, budget.Stats().UsedBytes, "cancel must refund the task's reservation")
-}
-
-func TestAsyncImageContextNeverFailsOnFullBudget(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	budget := pkghttputil.NewBodyMemoryBudget(8192)
-	ctx, releaseRequest := pkghttputil.WithRequestBodyMemoryBudget(t.Context(), budget)
-	defer releaseRequest()
-
-	payload := bytes.Repeat([]byte{'x'}, 4096)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations/async", bytes.NewReader(payload)).WithContext(ctx)
-	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
-	require.NoError(t, err)
-	// Fill the rest of the budget with another request's body.
-	other, releaseOther := pkghttputil.WithRequestBodyMemoryBudget(t.Context(), budget)
-	defer releaseOther()
-	require.NoError(t, pkghttputil.ReserveRequestBodyMemory(other, 8192-budget.Stats().UsedBytes))
-
-	taskCtx, _, cancel := newAsyncImageContext(c, body, time.Minute)
-	defer cancel()
-	replayed, err := pkghttputil.ReadRequestBodyWithPrealloc(taskCtx.Request)
-	require.NoError(t, err, "an accepted task must not be failed by accounting")
-	require.Equal(t, payload, replayed)
-	require.Zero(t, budget.Stats().Rejected)
-}
-
+// The 503 must not carry model_not_found: a downstream gateway would treat a
+// capacity error as a missing model instead of failing over (#16).
 func TestOpenAIResponsesBudgetExhaustionReturns503(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	budget := pkghttputil.NewBodyMemoryBudget(256)

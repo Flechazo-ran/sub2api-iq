@@ -210,9 +210,15 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 	}
 
 	now := s.now()
+	slowAccounts := s.slowSwitchAccountCounts(ctx, cfg, now)
+	minAccounts := cfg.SlowDemotionMinAccounts
+	if minAccounts <= 0 {
+		minAccounts = 2
+	}
 	items := make([]ProxyAutoSwitchProxyItem, 0, len(proxies))
 	for i := range proxies {
 		p := &proxies[i]
+		slow := slowAccounts[p.ID]
 		items = append(items, ProxyAutoSwitchProxyItem{
 			ID:           p.ID,
 			Name:         p.Name,
@@ -222,6 +228,8 @@ func (s *ProxyAutoSwitchService) Proxies(ctx context.Context) (*ProxyAutoSwitchP
 			Expired:      p.IsExpired(now),
 			AccountCount: p.AccountCount,
 			InPool:       hasKey(inPool, p.ID),
+			SlowAccounts: slow,
+			Demoted:      cfg.SlowDemotionWindowMinutes > 0 && slow >= minAccounts,
 		})
 	}
 	sort.SliceStable(items, func(i, j int) bool {

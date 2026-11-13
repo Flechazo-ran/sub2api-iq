@@ -22,6 +22,7 @@ import (
 
 // GroupHandler handles admin group management
 type GroupHandler struct {
+	antiDistillation     *service.GroupAntiDistillationService
 	adminService         service.AdminService
 	dashboardService     *service.DashboardService
 	groupCapacityService *service.GroupCapacityService
@@ -200,6 +201,7 @@ type CreateGroupRequest struct {
 	// 图片生成计费配置（antigravity 和 gemini 平台使用，负数表示清除配置）
 	AllowImageGeneration            *bool                         `json:"allow_image_generation"`
 	AllowBatchImageGeneration       bool                          `json:"allow_batch_image_generation"`
+	ImageCountBilling               bool                          `json:"image_count_billing"`
 	ImageRateIndependent            bool                          `json:"image_rate_independent"`
 	ImageRateMultiplier             *float64                      `json:"image_rate_multiplier"`
 	BatchImageDiscountMultiplier    *float64                      `json:"batch_image_discount_multiplier"`
@@ -279,6 +281,7 @@ type UpdateGroupRequest struct {
 	// 图片生成计费配置（antigravity 和 gemini 平台使用，负数表示清除配置）
 	AllowImageGeneration            *bool                         `json:"allow_image_generation"`
 	AllowBatchImageGeneration       *bool                         `json:"allow_batch_image_generation"`
+	ImageCountBilling               *bool                         `json:"image_count_billing"`
 	ImageRateIndependent            *bool                         `json:"image_rate_independent"`
 	ImageRateMultiplier             *float64                      `json:"image_rate_multiplier"`
 	BatchImageDiscountMultiplier    *float64                      `json:"batch_image_discount_multiplier"`
@@ -696,6 +699,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		ModelPricing:                    req.ModelPricing,
 		AllowImageGenerationExplicit:    req.AllowImageGeneration,
 		AllowBatchImageGeneration:       req.AllowBatchImageGeneration,
+		ImageCountBilling:               req.ImageCountBilling,
 		ImageRateIndependent:            req.ImageRateIndependent,
 		ImageRateMultiplier:             req.ImageRateMultiplier,
 		BatchImageDiscountMultiplier:    req.BatchImageDiscountMultiplier,
@@ -846,6 +850,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		ModelPricing:                    req.ModelPricing,
 		AllowImageGeneration:            req.AllowImageGeneration,
 		AllowBatchImageGeneration:       req.AllowBatchImageGeneration,
+		ImageCountBilling:               req.ImageCountBilling,
 		ImageRateIndependent:            req.ImageRateIndependent,
 		ImageRateMultiplier:             req.ImageRateMultiplier,
 		BatchImageDiscountMultiplier:    req.BatchImageDiscountMultiplier,

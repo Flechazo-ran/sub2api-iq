@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -71,6 +72,12 @@ type APIKey struct {
 	ExpiresAt   *time.Time `json:"expires_at"` // Expiration time (nil = never expires)
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+
+	ModelMapping      map[string]string `json:"model_mapping"`
+	ReasoningEffort   string            `json:"reasoning_effort"`
+	ContextTokenLimit int               `json:"context_token_limit"`
+	AllowLongContext  bool              `json:"allow_long_context"`
+
 	// CurrentConcurrency is the real-time active request count for this API key.
 	CurrentConcurrency int `json:"current_concurrency"`
 
@@ -115,6 +122,7 @@ type Group struct {
 	// 图片生成计费配置（仅 antigravity 平台使用）
 	AllowImageGeneration         bool    `json:"allow_image_generation"`
 	AllowBatchImageGeneration    bool    `json:"allow_batch_image_generation"`
+	ImageCountBilling            bool    `json:"image_count_billing"`
 	ImageRateIndependent         bool    `json:"image_rate_independent"`
 	ImageRateMultiplier          float64 `json:"image_rate_multiplier"`
 	BatchImageDiscountMultiplier float64 `json:"batch_image_discount_multiplier"`
@@ -216,11 +224,12 @@ type AdminGroup struct {
 }
 
 type Account struct {
-	ID       int64   `json:"id"`
-	Name     string  `json:"name"`
-	Notes    *string `json:"notes"`
-	Platform string  `json:"platform"`
-	Type     string  `json:"type"`
+	UpstreamChannelBinding *service.UpstreamChannelBinding `json:"upstream_channel_binding,omitempty"`
+	ID                     int64                           `json:"id"`
+	Name                   string                          `json:"name"`
+	Notes                  *string                         `json:"notes"`
+	Platform               string                          `json:"platform"`
+	Type                   string                          `json:"type"`
 	// Credentials 经 RedactCredentials 处理后只含非敏感子键；敏感 token / api_key / 私钥
 	// 的存在性通过 CredentialsStatus（has_<key>）暴露，原始值不返回前端。
 	Credentials             map[string]any                    `json:"credentials"`
@@ -337,6 +346,9 @@ type Account struct {
 
 	GroupIDs []int64  `json:"group_ids,omitempty"`
 	Groups   []*Group `json:"groups,omitempty"`
+
+	// 仅账号详情填充。列表和公共 mapper 不计算，避免把目录诊断扩散到调度响应。
+	GrokModelDiagnostics *service.GrokModelDiagnostics `json:"grok_model_diagnostics,omitempty"`
 }
 
 // AccountListItem is the compact representation returned by the admin account
@@ -345,11 +357,12 @@ type Account struct {
 // repeated account_groups and groups object graphs. Fetch /admin/accounts/:id
 // for the complete Account DTO when editing or inspecting an account.
 type AccountListItem struct {
-	ID       int64   `json:"id"`
-	Name     string  `json:"name"`
-	Notes    *string `json:"notes"`
-	Platform string  `json:"platform"`
-	Type     string  `json:"type"`
+	UpstreamChannelBinding *service.UpstreamChannelBinding `json:"upstream_channel_binding,omitempty"`
+	ID                     int64                           `json:"id"`
+	Name                   string                          `json:"name"`
+	Notes                  *string                         `json:"notes"`
+	Platform               string                          `json:"platform"`
+	Type                   string                          `json:"type"`
 
 	Credentials             map[string]any                    `json:"credentials,omitempty"`
 	ExcelBPSCredentialState *service.ExcelBPSCredentialState  `json:"excel_bps_credential_state,omitempty"`
@@ -549,7 +562,8 @@ type RedeemCode struct {
 type AdminRedeemCode struct {
 	RedeemCode
 
-	Notes string `json:"notes"`
+	Notes      string                            `json:"notes"`
+	AutoCredit *service.AutoCreditBalanceHistory `json:"auto_credit,omitempty"`
 }
 
 type NullableTimeField struct {
@@ -607,12 +621,13 @@ type BatchUpdateRedeemCodesRequest struct {
 
 // UsageLog 是普通用户接口使用的 usage log DTO（不包含管理员字段）。
 type UsageLog struct {
-	ID        int64  `json:"id"`
-	UserID    int64  `json:"user_id"`
-	APIKeyID  int64  `json:"api_key_id"`
-	AccountID int64  `json:"account_id"`
-	RequestID string `json:"request_id"`
-	Model     string `json:"model"`
+	ContentTiming *requesttiming.ContentObservation `json:"content_timing,omitempty"`
+	ID            int64                             `json:"id"`
+	UserID        int64                             `json:"user_id"`
+	APIKeyID      int64                             `json:"api_key_id"`
+	AccountID     int64                             `json:"account_id"`
+	RequestID     string                            `json:"request_id"`
+	Model         string                            `json:"model"`
 	// ServiceTier records the OpenAI service tier used for billing, e.g. "priority" / "flex".
 	ServiceTier *string `json:"service_tier,omitempty"`
 	// ReasoningEffort is the client-requested effort (mapping-hidden, like Model).
@@ -632,8 +647,10 @@ type UsageLog struct {
 	CacheCreationTokens int `json:"cache_creation_tokens"`
 	CacheReadTokens     int `json:"cache_read_tokens"`
 
-	CacheCreation5mTokens int `json:"cache_creation_5m_tokens"`
-	CacheCreation1hTokens int `json:"cache_creation_1h_tokens"`
+	CacheCreation5mTokens  int `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens  int `json:"cache_creation_1h_tokens"`
+	CacheCreation30mTokens int `json:"cache_creation_30m_tokens"`
+	CacheCreation12hTokens int `json:"cache_creation_12h_tokens"`
 
 	InputCost                 float64 `json:"input_cost"`
 	OutputCost                float64 `json:"output_cost"`
@@ -653,6 +670,10 @@ type UsageLog struct {
 	NativeCompactionV2 bool `json:"native_compaction_v2"`
 	DurationMs         *int `json:"duration_ms"`
 	FirstTokenMs       *int `json:"first_token_ms"`
+	// QueueWaitMs is pre-forward elapsed time, not client E2E. Legacy timers
+	// can overlap it; QueueTiming carries explicit measured server/forward scopes.
+	QueueWaitMs *int                 `json:"queue_wait_ms"`
+	QueueTiming *service.QueueTiming `json:"queue_timing"`
 
 	// 图片生成字段
 	ImageCount         int            `json:"image_count"`

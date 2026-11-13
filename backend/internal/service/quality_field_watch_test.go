@@ -1015,7 +1015,9 @@ func TestQualityRuleSkipsUnavailableAccounts(t *testing.T) {
 			Quality: &QualityPolicy{ExpectedAnswer: "21", Action: "remove_groups", RemoveGroupIDs: []int64{fieldWatchHostGroup}, AddGroupIDs: []int64{fieldWatchDegradedGroup}}}}
 	repo := &fieldWatchPlanRepo{plan: plan, groups: []int64{fieldWatchHostGroup}}
 	results := &fieldWatchResultRepo{}
-	accounts := &qualityAccountStatusRepo{account: Account{ID: 58, Status: StatusError, Schedulable: false}}
+	accounts := &qualityAccountStatusRepo{account: Account{ID: 58, Status: StatusError, Schedulable: false,
+		// 糖果题可直接用账号显式配置的模型映射检测，不依赖上游模型目录（v2.17.7 起执行前校验模型）。
+		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-6-astra": "gpt-6-astra"}}}}
 	accountTests := &AccountTestService{accountRepo: accounts}
 	scheduled := NewScheduledTestService(repo, results)
 	scheduled.accountTests = accountTests

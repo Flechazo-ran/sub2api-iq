@@ -519,6 +519,24 @@ func shouldApplyLegacyWeChatEnv(configKey, envKey string) bool {
 	return !hasNewEnv
 }
 
+// detectMemoryLimitBytes is replaced in tests so defaults do not depend on the host.
+var detectMemoryLimitBytes = sysutil.MemoryLimitBytes
+
+const (
+	defaultRequestBodyMemoryBudgetBytes = int64(1 << 30)
+	// requestBodyMemoryBudgetDivisor leaves the rest of memory for conversion
+	// state, SSE buffers, caches and GC headroom.
+	requestBodyMemoryBudgetDivisor = 4
+)
+
+// autoRequestBodyMemoryBudget sizes the unconfigured ingress budget to a
+// quarter of the process memory limit. It never goes below the historical
+// 1 GiB default, so small instances keep their previous behavior.
+func autoRequestBodyMemoryBudget(memoryLimitBytes uint64) int64 {
+	// uint64 / 4 always fits in int64.
+	return max(int64(memoryLimitBytes/requestBodyMemoryBudgetDivisor), defaultRequestBodyMemoryBudgetBytes)
+}
+
 func hasExplicitConfigOrEnv(configKey, envKey string) bool {
 	if viper.InConfig(configKey) {
 		return true
@@ -1152,7 +1170,11 @@ func (c CodexWSAnchorConfig) Validate() error {
 }
 
 type GatewayConfig struct {
-	UpstreamRouting upstreamroute.Config `mapstructure:"upstream_routing"`
+	// DisableEncryptedAgentOwnerBinding permits completed opaque agent history
+	// on another normally eligible native Responses account. Delivery fences,
+	// response pointers, authorization and no-replay protections still apply.
+	DisableEncryptedAgentOwnerBinding bool                 `mapstructure:"disable_encrypted_agent_owner_binding"`
+	UpstreamRouting                   upstreamroute.Config `mapstructure:"upstream_routing"`
 	// PrismBrowser is the server-managed browser-session adapter for prism.openai.com.
 	// Account settings only select this route; cookies, sandbox state and the adapter
 	// API key remain outside account credentials.
@@ -1167,14 +1189,16 @@ type GatewayConfig struct {
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`
-	// OpenAIResponseHeaderTimeout: OpenAI/Codex 上游等待响应头的超时时间（秒），0表示无超时
-	// OpenAI/Codex 请求可能在上游排队较久；默认不使用通用响应头超时截断。
+	// OpenAIResponseHeaderTimeout: OpenAI/Codex 上游等待响应头的超时时间（秒）。
+	// 默认 0（禁用）；显式配置正数以启用该超时。
 	OpenAIResponseHeaderTimeout int `mapstructure:"openai_response_header_timeout"`
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
+	// Only authenticated plugin responses may opt into early metadata delivery.
+	OpenAIPluginSSEEarlyEventsEnabled bool `mapstructure:"openai_plugin_sse_early_events_enabled"`
 	// HTTP submission deadline shared across retries; zero disables it.
 	OpenAIUploadTimeoutSeconds int `mapstructure:"openai_upload_timeout_seconds"`
 	// Shared HTTP budget before the first complete model output event; zero disables it.
@@ -1184,12 +1208,11 @@ type GatewayConfig struct {
 	OpenAIHighEffortFirstOutputTimeoutSeconds int `mapstructure:"openai_high_effort_first_output_timeout_seconds"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`
+	// RequestBodyMemoryBudgetBytes bounds buffered ingress allocations per instance; 0 disables it.
+	// When unset in config and env it defaults to 1/4 of the memory limit (at least 1 GiB).
+	RequestBodyMemoryBudgetBytes int64 `mapstructure:"request_body_memory_budget_bytes"`
 	// TextMaxBodySize limits endpoints that cannot carry inline image/video payloads.
 	TextMaxBodySize int64 `mapstructure:"text_max_body_size"`
-	// RequestBodyMemoryBudgetBytes bounds buffered ingress request bodies across
-	// all gateway routes of this instance; exhaustion answers 503 with Retry-After.
-	// Unset: a quarter of the memory limit (see autoRequestBodyMemoryBudget). 0 disables it.
-	RequestBodyMemoryBudgetBytes int64 `mapstructure:"request_body_memory_budget_bytes"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
 	UpstreamResponseReadMaxBytes int64 `mapstructure:"upstream_response_read_max_bytes"`
 	// 上游模型列表响应体读取上限（字节）
@@ -1272,6 +1295,12 @@ type GatewayConfig struct {
 	// ConcurrencySlotTTLMinutes: 并发槽位过期时间（分钟）
 	// 应大于最长 LLM 请求时间，防止请求完成前槽位过期
 	ConcurrencySlotTTLMinutes int `mapstructure:"concurrency_slot_ttl_minutes"`
+	// APIKeySlotTTLSeconds: 普通 API Key 并发槽位的独立过期时间（秒）。
+	// 0 表示继承 concurrency_slot_ttl_minutes 的有效值，升级默认不改变行为；
+	// 显式正值需不低于 30 秒（配置策略下限，非实测安全 SLA，见部署文档）。
+	// 仅作用于普通共享 Redis 实现的 API Key 槽位；account/user 槽位、Live
+	// 租约及 regional concurrency authority 不受影响。
+	APIKeySlotTTLSeconds int `mapstructure:"api_key_slot_ttl_seconds"`
 	// SessionIdleTimeoutMinutes: 会话空闲超时时间（分钟），默认 5 分钟
 	// 用于 Anthropic OAuth/SetupToken 账号的会话数量限制功能
 	// 空闲超过此时间的会话将被自动释放
@@ -1308,6 +1337,8 @@ type GatewayConfig struct {
 	MaxAccountSwitches int `mapstructure:"max_account_switches"`
 	// Gemini 账户切换最大次数（Gemini 平台单独配置，因 API 限制更严格）
 	MaxAccountSwitchesGemini int `mapstructure:"max_account_switches_gemini"`
+	// Gemini 同账号重试次数（429/5xx 等可重试错误在换号前对同一账号的重发次数，不含首次请求）
+	MaxSameAccountRetriesGemini int `mapstructure:"max_same_account_retries_gemini"`
 
 	// Antigravity 429 fallback 限流时间（分钟），解析重置时间失败时使用
 	AntigravityFallbackCooldownMinutes int `mapstructure:"antigravity_fallback_cooldown_minutes"`
@@ -1481,9 +1512,18 @@ type OpenAICodexTicketConfig struct {
 // DefaultOpenAIWSClientFirstMessageTimeoutSeconds preserves the legacy ingress deadline.
 const DefaultOpenAIWSClientFirstMessageTimeoutSeconds = 30
 
+// GatewayOpenAIWSSmartProtocolConfig controls new sessions only. Disabled preserves legacy routing.
+type GatewayOpenAIWSSmartProtocolConfig struct {
+	Enabled              bool   `mapstructure:"enabled"`
+	Mode                 string `mapstructure:"mode"`
+	LargeOutputThreshold int    `mapstructure:"large_output_threshold"`
+	LongContextBytes     int    `mapstructure:"long_context_bytes"`
+}
+
 // GatewayOpenAIWSConfig OpenAI Responses WebSocket 配置。
 // 注意：默认全局开启；如需回滚可使用 force_http 或关闭 enabled。
 type GatewayOpenAIWSConfig struct {
+	SmartProtocol GatewayOpenAIWSSmartProtocolConfig `mapstructure:"smart_protocol"`
 	// ModeRouterV2Enabled: 新版 WS mode 路由开关（默认 false；关闭时保持 legacy 行为）
 	ModeRouterV2Enabled bool `mapstructure:"mode_router_v2_enabled"`
 	// IngressModeDefault: ingress 默认模式（off/ctx_pool/passthrough/http_bridge）
@@ -1632,6 +1672,9 @@ func (w GatewayOpenAIWSSchedulerScoreWeights) IsValid() bool {
 
 // GatewayOpenAISchedulerConfig OpenAI 高级调度器配置。
 type GatewayOpenAISchedulerConfig struct {
+	// StrictSessionAffinityGroupIDs pins text sessions in these groups to one
+	// account for the sticky TTL, including failures and capacity pressure.
+	StrictSessionAffinityGroupIDs []int64 `mapstructure:"strict_session_affinity_group_ids"`
 	// StickyEscapeEnabled: 是否允许 session_hash sticky 在账号健康度劣化时临时逃逸
 	StickyEscapeEnabled bool `mapstructure:"sticky_escape_enabled"`
 	// StickyEscapeTTFTMs: TTFT EWMA 超过该阈值时跳过 sticky
@@ -2059,25 +2102,6 @@ func LoadForBootstrap() (*Config, error) {
 	return load(true)
 }
 
-// detectMemoryLimitBytes is replaced in tests so defaults do not depend on the host.
-var detectMemoryLimitBytes = sysutil.MemoryLimitBytes
-
-const (
-	defaultRequestBodyMemoryBudgetBytes = int64(1 << 30)
-	// requestBodyMemoryBudgetDivisor leaves the rest of memory for conversion
-	// state, SSE buffers, caches and GC headroom.
-	requestBodyMemoryBudgetDivisor = 4
-)
-
-// autoRequestBodyMemoryBudget sizes the unconfigured ingress budget to a
-// quarter of the process memory limit (the smallest of physical memory, the
-// cgroup limit and GOMEMLIMIT). It never goes below 1 GiB, matching the
-// downstream CN gateway (lumai-beijing/sub2api c004c962a).
-func autoRequestBodyMemoryBudget(memoryLimitBytes uint64) int64 {
-	// uint64 / 4 always fits in int64.
-	return max(int64(memoryLimitBytes/requestBodyMemoryBudgetDivisor), defaultRequestBodyMemoryBudgetBytes)
-}
-
 func load(allowMissingJWTSecret bool) (*Config, error) {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -2301,6 +2325,7 @@ func configureConfigSource(setConfigFile, addConfigPath func(string)) {
 }
 
 func setDefaults() {
+	viper.SetDefault("gateway.disable_encrypted_agent_owner_binding", false)
 	viper.SetDefault("gateway.upstream_routing.enabled", false)
 	viper.SetDefault("runtime.role", RuntimeRoleFull)
 	viper.SetDefault("runtime.node_id", "")
@@ -2319,6 +2344,7 @@ func setDefaults() {
 	viper.SetDefault("runtime.serverless_endpoint", "")
 	viper.SetDefault("runtime.serverless_region", "")
 	viper.SetDefault("runtime.serverless_secret", "")
+	viper.SetDefault("runtime.serverless_response_header_timeout", 0)
 	viper.SetDefault("server.graceful_shutdown_timeout", 5)
 	viper.SetDefault("server.shutdown_drain_delay", 0)
 	viper.SetDefault("run_mode", RunModeStandard)
@@ -2388,6 +2414,7 @@ func setDefaults() {
 		"api.minimaxi.com", // MiniMax CN quota + inference
 		"api.minimax.io",   // MiniMax intl; frozen allowlists must add this host to use the intl site
 		"opencode.ai",
+		"api.mistral.ai",
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",
 		"*.openai.azure.com",
@@ -2712,6 +2739,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
+	viper.SetDefault("gateway.openai_plugin_sse_early_events_enabled", false)
 	viper.SetDefault("gateway.openai_upload_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_pre_output_budget_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
@@ -2723,6 +2751,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.api_key_queue.max_waiting", defaultAPIKeyQueueMaxWaiting)
 	viper.SetDefault("gateway.api_key_queue.timeout_seconds", defaultAPIKeyQueueTimeoutSeconds)
+	viper.SetDefault("gateway.max_same_account_retries_gemini", 4)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.codex_ws_anchor.ttl_seconds", 3600)
 	viper.SetDefault("gateway.codex_gateway_pin.ttl_seconds", 230)
@@ -2771,6 +2800,10 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_ws.store_disabled_force_new_conn", true)
 	viper.SetDefault("gateway.openai_ws.prewarm_generate_enabled", false)
 	viper.SetDefault("gateway.openai_ws.client_read_limit_bytes", 64*1024*1024)
+	viper.SetDefault("gateway.openai_ws.smart_protocol.enabled", false)
+	viper.SetDefault("gateway.openai_ws.smart_protocol.mode", "auto")
+	viper.SetDefault("gateway.openai_ws.smart_protocol.large_output_threshold", 2000)
+	viper.SetDefault("gateway.openai_ws.smart_protocol.long_context_bytes", 200000)
 	viper.SetDefault("gateway.openai_ws.http_bridge_enabled", true)
 	viper.SetDefault("gateway.openai_ws.http_bridge_threshold_bytes", 15*1024*1024)
 	viper.SetDefault("gateway.openai_ws.sse_acceleration_max_payload_bytes", 15*1024*1024)
@@ -2844,6 +2877,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.antigravity_fallback_cooldown_minutes", 1)
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
+	// Without explicit config or env, load() replaces this with a size derived
+	// from the memory limit (see autoRequestBodyMemoryBudget).
+	viper.SetDefault("gateway.request_body_memory_budget_bytes", defaultRequestBodyMemoryBudgetBytes)
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
 	// Registered so AutomaticEnv can reach it; load() replaces it with a value
 	// sized from the memory limit unless the config file or env sets it.
@@ -2862,6 +2898,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.max_upstream_clients", 5000)
 	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
+	viper.SetDefault("gateway.api_key_slot_ttl_seconds", 0)      // 普通 API Key 槽位独立 TTL；0=继承 concurrency_slot_ttl_minutes
 	viper.SetDefault("gateway.stream_data_interval_timeout", 180)
 	viper.SetDefault("gateway.excel_bps_stream_data_interval_timeout", 120)
 	viper.SetDefault("gateway.excel_bps_state_redis_enabled", false)
@@ -2979,6 +3016,7 @@ func setEnvReachableDefaults() {
 	// disable sticky escape, so register the effective default instead. An
 	// explicit false in config or env still wins.
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_enabled", true)
+	viper.SetDefault("gateway.openai_scheduler.strict_session_affinity_group_ids", []int64{})
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_error_rate", 0.0)
 	viper.SetDefault("gateway.openai_scheduler.sticky_escape_ttft_ms", 0)
 
@@ -3683,6 +3721,10 @@ func (c *Config) Validate() error {
 	if c.Idempotency.CleanupBatchSize <= 0 {
 		return fmt.Errorf("idempotency.cleanup_batch_size must be positive")
 	}
+	if c.Gateway.RequestBodyMemoryBudgetBytes < 0 {
+		return fmt.Errorf("gateway.request_body_memory_budget_bytes must not be negative")
+	}
+
 	if c.Gateway.MaxBodySize <= 0 {
 		return fmt.Errorf("gateway.max_body_size must be positive")
 	}
@@ -3715,6 +3757,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.OpenAIPreOutputBudgetSeconds < 0 || c.Gateway.OpenAIPreOutputBudgetSeconds > 3600 {
 		return fmt.Errorf("gateway.openai_pre_output_budget_seconds must be between 0-3600 seconds")
+	}
+	if c.Gateway.MaxSameAccountRetriesGemini < 0 || c.Gateway.MaxSameAccountRetriesGemini > 10 {
+		return fmt.Errorf("gateway.max_same_account_retries_gemini must be between 0-10")
 	}
 	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||
 		(c.Gateway.OpenAIFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIFirstOutputTimeoutSeconds < 30) {
@@ -3773,6 +3818,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.ConcurrencySlotTTLMinutes <= 0 {
 		return fmt.Errorf("gateway.concurrency_slot_ttl_minutes must be positive")
+	}
+	if c.Gateway.APIKeySlotTTLSeconds < 0 {
+		return fmt.Errorf("gateway.api_key_slot_ttl_seconds must be non-negative")
+	}
+	// 30 秒下限是配置策略：更短的租约会压缩既有 watchdog/续租超时公式的余量，
+	// 不是实测安全 SLA。
+	if c.Gateway.APIKeySlotTTLSeconds != 0 && c.Gateway.APIKeySlotTTLSeconds < 30 {
+		return fmt.Errorf("gateway.api_key_slot_ttl_seconds must be 0 (inherit concurrency_slot_ttl_minutes) or at least 30 seconds")
 	}
 	if c.Gateway.StreamDataIntervalTimeout < 0 {
 		return fmt.Errorf("gateway.stream_data_interval_timeout must be non-negative")
@@ -3876,6 +3929,14 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIWS.SSEAccelerationMaxPayloadBytes <= 0 {
 		return fmt.Errorf("gateway.openai_ws.sse_acceleration_max_payload_bytes must be positive")
 	}
+	switch c.Gateway.OpenAIWS.SmartProtocol.Mode {
+	case "", "auto", "shadow", "http", "ws":
+	default:
+		return fmt.Errorf("gateway.openai_ws.smart_protocol.mode must be auto|shadow|http|ws")
+	}
+	if c.Gateway.OpenAIWS.SmartProtocol.LargeOutputThreshold < 0 || c.Gateway.OpenAIWS.SmartProtocol.LongContextBytes < 0 {
+		return fmt.Errorf("gateway.openai_ws.smart_protocol thresholds must be non-negative")
+	}
 	if c.Gateway.OpenAIWS.HTTPBridgeThresholdBytes < 0 {
 		return fmt.Errorf("gateway.openai_ws.http_bridge_threshold_bytes must be non-negative")
 	}
@@ -3969,6 +4030,14 @@ func (c *Config) Validate() error {
 	}
 	if totalWeightSum := weights.TotalWeightSum(); math.IsNaN(totalWeightSum) || math.IsInf(totalWeightSum, 0) {
 		return fmt.Errorf("gateway.openai_ws.scheduler_score_weights total-weight sum must be finite")
+	}
+	if len(c.Gateway.OpenAIScheduler.StrictSessionAffinityGroupIDs) > 100 {
+		return fmt.Errorf("gateway.openai_scheduler.strict_session_affinity_group_ids supports at most 100 groups")
+	}
+	for _, id := range c.Gateway.OpenAIScheduler.StrictSessionAffinityGroupIDs {
+		if id <= 0 {
+			return fmt.Errorf("gateway.openai_scheduler.strict_session_affinity_group_ids must contain positive IDs")
+		}
 	}
 	if c.Gateway.OpenAIScheduler.StickyEscapeTTFTMs <= 0 {
 		return fmt.Errorf("gateway.openai_scheduler.sticky_escape_ttft_ms must be positive")

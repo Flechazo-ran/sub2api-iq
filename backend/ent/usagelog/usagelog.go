@@ -56,6 +56,10 @@ const (
 	FieldCacheCreation5mTokens = "cache_creation_5m_tokens"
 	// FieldCacheCreation1hTokens holds the string denoting the cache_creation_1h_tokens field in the database.
 	FieldCacheCreation1hTokens = "cache_creation_1h_tokens"
+	// FieldCacheCreation30mTokens holds the string denoting the cache_creation_30m_tokens field in the database.
+	FieldCacheCreation30mTokens = "cache_creation_30m_tokens"
+	// FieldCacheCreation12hTokens holds the string denoting the cache_creation_12h_tokens field in the database.
+	FieldCacheCreation12hTokens = "cache_creation_12h_tokens"
 	// FieldInputCost holds the string denoting the input_cost field in the database.
 	FieldInputCost = "input_cost"
 	// FieldOutputCost holds the string denoting the output_cost field in the database.
@@ -82,6 +86,8 @@ const (
 	FieldDurationMs = "duration_ms"
 	// FieldFirstTokenMs holds the string denoting the first_token_ms field in the database.
 	FieldFirstTokenMs = "first_token_ms"
+	// FieldQueueWaitMs holds the string denoting the queue_wait_ms field in the database.
+	FieldQueueWaitMs = "queue_wait_ms"
 	// FieldUserAgent holds the string denoting the user_agent field in the database.
 	FieldUserAgent = "user_agent"
 	// FieldIPAddress holds the string denoting the ip_address field in the database.
@@ -106,6 +112,8 @@ const (
 	FieldVideoDurationSeconds = "video_duration_seconds"
 	// FieldCacheTTLOverridden holds the string denoting the cache_ttl_overridden field in the database.
 	FieldCacheTTLOverridden = "cache_ttl_overridden"
+	// FieldQueueTiming holds the string denoting the queue_timing field in the database.
+	FieldQueueTiming = "queue_timing"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// EdgeUser holds the string denoting the user edge name in mutations.
@@ -181,6 +189,8 @@ var Columns = []string{
 	FieldCacheReadTokens,
 	FieldCacheCreation5mTokens,
 	FieldCacheCreation1hTokens,
+	FieldCacheCreation30mTokens,
+	FieldCacheCreation12hTokens,
 	FieldInputCost,
 	FieldOutputCost,
 	FieldCacheCreationCost,
@@ -194,6 +204,7 @@ var Columns = []string{
 	FieldStream,
 	FieldDurationMs,
 	FieldFirstTokenMs,
+	FieldQueueWaitMs,
 	FieldUserAgent,
 	FieldIPAddress,
 	FieldImageCount,
@@ -206,6 +217,7 @@ var Columns = []string{
 	FieldVideoResolution,
 	FieldVideoDurationSeconds,
 	FieldCacheTTLOverridden,
+	FieldQueueTiming,
 	FieldCreatedAt,
 }
 
@@ -248,6 +260,10 @@ var (
 	DefaultCacheCreation5mTokens int
 	// DefaultCacheCreation1hTokens holds the default value on creation for the "cache_creation_1h_tokens" field.
 	DefaultCacheCreation1hTokens int
+	// DefaultCacheCreation30mTokens holds the default value on creation for the "cache_creation_30m_tokens" field.
+	DefaultCacheCreation30mTokens int
+	// DefaultCacheCreation12hTokens holds the default value on creation for the "cache_creation_12h_tokens" field.
+	DefaultCacheCreation12hTokens int
 	// DefaultInputCost holds the default value on creation for the "input_cost" field.
 	DefaultInputCost float64
 	// DefaultOutputCost holds the default value on creation for the "output_cost" field.
@@ -405,6 +421,16 @@ func ByCacheCreation1hTokens(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCacheCreation1hTokens, opts...).ToFunc()
 }
 
+// ByCacheCreation30mTokens orders the results by the cache_creation_30m_tokens field.
+func ByCacheCreation30mTokens(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCacheCreation30mTokens, opts...).ToFunc()
+}
+
+// ByCacheCreation12hTokens orders the results by the cache_creation_12h_tokens field.
+func ByCacheCreation12hTokens(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCacheCreation12hTokens, opts...).ToFunc()
+}
+
 // ByInputCost orders the results by the input_cost field.
 func ByInputCost(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldInputCost, opts...).ToFunc()
@@ -468,6 +494,11 @@ func ByDurationMs(opts ...sql.OrderTermOption) OrderOption {
 // ByFirstTokenMs orders the results by the first_token_ms field.
 func ByFirstTokenMs(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldFirstTokenMs, opts...).ToFunc()
+}
+
+// ByQueueWaitMs orders the results by the queue_wait_ms field.
+func ByQueueWaitMs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldQueueWaitMs, opts...).ToFunc()
 }
 
 // ByUserAgent orders the results by the user_agent field.

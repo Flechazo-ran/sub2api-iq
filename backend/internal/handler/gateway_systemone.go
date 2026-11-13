@@ -56,7 +56,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if rejectRequestBodyMemoryOverload(c, err) {
+		if middleware2.RejectRequestBodyReadError(c, err) {
 			return
 		}
 		if maxErr, ok := extractMaxBytesError(err); ok {

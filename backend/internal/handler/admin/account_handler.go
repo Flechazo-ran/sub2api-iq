@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,8 @@ func NewOAuthHandler(oauthService *service.OAuthService) *OAuthHandler {
 
 // AccountHandler handles admin account management
 type AccountHandler struct {
+	performance             *service.AccountPerformanceService
+	upstreamChannels        *service.ChannelService
 	adminService            service.AdminService
 	oauthService            *service.OAuthService
 	openaiOAuthService      *service.OpenAIOAuthService
@@ -137,6 +140,8 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
+	UpstreamChannelID       int64          `json:"upstream_channel_id"`
+	ConfirmUpstreamChannel  bool           `json:"confirm_upstream_channel_binding"`
 	Name                    string         `json:"name" binding:"required"`
 	Notes                   *string        `json:"notes"`
 	Platform                string         `json:"platform" binding:"required"`
@@ -456,6 +461,10 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 		}
 	}
 
+	// Analytics enrichment is separate from the scheduler account domain.
+	if err := h.enrichUpstreamChannelBindings(ctx, []AccountWithConcurrency{item}); err != nil {
+		slog.Warn("upstream_channel_readback_failed")
+	}
 	h.enrichShadowParents(ctx, []AccountWithConcurrency{item})
 
 	return item
@@ -521,7 +530,7 @@ func (h *AccountHandler) fetchOpenAIAccountLoadMap(ctx context.Context, openAIAc
 		seen[account.ID] = struct{}{}
 		loadReq = append(loadReq, service.AccountWithConcurrency{
 			ID:             account.ID,
-			MaxConcurrency: account.EffectiveLoadFactor(),
+			MaxConcurrency: account.Concurrency,
 		})
 	}
 	if batchLoad, err := h.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); err != nil {
@@ -725,7 +734,15 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 	}
 
-	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+	var accounts []service.Account
+	var total int64
+	var err error
+	var concurrencyCounts map[int64]int
+	if strings.EqualFold(strings.TrimSpace(sortBy), "current_concurrency") {
+		accounts, total, concurrencyCounts, err = h.listAccountsByCurrentConcurrency(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortOrder)
+	} else {
+		accounts, total, err = h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -755,7 +772,6 @@ func (h *AccountHandler) List(c *gin.Context) {
 		accountIDs[i] = acc.ID
 	}
 
-	concurrencyCounts := make(map[int64]int)
 	var windowCosts map[int64]float64
 	var activeSessions map[int64]int
 	var rpmCounts map[int64]int
@@ -775,7 +791,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	}
 
 	// 始终获取并发数（Redis ZCARD，极低开销）
-	if h.concurrencyService != nil {
+	if concurrencyCounts == nil && h.concurrencyService != nil {
 		if cc, ccErr := h.concurrencyService.GetAccountConcurrencyBatch(c.Request.Context(), accountIDs); ccErr == nil && cc != nil {
 			concurrencyCounts = cc
 		}
@@ -902,6 +918,10 @@ func (h *AccountHandler) List(c *gin.Context) {
 		result[i] = item
 	}
 
+	if err := h.enrichUpstreamChannelBindings(c.Request.Context(), result); err != nil {
+		response.InternalError(c, "Upstream channel readback failed")
+		return
+	}
 	h.enrichShadowParents(c.Request.Context(), result)
 
 	if lite {
@@ -1028,7 +1048,11 @@ func (h *AccountHandler) GetByID(c *gin.Context) {
 		}
 	}
 
-	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+	result := h.buildAccountResponseWithRuntime(c.Request.Context(), account)
+	if h.accountTestService != nil && account != nil && account.IsGrok() {
+		result.GrokModelDiagnostics = h.accountTestService.GetGrokModelDiagnostics(c.Request.Context(), account)
+	}
+	response.Success(c, result)
 }
 
 // CheckMixedChannel handles checking mixed channel risk for account-group binding.
@@ -1083,6 +1107,14 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	if _, observer := service.ObserverGroupIDs(c.Request.Context()); observer && req.UpstreamChannelID > 0 {
+		response.ErrorFrom(c, service.ErrObserverScope)
+		return
+	}
+	if req.UpstreamChannelID < 0 || (req.UpstreamChannelID > 0 && !req.ConfirmUpstreamChannel) {
+		response.ErrorFrom(c, service.ErrUpstreamChannelValidation)
+		return
+	}
 	if err := service.ValidateOpenAILongContextBillingExtra(req.Platform, req.Extra); err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -1110,6 +1142,9 @@ func (h *AccountHandler) Create(c *gin.Context) {
 	var createdAccount *service.Account
 
 	result, err := executeAdminIdempotent(c, "admin.accounts.create", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		if req.UpstreamChannelID > 0 {
+			ctx = service.WithInitialUpstreamChannel(ctx, req.UpstreamChannelID)
+		}
 		account, execErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
 			Name:                  req.Name,
 			Notes:                 req.Notes,
@@ -1348,9 +1383,11 @@ type TestAccountRequest struct {
 }
 
 type PelicanTestRequest struct {
-	ModelID         string `json:"model_id"`
-	Prompt          string `json:"prompt"`
-	ReasoningEffort string `json:"reasoning_effort"`
+	PromptMode      string                   `json:"prompt_mode"`
+	PelicanQuestion *service.PelicanQuestion `json:"pelican_question"`
+	ModelID         string                   `json:"model_id"`
+	Prompt          string                   `json:"prompt"`
+	ReasoningEffort string                   `json:"reasoning_effort"`
 }
 
 type SyncFromCRSRequest struct {
@@ -1370,6 +1407,7 @@ type PreviewFromCRSRequest struct {
 // Test handles testing account connectivity with SSE streaming
 // POST /api/v1/admin/accounts/:id/test
 func (h *AccountHandler) Test(c *gin.Context) {
+	c.Request = c.Request.WithContext(service.WithAccountTestTimingStart(c.Request.Context(), time.Now()))
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.BadRequest(c, "Invalid account ID")
@@ -1398,6 +1436,16 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	}
 }
 
+// PreparePelicanQuestion allocates a comparison round without contacting an upstream.
+func (h *AccountHandler) PreparePelicanQuestion(c *gin.Context) {
+	cfg, err := service.NewPelicanQuestion()
+	if err != nil {
+		response.InternalError(c, "Unable to prepare pelican question")
+		return
+	}
+	response.Success(c, cfg)
+}
+
 // PelicanTest handles the dedicated Pelican HTML-generation test stream.
 // POST /api/v1/admin/accounts/:id/pelican-test
 func (h *AccountHandler) PelicanTest(c *gin.Context) {
@@ -1410,6 +1458,17 @@ func (h *AccountHandler) PelicanTest(c *gin.Context) {
 	var req PelicanTestRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if req.PromptMode == service.PelicanPromptModeRandom {
+		cfg, err := service.ResolveManualPelicanQuestion(req.PelicanQuestion)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		req.Prompt = cfg.ActualPrompt
+	} else if req.PromptMode != "" && req.PromptMode != "custom" {
+		response.BadRequest(c, "Invalid pelican prompt mode")
 		return
 	}
 	if err := h.accountTestService.TestPelicanAccountConnection(c, accountID, req.ModelID, req.Prompt, req.ReasoningEffort); err != nil {
@@ -1547,7 +1606,9 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		tokenInfo, err := h.openaiOAuthService.RefreshAccountToken(ctx, account)
 		if err != nil {
 			// 刷新失败但 access_token 可能仍有效，尝试设置隐私
-			h.adminService.EnsureOpenAIPrivacy(ctx, account)
+			service.AfterAccountCommit(ctx, func(committed context.Context) {
+				h.adminService.EnsureOpenAIPrivacy(committed, account)
+			})
 			return nil, "", err
 		}
 
@@ -1599,7 +1660,10 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 			if updateErr != nil {
 				return nil, "", fmt.Errorf("failed to update credentials: %w", updateErr)
 			}
-			h.adminService.EnsureAntigravityPrivacy(ctx, updatedAccount)
+			h.invalidateScopedAccountToken(ctx, updatedAccount)
+			service.AfterAccountCommit(ctx, func(committed context.Context) {
+				h.adminService.EnsureAntigravityPrivacy(committed, updatedAccount)
+			})
 			return updatedAccount, "missing_project_id_temporary", nil
 		}
 
@@ -1655,17 +1719,19 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		return nil, "", err
 	}
 
-	// 刷新成功后，清除 token 缓存，确保下次请求使用新 token
-	if h.tokenCacheInvalidator != nil {
-		if invalidateErr := h.tokenCacheInvalidator.InvalidateToken(ctx, updatedAccount); invalidateErr != nil {
-			log.Printf("[WARN] Failed to invalidate token cache for account %d: %v", updatedAccount.ID, invalidateErr)
+	service.AfterAccountCommit(ctx, func(ctx context.Context) {
+		// 刷新成功后，清除 token 缓存，确保下次请求使用新 token
+		if h.tokenCacheInvalidator != nil {
+			if invalidateErr := h.tokenCacheInvalidator.InvalidateToken(ctx, updatedAccount); invalidateErr != nil {
+				log.Printf("[WARN] Failed to invalidate token cache for account %d: %v", updatedAccount.ID, invalidateErr)
+			}
 		}
-	}
 
-	// OpenAI OAuth: 刷新成功后检查并设置 privacy_mode
-	h.adminService.EnsureOpenAIPrivacy(ctx, updatedAccount)
-	// Antigravity OAuth: 刷新成功后检查并设置 privacy_mode
-	h.adminService.EnsureAntigravityPrivacy(ctx, updatedAccount)
+		// OpenAI OAuth: 刷新成功后检查并设置 privacy_mode
+		h.adminService.EnsureOpenAIPrivacy(ctx, updatedAccount)
+		// Antigravity OAuth: 刷新成功后检查并设置 privacy_mode
+		h.adminService.EnsureAntigravityPrivacy(ctx, updatedAccount)
+	})
 
 	return updatedAccount, "", nil
 }
@@ -2959,6 +3025,10 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
+	h.respondAvailableModels(c, account)
+}
+
+func (h *AccountHandler) respondAvailableModels(c *gin.Context, account *service.Account) {
 	// Handle OpenAI accounts
 	if account.IsOpenAI() {
 		// Prefer the shared, account-keyed upstream catalog. If discovery fails,
@@ -2966,6 +3036,9 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		if h.accountTestService != nil {
 			if models, fetchErr := h.accountTestService.FetchOpenAIAccountModels(c.Request.Context(), account); fetchErr == nil {
 				response.Success(c, models)
+				return
+			} else if infraerrors.Reason(fetchErr) == "OPENAI_CODEX_MODELS_CREDENTIALS_INVALID" {
+				response.ErrorFrom(c, fetchErr)
 				return
 			} else if account.IsExcelBPSEnabled() {
 				if service.IsExcelAuthorizationError(fetchErr) {
@@ -3209,6 +3282,19 @@ func antigravityAccountTestModels(rawMapping any) []antigravity.ClaudeModel {
 // SyncUpstreamModels handles syncing live supported models from an account's upstream.
 // POST /api/v1/admin/accounts/:id/models/sync-upstream
 func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
+	var options service.UpstreamModelSyncOptions
+	if err := c.ShouldBindJSON(&options); err != nil && !errors.Is(err, io.EOF) {
+		response.BadRequest(c, "Invalid upstream model sync options")
+		return
+	}
+	if options.Automatic && !options.Apply {
+		response.BadRequest(c, "Automatic model sync requires apply=true")
+		return
+	}
+	if _, observer := service.ObserverGroupIDs(c.Request.Context()); observer && options.Apply {
+		response.ErrorFrom(c, service.ErrObserverScope)
+		return
+	}
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.BadRequest(c, "Invalid account ID")
@@ -3226,7 +3312,7 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 		return
 	}
 
-	catalog, err := h.accountTestService.SyncUpstreamModelCatalog(c.Request.Context(), account)
+	catalog, err := h.accountTestService.SyncUpstreamModelCatalogWithOptions(c.Request.Context(), account, options)
 	if err != nil {
 		var syncErr *service.UpstreamModelSyncError
 		if errors.As(err, &syncErr) {
@@ -3245,6 +3331,11 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 		slog.Warn("sync_upstream_models_failed", "account_id", accountID)
 		response.Error(c, http.StatusBadGateway, "Failed to sync upstream models from upstream")
 		return
+	}
+	if catalog != nil && account != nil && account.IsGrok() && account.ID > 0 && h.accountTestService != nil {
+		if latest, readErr := h.adminService.GetAccount(c.Request.Context(), account.ID); readErr == nil && latest != nil {
+			catalog.GrokModelDiagnostics = h.accountTestService.GetGrokModelDiagnostics(c.Request.Context(), latest)
+		}
 	}
 
 	response.Success(c, catalog)

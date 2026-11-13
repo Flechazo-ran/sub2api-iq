@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import UsageView from '../UsageView.vue'
+import TrafficPanel from '@/components/usage/TrafficPanel.vue'
 import Select, { type SelectOption } from '@/components/common/Select.vue'
 import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import UsageTable from '@/components/admin/usage/UsageTable.vue'
@@ -161,6 +162,7 @@ function mountUsageView() {
         UsageStatsCards: chartStub,
         UsageTable: { ...chartStub, props: ['columns'] },
         UserErrorRequestsTable: chartStub,
+        TrafficPanel: true,
         ModelDistributionChart: chartStub,
         GroupDistributionChart: chartStub,
         EndpointDistributionChart: chartStub,
@@ -217,11 +219,27 @@ describe('user UsageView', () => {
     getAvailable.mockResolvedValue([{ id: 1, name: 'default' }])
   })
 
+  it('passes the same own API key choices to traffic and usage details', async () => {
+    const wrapper = mountUsageView(); await flushPromises()
+    const usageOptions = wrapper.findAllComponents(Select).find(select =>
+      (select.props('options') as SelectOption[]).some(option => option.label === 'demo-key')
+    )!.props('options')
+    await wrapper.findAll('button').find(button => button.text() === 'traffic.title')!.trigger('click')
+    expect(wrapper.getComponent(TrafficPanel).props('apiKeyOptions')).toEqual(usageOptions)
+    wrapper.unmount()
+  })
+
   it('loads logs, stats, model stats, and snapshot on first render', async () => {
     const wrapper = mountUsageView()
     await flushPromises()
 
-    expect(wrapper.findComponent(UsageTable).props('columns').map((column: { key: string }) => column.key)).toContain('latency')
+    const usageColumnKeys = wrapper.findComponent(UsageTable).props('columns').map((column: { key: string }) => column.key)
+    expect(usageColumnKeys).toContain('latency')
+    expect(usageColumnKeys).not.toEqual(expect.arrayContaining([
+      'content_reasoning_first_ms',
+      'content_visible_text_first_ms',
+      'content_response_byte_first_ms',
+    ]))
     expect(query).toHaveBeenCalled()
     expect(getStats).toHaveBeenCalled()
     expect(getDashboardModels).toHaveBeenCalled()

@@ -28,6 +28,9 @@ func v2Config() ProxyAutoSwitchConfig {
 		MeanThresholdMS:     15000,
 		MaxAccountsPerProxy: 2,
 		Strategy:            ProxyAutoSwitchStrategyRandom,
+		// 测试默认关闭软降级，需要的用例自己打开，避免影响原有选代理断言。
+		SlowDemotionWindowMinutes: 0,
+		SlowDemotionMinAccounts:   2,
 	}
 }
 
@@ -42,11 +45,14 @@ func TestProxyAutoSwitchV2DefaultConfig(t *testing.T) {
 	require.Equal(t, 2, cfg.MaxAccountsPerProxy)
 	require.Empty(t, cfg.CandidateProxyIDs)
 	require.Equal(t, ProxyAutoSwitchStrategySequential, cfg.Strategy)
+	require.Equal(t, 1440, cfg.SlowDemotionWindowMinutes)
+	require.Equal(t, 2, cfg.SlowDemotionMinAccounts)
 
 	raw, err := json.Marshal(cfg)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"enabled":false,"group_ids":[16],"window_minutes":5,"min_samples":20,
-		"p60_threshold_ms":10000,"mean_threshold_ms":15000,"max_accounts_per_proxy":2,"candidate_proxy_ids":[],"strategy":"sequential"}`, string(raw))
+		"p60_threshold_ms":10000,"mean_threshold_ms":15000,"max_accounts_per_proxy":2,"candidate_proxy_ids":[],"strategy":"sequential",
+		"slow_demotion_window_minutes":1440,"slow_demotion_min_accounts":2}`, string(raw))
 }
 
 // 线上配置还是候选池改造之前存的（有 candidate_proxy_ids、没有 max_accounts_per_proxy）：
@@ -124,24 +130,31 @@ func TestProxyAutoSwitchV2ReadsOldConfigWithDefaults(t *testing.T) {
 	require.Equal(t, 15000, cfg.MeanThresholdMS)
 	require.Equal(t, 2, cfg.MaxAccountsPerProxy)
 	require.Equal(t, ProxyAutoSwitchStrategySequential, cfg.Strategy)
+	// 老配置没有软降级字段：读回来用默认值，不会变成 0 导致校验失败。
+	require.Equal(t, 1440, cfg.SlowDemotionWindowMinutes)
+	require.Equal(t, 2, cfg.SlowDemotionMinAccounts)
 }
 
 func TestProxyAutoSwitchV2ConfigValidation(t *testing.T) {
 	ok := v2Config()
 	require.NoError(t, ValidateProxyAutoSwitchConfig(ok))
 	cases := map[string]func(*ProxyAutoSwitchConfig){
-		"window low":   func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 0 },
-		"window high":  func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 61 },
-		"samples low":  func(c *ProxyAutoSwitchConfig) { c.MinSamples = 0 },
-		"samples high": func(c *ProxyAutoSwitchConfig) { c.MinSamples = 100001 },
-		"p60 low":      func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 0 },
-		"p60 high":     func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 600001 },
-		"mean low":     func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 0 },
-		"mean high":    func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 600001 },
-		"bad strategy": func(c *ProxyAutoSwitchConfig) { c.Strategy = "fastest" },
-		"bad group id": func(c *ProxyAutoSwitchConfig) { c.GroupIDs = []int64{0} },
-		"bad max per":  func(c *ProxyAutoSwitchConfig) { c.MaxAccountsPerProxy = 0 },
-		"high max per": func(c *ProxyAutoSwitchConfig) { c.MaxAccountsPerProxy = 101 },
+		"window low":               func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 0 },
+		"window high":              func(c *ProxyAutoSwitchConfig) { c.WindowMinutes = 61 },
+		"samples low":              func(c *ProxyAutoSwitchConfig) { c.MinSamples = 0 },
+		"samples high":             func(c *ProxyAutoSwitchConfig) { c.MinSamples = 100001 },
+		"p60 low":                  func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 0 },
+		"p60 high":                 func(c *ProxyAutoSwitchConfig) { c.P60ThresholdMS = 600001 },
+		"mean low":                 func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 0 },
+		"mean high":                func(c *ProxyAutoSwitchConfig) { c.MeanThresholdMS = 600001 },
+		"bad strategy":             func(c *ProxyAutoSwitchConfig) { c.Strategy = "fastest" },
+		"bad group id":             func(c *ProxyAutoSwitchConfig) { c.GroupIDs = []int64{0} },
+		"bad max per":              func(c *ProxyAutoSwitchConfig) { c.MaxAccountsPerProxy = 0 },
+		"high max per":             func(c *ProxyAutoSwitchConfig) { c.MaxAccountsPerProxy = 101 },
+		"demotion window negative": func(c *ProxyAutoSwitchConfig) { c.SlowDemotionWindowMinutes = -1 },
+		"demotion window high":     func(c *ProxyAutoSwitchConfig) { c.SlowDemotionWindowMinutes = 10081 },
+		"demotion accounts low":    func(c *ProxyAutoSwitchConfig) { c.SlowDemotionMinAccounts = 0 },
+		"demotion accounts high":   func(c *ProxyAutoSwitchConfig) { c.SlowDemotionMinAccounts = 101 },
 	}
 	for name, mutate := range cases {
 		cfg := v2Config()

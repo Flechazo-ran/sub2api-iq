@@ -9,12 +9,13 @@ import (
 // ReauthDiagnostic is derived from a bounded, validated worker error.
 // It contains no provider text and does not replace the task's ownership or state.
 type ReauthDiagnostic struct {
-	Engine     string `json:"engine,omitempty"`
-	Stage      string `json:"stage"`
-	Reason     string `json:"reason"`
-	ElapsedMS  int    `json:"elapsed_ms"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	HTTPStatus int    `json:"http_status,omitempty"`
+	Identity   *ReauthIdentityChecks `json:"identity,omitempty"`
+	Engine     string                `json:"engine,omitempty"`
+	Stage      string                `json:"stage"`
+	Reason     string                `json:"reason"`
+	ElapsedMS  int                   `json:"elapsed_ms"`
+	ExitCode   *int                  `json:"exit_code,omitempty"`
+	HTTPStatus int                   `json:"http_status,omitempty"`
 }
 
 func localProtocolError(raw string) (string, *ReauthDiagnostic, bool) {
@@ -71,7 +72,7 @@ func sessionStudioError(raw string) (string, *ReauthDiagnostic, bool) {
 			validPhase = true
 		}
 	case "terminal_result":
-		validPhase = reason == "invalid_result" || reason == "provider_failed"
+		validPhase = reason == "invalid_result" || reason == "provider_failed" || credentialOperationCode(reason) == reason && reason != "unknown"
 	case "credentials_validation":
 		validPhase = reason == "credentials_incomplete"
 	case "credentials_submit":
@@ -99,6 +100,9 @@ func validLocalProtocolStage(stage string) bool {
 }
 
 func validLocalProtocolReason(reason string) bool {
+	if reason != "unknown" && credentialOperationCode(reason) == reason {
+		return true
+	}
 	switch reason {
 	case "protocol_error", "password_rejected", "totp_rejected", "interaction_required", "security_check",
 		"session_unavailable", "workspace_mismatch", "callback_missing", "callback_invalid", "callback_state_mismatch",

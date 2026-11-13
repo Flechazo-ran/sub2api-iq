@@ -75,6 +75,8 @@ func (r *apiKeyRepository) create(ctx context.Context, key *service.APIKey) erro
 	created, err := builder.Save(ctx)
 	if err == nil {
 		key.ID = created.ID
+		key.AllowLongContext = created.AllowLongContext
+		key.ContextTokenLimit = created.ContextTokenLimit
 		key.LastUsedAt = created.LastUsedAt
 		key.CreatedAt = created.CreatedAt
 		key.UpdatedAt = created.UpdatedAt
@@ -144,6 +146,10 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 			apikey.FieldGroupID,
 			apikey.FieldName,
 			apikey.FieldStatus,
+			apikey.FieldModelMapping,
+			apikey.FieldReasoningEffort,
+			apikey.FieldAllowLongContext,
+			apikey.FieldContextTokenLimit,
 			apikey.FieldIPWhitelist,
 			apikey.FieldIPBlacklist,
 			apikey.FieldQuota,
@@ -192,6 +198,7 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 				group.FieldMonthlyLimitUsd,
 				group.FieldAllowImageGeneration,
 				group.FieldAllowBatchImageGeneration,
+				group.FieldImageCountBilling,
 				group.FieldImageRateIndependent,
 				group.FieldImageRateMultiplier,
 				group.FieldImagePrice1k,
@@ -282,6 +289,22 @@ func (r *apiKeyRepository) update(ctx context.Context, key *service.APIKey, fiel
 	}
 	if fields.Name {
 		builder.SetName(key.Name)
+	}
+	if fields.ModelMapping {
+		mapping := key.ModelMapping
+		if mapping == nil {
+			mapping = map[string]string{}
+		}
+		builder.SetModelMapping(mapping)
+	}
+	if fields.ReasoningEffort {
+		builder.SetReasoningEffort(key.ReasoningEffort)
+	}
+	if fields.ContextTokenLimit {
+		builder.SetContextTokenLimit(key.ContextTokenLimit)
+	}
+	if fields.AllowLongContext {
+		builder.SetAllowLongContext(key.AllowLongContext)
 	}
 	if fields.Status {
 		builder.SetStatus(key.Status)
@@ -938,30 +961,34 @@ func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {
 		return nil
 	}
 	out := &service.APIKey{
-		ID:               m.ID,
-		UserID:           m.UserID,
-		Key:              m.Key,
-		Name:             m.Name,
-		Status:           m.Status,
-		IPWhitelist:      m.IPWhitelist,
-		IPBlacklist:      m.IPBlacklist,
-		LastUsedAt:       m.LastUsedAt,
-		CreatedAt:        m.CreatedAt,
-		UpdatedAt:        m.UpdatedAt,
-		GroupID:          m.GroupID,
-		Quota:            m.Quota,
-		QuotaUsed:        m.QuotaUsed,
-		ExpiresAt:        m.ExpiresAt,
-		RateLimit5h:      m.RateLimit5h,
-		ConcurrencyLimit: m.ConcurrencyLimit,
-		RateLimit1d:      m.RateLimit1d,
-		RateLimit7d:      m.RateLimit7d,
-		Usage5h:          m.Usage5h,
-		Usage1d:          m.Usage1d,
-		Usage7d:          m.Usage7d,
-		Window5hStart:    m.Window5hStart,
-		Window1dStart:    m.Window1dStart,
-		Window7dStart:    m.Window7dStart,
+		ID:                m.ID,
+		UserID:            m.UserID,
+		Key:               m.Key,
+		Name:              m.Name,
+		Status:            m.Status,
+		ModelMapping:      m.ModelMapping,
+		ReasoningEffort:   m.ReasoningEffort,
+		AllowLongContext:  m.AllowLongContext,
+		ContextTokenLimit: m.ContextTokenLimit,
+		IPWhitelist:       m.IPWhitelist,
+		IPBlacklist:       m.IPBlacklist,
+		LastUsedAt:        m.LastUsedAt,
+		CreatedAt:         m.CreatedAt,
+		UpdatedAt:         m.UpdatedAt,
+		GroupID:           m.GroupID,
+		Quota:             m.Quota,
+		QuotaUsed:         m.QuotaUsed,
+		ExpiresAt:         m.ExpiresAt,
+		RateLimit5h:       m.RateLimit5h,
+		ConcurrencyLimit:  m.ConcurrencyLimit,
+		RateLimit1d:       m.RateLimit1d,
+		RateLimit7d:       m.RateLimit7d,
+		Usage5h:           m.Usage5h,
+		Usage1d:           m.Usage1d,
+		Usage7d:           m.Usage7d,
+		Window5hStart:     m.Window5hStart,
+		Window1dStart:     m.Window1dStart,
+		Window7dStart:     m.Window7dStart,
 	}
 	if m.Edges.User != nil {
 		out.User = userEntityToService(m.Edges.User)
@@ -1048,6 +1075,7 @@ func groupEntityToService(g *dbent.Group) *service.Group {
 		MonthlyLimitUSD:                 g.MonthlyLimitUsd,
 		AllowImageGeneration:            g.AllowImageGeneration,
 		AllowBatchImageGeneration:       g.AllowBatchImageGeneration,
+		ImageCountBilling:               g.ImageCountBilling,
 		ImageRateIndependent:            g.ImageRateIndependent,
 		ImageRateMultiplier:             g.ImageRateMultiplier,
 		ImagePrice1K:                    g.ImagePrice1k,

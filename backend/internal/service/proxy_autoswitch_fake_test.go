@@ -421,6 +421,26 @@ func (w *pasWorld) manualProxyEdit(accountID, proxyID int64, bulk bool) {
 	w.audits = append(w.audits, audit)
 }
 
+// SlowSwitchAccountCounts mirrors the repository: distinct accounts per
+// from-proxy among slow-verdict events since the given time.
+func (w *pasWorld) SlowSwitchAccountCounts(_ context.Context, since time.Time) (map[int64]int, error) {
+	seen := map[int64]map[int64]struct{}{}
+	for _, e := range w.events {
+		if e.CreatedAt.Before(since) || e.FromProxyID == nil || !pasContains([]string{ProxyAutoSwitchStatusMeasuring, ProxyAutoSwitchStatusDone, ProxyAutoSwitchStatusNoCandidate, ProxyAutoSwitchStatusFailed}, e.Status) {
+			continue
+		}
+		if seen[*e.FromProxyID] == nil {
+			seen[*e.FromProxyID] = map[int64]struct{}{}
+		}
+		seen[*e.FromProxyID][e.AccountID] = struct{}{}
+	}
+	out := map[int64]int{}
+	for id, accounts := range seen {
+		out[id] = len(accounts)
+	}
+	return out, nil
+}
+
 func (w *pasWorld) LatestEventPerAccount(_ context.Context, since time.Time, statuses []string) ([]ProxyAutoSwitchEvent, error) {
 	latest := map[int64]ProxyAutoSwitchEvent{}
 	for _, e := range w.events {

@@ -91,6 +91,10 @@ func APIKeyFromService(k *service.APIKey) *APIKey {
 		GroupIDs:           k.ConfiguredGroupIDs(),
 		GroupID:            k.GroupID,
 		Status:             k.Status,
+		ModelMapping:       k.ModelMapping,
+		ReasoningEffort:    k.ReasoningEffort,
+		AllowLongContext:   k.AllowLongContext,
+		ContextTokenLimit:  k.ContextTokenLimit,
 		IPWhitelist:        k.IPWhitelist,
 		IPBlacklist:        k.IPBlacklist,
 		LastUsedAt:         k.LastUsedAt,
@@ -201,6 +205,7 @@ func groupFromServiceBase(g *service.Group) Group {
 		LongContextPricingEnabled:       g.LongContextPricingEnabled,
 		AllowImageGeneration:            g.AllowImageGeneration,
 		AllowBatchImageGeneration:       g.AllowBatchImageGeneration,
+		ImageCountBilling:               g.ImageCountBilling,
 		ImageRateIndependent:            g.ImageRateIndependent,
 		ImageRateMultiplier:             g.ImageRateMultiplier,
 		BatchImageDiscountMultiplier:    g.BatchImageDiscountMultiplier,
@@ -481,7 +486,8 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		return nil
 	}
 	return &AccountListItem{
-		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
+		UpstreamChannelBinding: a.UpstreamChannelBinding,
+		ID:                     a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
 		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
 		ExcelBPSCredentialState: a.ExcelBPSCredentialState,
 		OllamaCloudUsage:        a.OllamaCloudUsage, CodexTurnTickets: a.CodexTurnTickets,
@@ -659,6 +665,7 @@ func RedeemCodeFromServiceAdmin(rc *service.RedeemCode) *AdminRedeemCode {
 	return &AdminRedeemCode{
 		RedeemCode: redeemCodeFromServiceBase(rc),
 		Notes:      rc.Notes,
+		AutoCredit: rc.AutoCredit,
 	}
 }
 
@@ -729,6 +736,8 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		CacheReadTokens:           l.CacheReadTokens,
 		CacheCreation5mTokens:     l.CacheCreation5mTokens,
 		CacheCreation1hTokens:     l.CacheCreation1hTokens,
+		CacheCreation30mTokens:    l.CacheCreation30mTokens,
+		CacheCreation12hTokens:    l.CacheCreation12hTokens,
 		InputCost:                 l.InputCost,
 		OutputCost:                l.OutputCost,
 		CacheCreationCost:         l.CacheCreationCost,
@@ -744,6 +753,9 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		NativeCompactionV2:        l.NativeCompactionV2,
 		DurationMs:                l.DurationMs,
 		FirstTokenMs:              l.FirstTokenMs,
+		QueueWaitMs:               l.QueueWaitMs,
+		QueueTiming:               l.QueueTiming,
+		ContentTiming:             l.ContentTiming,
 		ImageCount:                l.ImageCount,
 		ImageSize:                 l.ImageSize,
 		ImageInputSize:            l.ImageInputSize,

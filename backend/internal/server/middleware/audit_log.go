@@ -52,7 +52,7 @@ func SkipAudit(c *gin.Context) {
 // scalar, non-secret operation summaries. Request bodies and arbitrary maps
 // are never accepted through this channel.
 var auditExtraAllowedKeys = map[string]struct{}{
-	"source": {}, "reason_code": {}, "readback": {}, "remaining_count": {}, "target_user_id": {},
+	"source": {}, "target_channel_id": {}, "reason_code": {}, "readback": {}, "remaining_count": {}, "target_user_id": {},
 	"anonymous_api_enabled": {},
 	"result":                {}, "error_code": {}, "enabled": {}, "blocking_enabled": {},
 	"config_version": {}, "endpoint_count": {}, "scanner_count": {},
@@ -111,6 +111,9 @@ func truncateAuditExtraString(value string, limit int) string {
 
 // auditSensitiveReads 需要审计的敏感 GET 读取（method+FullPath → 动作名）。
 var auditSensitiveReads = map[string]string{
+	"GET /api/v1/admin/ops/ai/actions":                                        "admin.ops.ai.actions.read",
+	"GET /api/v1/admin/ops/ai/runs":                                           "admin.ops.ai.runs.read",
+	"GET /api/v1/admin/ops/ai/runs/:id":                                       "admin.ops.ai.run.read",
 	"GET /api/v1/admin/risk-control/logs/:id/evidence":                        "admin.cyber_evidence.read",
 	"GET /api/v1/admin/risk-control/logs/:id/evidence/export":                 "admin.cyber_evidence.export",
 	"GET /api/v1/admin/risk-control/evidence/config":                          "admin.cyber_evidence.config.read",
@@ -137,6 +140,12 @@ var auditSensitiveReads = map[string]string{
 
 // auditActionOverrides 变更类请求的动作名精确映射（未命中时自动推导）。
 var auditActionOverrides = map[string]string{
+	"PUT /api/v1/admin/ops/ai/policy":                         "admin.ops.ai.policy.update",
+	"POST /api/v1/admin/ops/ai/halt":                          "admin.ops.ai.halt",
+	"POST /api/v1/admin/ops/ai/proposals/preview":             "admin.ops.ai.proposal.freeze",
+	"POST /api/v1/admin/ops/ai/proposals/:id/apply":           "admin.ops.ai.proposal.apply",
+	"POST /api/v1/admin/ops/ai/actions/:id/rollback":          "admin.ops.ai.action.rollback",
+	"POST /api/v1/admin/ops/ai/runs":                          "admin.ops.ai.run.create",
 	"PUT /api/v1/admin/risk-control/evidence/config":          "admin.cyber_evidence.config.update",
 	"DELETE /api/v1/admin/risk-control/logs/:id/evidence":     "admin.cyber_evidence.delete",
 	"POST /api/v1/auth/login":                                 service.AuditActionLogin,
@@ -164,6 +173,10 @@ var auditActionOverrides = map[string]string{
 // auditBodyOmittedRoutes 请求体几乎整体由凭证构成的路由（如整块粘贴 auth JSON 的导入接口）。
 // 这类 body 的凭证内嵌在普通字符串值里，键级脱敏无法覆盖，整体不入库。
 var auditBodyOmittedRoutes = map[string]struct{}{
+	"POST /api/v1/admin/upstream-channels":                      {},
+	"PUT /api/v1/admin/upstream-channels/:id":                   {},
+	"DELETE /api/v1/admin/upstream-channels/:id":                {},
+	"PUT /api/v1/admin/upstream-channel-bindings":               {},
 	"POST /api/v1/admin/settings/ip-audit/release":              {},
 	"PUT /api/v1/admin/settings/ip-risk":                        {},
 	"POST /api/v1/admin/settings/ip-risk/anonymous-unban":       {},

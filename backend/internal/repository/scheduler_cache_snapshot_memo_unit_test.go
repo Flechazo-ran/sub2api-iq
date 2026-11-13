@@ -423,17 +423,29 @@ func TestSchedulerCacheSnapshotMemoEmptyAndNilMetadataAreNotCached(t *testing.T)
 	ctx := context.Background()
 	cache, _, _ := newSchedulerCacheMemoUnit(t, defaultSchedulerSnapshotWriteChunkSize)
 
-	t.Run("empty zset", func(t *testing.T) {
+	t.Run("published empty snapshot", func(t *testing.T) {
 		bucket := memoTestBucket(110)
 		_, err := cache.writeAccountIDs(ctx, []service.Account{memoTestAccount(81, "a")})
 		require.NoError(t, err)
 		memoPublish(t, cache, bucket)
-		memoRequireMiss(t, cache, bucket)
+		snapshot, hit, err := cache.GetSnapshot(ctx, bucket)
+		require.NoError(t, err)
+		require.True(t, hit)
+		require.Empty(t, snapshot)
+		require.Nil(t, cache.lookupSnapshotEntry(bucket.String()), "empty pools need no account memo")
 
 		active := cache.rdb.Get(ctx, schedulerBucketKey(schedulerActivePrefix, bucket)).Val()
 		require.NotEmpty(t, active)
-		require.NoError(t, cache.rdb.ZAdd(ctx, schedulerSnapshotKey(bucket, active), redis.Z{Score: 0, Member: "81"}).Err())
+		memoPublish(t, cache, bucket, memoTestAccount(81, "a"))
 		require.Equal(t, []int64{81}, memoIDs(memoRead(t, cache, bucket)))
+	})
+
+	t.Run("missing nonempty zset", func(t *testing.T) {
+		bucket := memoTestBucket(112)
+		memoPublish(t, cache, bucket, memoTestAccount(93, "a"))
+		active := cache.rdb.Get(ctx, schedulerBucketKey(schedulerActivePrefix, bucket)).Val()
+		require.NoError(t, cache.rdb.Del(ctx, schedulerSnapshotKey(bucket, active)).Err())
+		memoRequireMiss(t, cache, bucket)
 	})
 
 	t.Run("nil metadata", func(t *testing.T) {
@@ -563,7 +575,7 @@ func TestSchedulerCacheSnapshotMemoWriteAccountIDsAdvancesRevision(t *testing.T)
 		require.Len(t, batches, 2, "one execution per chunk")
 		require.Equal(t, []string{
 			"set " + schedulerAccountKey("133"),
-			"set " + schedulerAccountMetaKey("133"),
+			"getset " + schedulerAccountMetaKey("133"),
 			"set " + memoAnthropicRevisionKey,
 			"set " + geminiRevisionKey,
 		}, batches[1])
@@ -593,9 +605,9 @@ func TestSchedulerCacheSnapshotMemoWriteAccountIDsAdvancesRevision(t *testing.T)
 		require.Len(t, batches, 2, "no extra execution for the revision")
 		require.Equal(t, []string{
 			"set " + schedulerAccountKey("143"),
-			"set " + schedulerAccountMetaKey("143"),
+			"getset " + schedulerAccountMetaKey("143"),
 			"set " + schedulerAccountKey("144"),
-			"set " + schedulerAccountMetaKey("144"),
+			"getset " + schedulerAccountMetaKey("144"),
 			"set " + memoAnthropicRevisionKey,
 		}, batches[1])
 		require.Len(t, recorder.recorded(), 9, "every command travels inside the two pipelines")
@@ -966,7 +978,7 @@ func TestSchedulerCacheSnapshotMemoNilBeforeRealPipelineError(t *testing.T) {
 		memoTestAccount(261, "fresh"),
 		memoTestAccount(262, "wrong-type"),
 	})
-	require.Error(t, err, "a WRONGTYPE reply after a nil SET ... GET reply must fail the write")
+	require.Error(t, err, "a WRONGTYPE reply after a nil GETSET reply must fail the write")
 	require.Eventually(t, func() bool {
 		return memoRevisionValue(cache, schedulerAccountMetaRevisionKey) != ""
 	}, 2*time.Second, 5*time.Millisecond, "the global revision is advanced in the background")

@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/imageeditcompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -39,7 +40,7 @@ const (
 	openAIChatGPTFilesURL                  = "https://chatgpt.com/backend-api/files"
 	openAIImageBackendUserAgent            = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	openAIImageMaxDownloadBytes            = 20 << 20 // 20MB per image download
-	openAIImageMaxUploadPartSize           = 20 << 20 // 20MB per multipart upload part
+	openAIImageMaxUploadPartSize           = 50 << 20 // OpenAI's documented per-image limit for GPT image edits
 	openAIImagesResponsesMainModel         = "gpt-5.6-luna"
 	openAIImagesVerbatimPromptInstructions = "When invoking the image_generation tool, use the user's image prompt verbatim. Do not rewrite, expand, summarize, embellish, translate, normalize punctuation, or add or remove visual details or constraints. Preserve the original language, wording, capitalization, quotes, and punctuation exactly."
 )
@@ -369,10 +370,15 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 			continue
 		}
 
-		data, err := io.ReadAll(io.LimitReader(part, openAIImageMaxUploadPartSize))
+		// Read one byte past the limit so an oversized part is rejected instead of
+		// being cut short and forwarded upstream as a corrupt image.
+		data, err := io.ReadAll(io.LimitReader(part, openAIImageMaxUploadPartSize+1))
 		_ = part.Close()
 		if err != nil {
 			return fmt.Errorf("read multipart field %s: %w", name, err)
+		}
+		if len(data) > openAIImageMaxUploadPartSize {
+			return fmt.Errorf("multipart field %q exceeds the %d MB per-part limit", name, openAIImageMaxUploadPartSize>>20)
 		}
 
 		fileName := strings.TrimSpace(part.FileName())
@@ -637,6 +643,7 @@ func (s *OpenAIGatewayService) ForwardImages(
 	if account.IsSIWCEnabled() {
 		return nil, fmt.Errorf("SIWC does not support image generation; select Codex for this account")
 	}
+	ctx = s.withOpenAIImageResponseHeaderTimeout(ctx, c)
 	switch account.Type {
 	case AccountTypeAPIKey:
 		return s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel)
@@ -645,6 +652,23 @@ func (s *OpenAIGatewayService) ForwardImages(
 	default:
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}
+}
+
+// withOpenAIImageResponseHeaderTimeout applies the longer wait an admin chose
+// for this API key's group, keeping chat traffic on the global timeout.
+func (s *OpenAIGatewayService) withOpenAIImageResponseHeaderTimeout(ctx context.Context, c *gin.Context) context.Context {
+	if s == nil || s.settingService == nil || c == nil {
+		return ctx
+	}
+	value, ok := c.Get("api_key")
+	if !ok {
+		return ctx
+	}
+	apiKey, ok := value.(*APIKey)
+	if !ok || apiKey == nil {
+		return ctx
+	}
+	return WithHTTPUpstreamResponseHeaderTimeout(ctx, s.settingService.OpenAIImageResponseHeaderTimeout(ctx, apiKey.GroupID))
 }
 
 func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
@@ -684,6 +708,21 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	// 路径本来就无条件脱钩，这里对齐；上游侧仍由 ResponseHeaderTimeout 兜底。
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	defer releaseUpstreamCtx()
+
+	if imageeditcompat.Enabled(account.GetOpenAIBaseURL(), parsed.Endpoint, account.ID, os.Getenv("SUB2API_IMAGE_EDIT_FORM_ACCOUNT_IDS")) {
+		forwardBody, forwardContentType, err = imageeditcompat.Convert(forwardBody, forwardContentType, func(ref string) ([]byte, error) {
+			encoded, fetchErr := s.fetchOpenAIImageURLBase64(ctx, account, ref)
+			if fetchErr != nil {
+				// Download errors may embed signed reference URLs. Do not expose
+				// them through the forwarding error log or client response.
+				return nil, fmt.Errorf("image reference download failed")
+			}
+			return base64.StdEncoding.DecodeString(encoded)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("image edit form compatibility: %w", err)
+		}
+	}
 
 	token, _, err := s.GetAccessToken(upstreamCtx, account)
 	if err != nil {
@@ -771,7 +810,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	defer func() { _ = resp.Body.Close() }()
 
 	var usage OpenAIUsage
-	imageCount := parsed.N
+	var imageCount int
 	var firstTokenMs *int
 	if parsed.Stream && isEventStreamResponse(resp.Header) {
 		streamUsage, streamCount, streamSizes, ttft, err := s.handleOpenAIImagesStreamingResponse(resp, c, startTime, nil)
@@ -787,6 +826,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 					ResponseHeaders:  resp.Header.Clone(),
 					Duration:         time.Since(startTime),
 					FirstTokenMs:     ttft,
+					ImageEndpoint:    true,
 					ImageCount:       streamCount,
 					ImageSize:        parsed.SizeTier,
 					ImageInputSize:   parsed.Size,
@@ -796,7 +836,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			return nil, err
 		}
 		usage = streamUsage
-		imageCount = streamCount
+		imageCount = resolveBillableImageCount(streamCount, 0, imageCountBillingEnabled(getAPIKeyFromContext(c)))
 		imageOutputSizes := streamSizes
 		firstTokenMs = ttft
 		return &OpenAIForwardResult{
@@ -809,6 +849,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			ResponseHeaders:  resp.Header.Clone(),
 			Duration:         time.Since(startTime),
 			FirstTokenMs:     firstTokenMs,
+			ImageEndpoint:    true,
 			ImageCount:       imageCount,
 			ImageSize:        parsed.SizeTier,
 			ImageInputSize:   parsed.Size,
@@ -820,9 +861,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			return nil, err
 		}
 		usage = nonStreamUsage
-		if nonStreamCount > 0 {
-			imageCount = nonStreamCount
-		}
+		imageCount = resolveBillableImageCount(nonStreamCount, parsed.N, imageCountBillingEnabled(getAPIKeyFromContext(c)))
 		return &OpenAIForwardResult{
 			RequestID:        resp.Header.Get("x-request-id"),
 			UpstreamHeaders:  resp.Header,
@@ -833,6 +872,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			ResponseHeaders:  resp.Header.Clone(),
 			Duration:         time.Since(startTime),
 			FirstTokenMs:     firstTokenMs,
+			ImageEndpoint:    true,
 			ImageCount:       imageCount,
 			ImageSize:        parsed.SizeTier,
 			ImageInputSize:   parsed.Size,

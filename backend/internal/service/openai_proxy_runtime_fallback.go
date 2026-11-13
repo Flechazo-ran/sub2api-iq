@@ -146,6 +146,9 @@ func (s *OpenAIGatewayService) doOpenAIProxyAttempt(req *http.Request, account *
 	if err := controlledSubmission(req.Context(), "native_http"); err != nil {
 		return nil, err
 	}
+	if err := s.priorityLatencyBeforeSend(req.Context(), account); err != nil {
+		return nil, err
+	}
 	observeAttempt := s.observePriorityAttempt(req, account)
 	defer func() { observeAttempt(resp, err) }()
 	defer func() { s.rateLimitService.observeQualityResponse(req.Context(), account, resp, err) }()
@@ -157,13 +160,25 @@ func (s *OpenAIGatewayService) doOpenAIProxyAttempt(req *http.Request, account *
 			err = &runtimeProxyEgressError{error: err, target: target}
 		}
 	}()
-	if s.pluginManager != nil && !s.codexTicketRequestBound(req, account) {
+	if err = s.fenceAuthConnectionEgress(req.Context(), req, account); err != nil {
+		return nil, err
+	}
+	if s.pluginManager != nil && account.AuthConnectionID == "" && !s.codexTicketRequestBound(req, account) {
 		resp, handled, err := s.pluginManager.RoundTripOpenAIOAuth(req.Context(), req, target.url, account)
 		if handled {
+			if options, ok := pelicanTestOptionsFromContext(req.Context()); ok && options.nativeOAuthTransport != nil && !IsAstraSourceAcquisition(req.Context()) {
+				*options.nativeOAuthTransport = false
+			}
 			return markOpenAIResponseEgress(resp, req, target.proxyID), err
 		}
 	}
 	resp, err = s.httpUpstream.Do(req, target.url, account.ID, account.Concurrency)
+	if options, ok := pelicanTestOptionsFromContext(req.Context()); ok && options.nativeOAuthTransport != nil && !IsAstraSourceAcquisition(req.Context()) {
+		// Fail-open ticket admission may still send natively. Check the final
+		// sent request too: fast admission can install a ticket in the adapter.
+		*options.nativeOAuthTransport = err == nil && resp != nil && !IsAstraSourceAcquisition(req.Context()) && !s.codexTicketRequestBound(req, account) &&
+			(resp.Request == nil || !s.codexTicketRequestBound(resp.Request, account))
+	}
 	return markOpenAIResponseEgress(resp, req, target.proxyID), err
 }
 

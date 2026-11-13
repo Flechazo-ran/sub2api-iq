@@ -53,6 +53,7 @@ func TestForwardAsChatCompletions_StrictDeveloperRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, stream := range []bool{false, true} {
 		for _, target := range []struct{ platform, model, base string }{
+			{PlatformMistral, "mistral-small-latest", "https://api.mistral.ai/v1"},
 			{PlatformDeepseek, "deepseek-flash", "https://api.deepseek.com"},
 			{PlatformKimi, "k3", "https://api.kimi.com/coding"},
 			{PlatformZhipu, "glm-5.3", "https://open.bigmodel.cn/api/paas/v4"},
@@ -60,6 +61,9 @@ func TestForwardAsChatCompletions_StrictDeveloperRole(t *testing.T) {
 			{PlatformOpenAI, "k3", "https://api.kimi.com/coding"},
 			{PlatformOpenAI, "kimi-k3", "https://api.moonshot.ai"},
 			{PlatformOpenAI, "glm-5.3", "https://open.bigmodel.cn/api/paas/v4"},
+			{PlatformOpenCodeGo, "deepseek-v4.1-flash", DefaultOpenCodeGoBaseURL},
+			{PlatformOpenAI, "deepseek-v4.1-flash", DefaultOpenCodeGoBaseURL},
+			{PlatformOpenAI, "deepseek-v4.1-flash", DefaultOpenCodeZenBaseURL},
 		} {
 			t.Run(fmt.Sprintf("%s/%s/%s/stream=%t", target.platform, target.model, target.base, stream), func(t *testing.T) {
 				body := []byte(fmt.Sprintf(`{"model":"example-alias","messages":[{"role":"developer","content":"Keep these instructions."},{"role":"user","content":"ping"}],"stream":%t,"max_tokens":10}`, stream))
@@ -111,7 +115,7 @@ func TestNormalizeStrictChatDeveloperRoles_PreservesConversation(t *testing.T) {
 	body := []byte(`{"model":"alias","messages":[{"role":"system","content":"first"},{"role":"developer","content":[{"type":"text","text":"developer is just text","cache_control":{"type":"ephemeral"}}],"name":"rules"},{"role":"user","content":"ping"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"role\":\"developer\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"},{"role":"developer","content":"last"}],"metadata":{"large":9007199254740993,"role":"developer"},"stream":true,"reasoning_effort":"high"}`)
 	original := bytes.Clone(body)
 	want := strings.ReplaceAll(string(body), `"role":"developer","content"`, `"role":"system","content"`)
-	for _, platform := range []string{PlatformDeepseek, PlatformKimi, PlatformZhipu} {
+	for _, platform := range []string{PlatformDeepseek, PlatformKimi, PlatformZhipu, PlatformMistral} {
 		t.Run(platform, func(t *testing.T) {
 			account := &Account{Platform: platform, Type: AccountTypeAPIKey}
 			got, err := normalizeStrictChatDeveloperRoles(account, "https://relay.example.test/v1/chat/completions", body)
@@ -134,6 +138,36 @@ func TestNormalizeStrictChatDeveloperRoles_ExactOfficialHosts(t *testing.T) {
 			got, err := normalizeStrictChatDeveloperRoles(account, "https://"+host+"/v1/chat/completions", body)
 			require.NoError(t, err)
 			require.JSONEq(t, `{"messages":[{"role":"system","content":"rules"}]}`, string(got))
+		})
+	}
+}
+
+func TestNormalizeStrictChatDeveloperRoles_OpenCodeModelRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name, platform, target, model, wantRole string
+	}{
+		{"go_deepseek", PlatformOpenCodeGo, DefaultOpenCodeGoBaseURL, "deepseek-v4.1-flash", "system"},
+		{"go_deepseek_proxy", PlatformOpenCodeGo, "https://relay.example.test/v1/chat/completions", "deepseek-v4.1-flash", "system"},
+		{"zen_deepseek", PlatformOpenAI, DefaultOpenCodeZenBaseURL, "deepseek-v4.1-flash", "system"},
+		{"prefixed_deepseek", PlatformOpenAI, DefaultOpenCodeGoBaseURL, "opencode-go/DeepSeek-V4-Pro", "system"},
+		{"go_other_model", PlatformOpenCodeGo, DefaultOpenCodeGoBaseURL, "gpt-5.6-luna", "developer"},
+		{"zen_other_model", PlatformOpenAI, DefaultOpenCodeZenBaseURL, "gpt-5.6-luna", "developer"},
+		{"unrelated_deepseek", PlatformOpenAI, "https://relay.example.test/v1/chat/completions", "deepseek-v4.1-flash", "developer"},
+		{"host_suffix", PlatformOpenAI, "https://opencode.ai.example.test/v1/chat/completions", "deepseek-v4.1-flash", "developer"},
+		{"host_in_path", PlatformOpenAI, "https://example.test/opencode.ai/zen/v1/chat/completions", "deepseek-v4.1-flash", "developer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A stale configured URL must not override the selected protocol destination.
+			account := &Account{Platform: tc.platform, Type: AccountTypeAPIKey, Credentials: map[string]any{"base_url": DefaultOpenCodeZenBaseURL}}
+			body := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"developer","content":"rules"}]}`, tc.model))
+			original := bytes.Clone(body)
+			got, err := normalizeStrictChatDeveloperRoles(account, tc.target, body)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRole, gjson.GetBytes(got, "messages.0.role").String())
+			require.Equal(t, original, body)
+			if tc.wantRole == "developer" {
+				require.Equal(t, original, got)
+			}
 		})
 	}
 }

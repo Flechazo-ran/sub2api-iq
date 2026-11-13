@@ -33,6 +33,9 @@ const (
 	schedulerPublishedPrefix       = "sched:published:"
 	schedulerSnapshotPrefix        = "sched:"
 	schedulerLockPrefix            = "sched:lock:"
+	// Redis cannot retain an empty sorted set. A version-local sentinel marks
+	// a deliberately published empty snapshot without accepting a missing key.
+	schedulerEmptySnapshotMember = "__empty__"
 	// 账号精简记录（sched:meta:<id>）的修订号：全局修订号与按平台划分的修订号（前缀后接平台名）。
 	// 改写精简记录后写入所涉平台的修订号；删除记录、改写平台为空或平台发生变化的记录、写入出错时写入全局修订号。
 	// 取值都是新的随机串，读侧只比较是否相等，键丢失后重建也不会与旧取值相同；
@@ -368,10 +371,13 @@ func (c *schedulerCache) GetSnapshot(ctx context.Context, bucket service.Schedul
 		return nil, false, err
 	}
 	if len(ids) == 0 {
-		// 空快照视为缓存未命中，触发数据库回退查询
-		// 这解决了新分组创建后立即绑定账号时的竞态条件问题
+		// An active version without its data is incomplete, not an empty pool.
 		c.dropSnapshotEntry(bucketKey)
 		return nil, false, nil
+	}
+	if len(ids) == 1 && ids[0] == schedulerEmptySnapshotMember {
+		c.dropSnapshotEntry(bucketKey)
+		return []*service.Account{}, true, nil
 	}
 
 	keys := make([]string, 0, len(ids))
@@ -753,7 +759,7 @@ func schedulerSnapshotMembers(accountIDs []int64) []redis.Z {
 
 func (c *schedulerCache) writeSnapshotMembers(ctx context.Context, bucket service.SchedulerBucket, version string, members []redis.Z) error {
 	if len(members) == 0 {
-		return nil
+		members = []redis.Z{{Score: 0, Member: schedulerEmptySnapshotMember}}
 	}
 	snapshotKey := schedulerSnapshotKey(bucket, version)
 	pipe := c.rdb.Pipeline()
@@ -1074,7 +1080,7 @@ func decodeCachedAccount(val any) (*service.Account, error) {
 // writeAccountIDs 分块写入整账号与精简记录，返回成功编码并写入的有序账号 ID。
 // 每块在追加下一个账号前才执行，最后一块总是非空；所涉平台的修订号追加在最后一块末尾，
 // 与最后一批精简记录同一次往返发出，且排在全部精简记录写入之后。
-// 精简记录用 SET ... GET 写入并取回旧值：旧值的平台与新平台不同时，旧平台 bucket 中可能仍缓存着该账号，
+// 精简记录用 Redis 6.0 兼容的原子 GETSET 写入并取回旧值（同时清除旧 TTL）：旧值的平台与新平台不同时，旧平台 bucket 中可能仍缓存着该账号，
 // 全部写入完成后另行写入全局修订号。该检测尽力而为（客户端在 pipeline 内部重试时取回的可能已是本次写入的值），
 // 漏检由进程内快照缓存的最长复用时长兜底。
 // 任一块执行出错时，此前已执行的块与出错的块都可能已有精简记录生效，返回时启动后台写入全局修订号。
@@ -1085,7 +1091,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 
 	type metaWrite struct {
 		platform string
-		previous *redis.StatusCmd
+		previous *redis.StringCmd
 	}
 	pipe := c.rdb.Pipeline()
 	accountIDs := make([]int64, 0, len(accounts))
@@ -1105,7 +1111,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 			execFailed = true
 			return err
 		}
-		// SET ... GET 在键原本不存在时返回 redis.Nil，不算失败；其余命令的错误逐条检查。
+		// GETSET 在键原本不存在时返回 redis.Nil，不算失败；其余命令的错误逐条检查。
 		for _, cmd := range cmds {
 			if cmdErr := cmd.Err(); cmdErr != nil && !errors.Is(cmdErr, redis.Nil) {
 				execFailed = true
@@ -1142,7 +1148,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 		pipe.Set(ctx, schedulerAccountKey(id), fullPayload, 0)
 		writes = append(writes, metaWrite{
 			platform: account.Platform,
-			previous: pipe.SetArgs(ctx, schedulerAccountMetaKey(id), metaPayload, redis.SetArgs{Get: true}),
+			previous: pipe.GetSet(ctx, schedulerAccountMetaKey(id), metaPayload), //nolint:staticcheck // Redis 6.0 compatibility; replacement options require Redis 6.2.
 		})
 		// Keep the hot LastUsedAt side key untouched: a lagging snapshot rebuild
 		// must not overwrite a newer scheduler update.
@@ -1168,9 +1174,9 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 	return accountIDs, nil
 }
 
-// schedulerMetaPlatformChanged 判断 SET ... GET 取回的旧精简记录是否属于另一个平台；
+// schedulerMetaPlatformChanged 判断 GETSET 取回的旧精简记录是否属于另一个平台；
 // 旧值不是合法 JSON 或缺少字符串类型的顶层 Platform 时按已变化处理。
-func schedulerMetaPlatformChanged(previous *redis.StatusCmd, platform string) bool {
+func schedulerMetaPlatformChanged(previous *redis.StringCmd, platform string) bool {
 	raw, err := previous.Result()
 	if err != nil {
 		return false
@@ -1401,6 +1407,15 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		return nil
 	}
 	keys := []string{
+		service.OAuthDegradationActionExtraKey,
+		// Images candidate authorization runs before full-account hydration.
+		service.ExtraImageModelsKey,
+		service.ExtraImageModelPrefixesKey,
+		"openai_connections_managed", "openai_auth_connections",
+		// Usage settlement can receive an account from this projection. Preserve
+		// the explicit response-tier billing contract through scheduler caches.
+		service.OpenAIResponseTierBillingEnabledKey,
+		service.OpenAIOAuthRelayFastBillingKey,
 		// Priority scoring runs on candidate metadata before full hydration.
 		// Dropping saved procurement cost silently substitutes the 0.1 default.
 		service.AccountCostMultiplierExtraKey,

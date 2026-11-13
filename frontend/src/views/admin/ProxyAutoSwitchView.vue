@@ -40,6 +40,12 @@
           <p class="rule" data-testid="pas-rule">{{ ruleText }}</p>
 
           <div class="threshold-row">
+            <label class="inline-field" for="pas-slow_demotion_hours"><span class="field-label">{{ t('proxyAutoSwitch.slowDemotionHours') }}</span><input id="pas-slow_demotion_hours" v-model.number="draft.slow_demotion_hours" type="number" class="input num-input" min="0" max="168" step="1" :aria-invalid="fieldError('slow_demotion_hours') ? 'true' : undefined" data-testid="pas-slow_demotion_hours" /><span>{{ t('proxyAutoSwitch.unit.hours') }}</span><span v-if="fieldError('slow_demotion_hours')" class="field-error">{{ fieldError('slow_demotion_hours') }}</span></label>
+            <label class="inline-field" for="pas-slow_demotion_min_accounts"><span class="field-label">{{ t('proxyAutoSwitch.slowDemotionMinAccounts') }}</span><input id="pas-slow_demotion_min_accounts" v-model.number="draft.slow_demotion_min_accounts" type="number" class="input num-input" min="1" max="100" step="1" :aria-invalid="fieldError('slow_demotion_min_accounts') ? 'true' : undefined" data-testid="pas-slow_demotion_min_accounts" /><span>{{ t('proxyAutoSwitch.unit.accounts') }}</span><span v-if="fieldError('slow_demotion_min_accounts')" class="field-error">{{ fieldError('slow_demotion_min_accounts') }}</span></label>
+          </div>
+          <p class="hint" data-testid="pas-slow-demotion-hint">{{ t('proxyAutoSwitch.slowDemotionHint') }}</p>
+
+          <div class="threshold-row">
             <label class="inline-field" for="pas-max_accounts_per_proxy"><span class="field-label">{{ t('proxyAutoSwitch.maxAccountsPerProxy') }}</span><input id="pas-max_accounts_per_proxy" v-model.number="draft.max_accounts_per_proxy" type="number" class="input num-input" min="1" max="100" step="1" :aria-invalid="fieldError('max_accounts_per_proxy') ? 'true' : undefined" data-testid="pas-max_accounts_per_proxy" /><span>{{ t('proxyAutoSwitch.unit.accounts') }}</span><span v-if="fieldError('max_accounts_per_proxy')" class="field-error">{{ fieldError('max_accounts_per_proxy') }}</span></label>
           </div>
 
@@ -67,7 +73,7 @@
               <tbody v-else>
                 <tr v-for="proxy in poolRows" :key="proxy.id" :data-proxy-id="proxy.id" :class="{ 'row-expired': !isUsable(proxy) || isFull(proxy) }">
                   <td class="cell-left rank-cell" data-testid="pas-proxy-rank">{{ poolRank.get(proxy.id) ?? '—' }}</td>
-                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="poolNote(proxy)" class="expired-tag" data-testid="pas-proxy-note">{{ poolNote(proxy) }}</span></td>
+                  <td class="cell-left proxy-name-cell">{{ proxyLabel(proxy) }}<span v-if="poolNote(proxy)" class="expired-tag" data-testid="pas-proxy-note">{{ poolNote(proxy) }}</span><span v-if="proxy.demoted" class="demoted-tag" :title="t('proxyAutoSwitch.demotedTitle', { count: proxy.slow_accounts, hours: savedDemotionHours })" :data-testid="`pas-proxy-demoted-${proxy.id}`">{{ t('proxyAutoSwitch.demotedTag', { count: proxy.slow_accounts }) }}</span></td>
                   <td class="cell-left">{{ proxy.region || '—' }}</td>
                   <td class="cell-left tabular-nums">{{ monthDay(proxy.expires_at) }}</td>
                   <td class="tabular-nums" data-testid="pas-proxy-accounts">{{ proxy.account_count }} / {{ savedMax }}</td>
@@ -97,12 +103,22 @@
       <section class="workspace-panel" aria-labelledby="pas-accounts-heading">
         <header class="panel-heading"><div><h3 id="pas-accounts-heading">{{ t('proxyAutoSwitch.accountMonitor') }}</h3><p data-testid="pas-account-window">{{ t('proxyAutoSwitch.accountWindowHint', { minutes: monitorWindow }) }}</p></div></header>
         <div v-if="accountsError" role="alert" class="panel-error" data-testid="pas-accounts-error">{{ accountsError }}<button :disabled="accountsLoading" @click="loadAccounts">{{ t('proxyAutoSwitch.retry') }}</button></div>
+        <div v-if="accounts.length" class="accounts-toolbar" data-testid="pas-accounts-toolbar">
+          <input v-model="accountKeyword" type="search" class="input accounts-search" :placeholder="t('proxyAutoSwitch.accountSearch')" :aria-label="t('proxyAutoSwitch.accountSearch')" data-testid="pas-accounts-search" />
+          <div class="chips" role="group" :aria-label="t('proxyAutoSwitch.colState')" data-testid="pas-accounts-states">
+            <button v-for="option in accountStateOptions" :key="option.value" type="button" class="chip" :class="{ on: accountStateFilter === option.value }" :aria-pressed="accountStateFilter === option.value" :data-state-filter="option.value" @click="accountStateFilter = option.value">{{ option.label }}<span class="chip-count">{{ option.count }}</span></button>
+          </div>
+          <select v-if="accountGroupOptions.length > 1" v-model.number="accountGroupFilter" class="pager-select accounts-group" :aria-label="t('proxyAutoSwitch.groups')" data-testid="pas-accounts-group">
+            <option :value="0">{{ t('proxyAutoSwitch.allGroups') }}</option>
+            <option v-for="group in accountGroupOptions" :key="group.id" :value="group.id">{{ group.name }}</option>
+          </select>
+        </div>
         <div class="table-scroll">
           <table class="data-table accounts-table" data-testid="pas-accounts">
-            <thead><tr><th class="cell-left">{{ t('proxyAutoSwitch.colAccount') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colCurrentProxy') }}</th><th>{{ t('proxyAutoSwitch.colSamples') }}</th><th>{{ t('proxyAutoSwitch.colP60') }}</th><th>{{ t('proxyAutoSwitch.colMean') }}</th><th>{{ t('proxyAutoSwitch.colDuration') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colState') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colLastSwitch') }}</th></tr></thead>
+            <thead><tr><th class="cell-left">{{ t('proxyAutoSwitch.colAccount') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colCurrentProxy') }}</th><th :aria-sort="ariaSort('samples')"><button type="button" class="sort-btn" data-sort-key="samples" @click="toggleAccountSort('samples')">{{ t('proxyAutoSwitch.colSamples') }}<span class="sort-mark" aria-hidden="true">{{ sortMark('samples') }}</span></button></th><th :aria-sort="ariaSort('p60_ms')"><button type="button" class="sort-btn" data-sort-key="p60_ms" @click="toggleAccountSort('p60_ms')">{{ t('proxyAutoSwitch.colP60') }}<span class="sort-mark" aria-hidden="true">{{ sortMark('p60_ms') }}</span></button></th><th :aria-sort="ariaSort('mean_ms')"><button type="button" class="sort-btn" data-sort-key="mean_ms" @click="toggleAccountSort('mean_ms')">{{ t('proxyAutoSwitch.colMean') }}<span class="sort-mark" aria-hidden="true">{{ sortMark('mean_ms') }}</span></button></th><th>{{ t('proxyAutoSwitch.colDuration') }}</th><th class="cell-left">{{ t('proxyAutoSwitch.colState') }}</th><th class="cell-left" :aria-sort="ariaSort('last_switch_at')"><button type="button" class="sort-btn" data-sort-key="last_switch_at" @click="toggleAccountSort('last_switch_at')">{{ t('proxyAutoSwitch.colLastSwitch') }}<span class="sort-mark" aria-hidden="true">{{ sortMark('last_switch_at') }}</span></button></th></tr></thead>
             <tbody v-if="!accountsLoaded && accountsLoading"><tr v-for="n in 3" :key="`account-loading-${n}`" class="loading-row"><td v-for="c in 8" :key="c"><span class="cell-skeleton" /></td></tr></tbody>
             <tbody v-else>
-              <tr v-for="account in accounts" :key="account.account_id" :data-account-id="account.account_id">
+              <tr v-for="account in pagedAccounts" :key="account.account_id" :data-account-id="account.account_id">
                 <td class="cell-left account-name"><strong>#{{ account.account_id }}</strong><span>{{ account.account_name }}</span></td>
                 <td class="cell-left" data-testid="pas-account-proxy"><span>{{ account.proxy_id == null ? '—' : `#${account.proxy_id} ${account.proxy_label || ''}`.trim() }}</span><span v-if="account.region" class="region-tag">{{ account.region }}</span></td>
                 <td class="tabular-nums" data-testid="pas-account-samples">{{ account.samples }}</td>
@@ -113,9 +129,21 @@
                 <td class="cell-left tabular-nums" data-testid="pas-account-last-switch">{{ lastSwitch(account.last_switch_at) }}</td>
               </tr>
               <tr v-if="!accounts.length"><td colspan="8" class="table-empty" data-testid="pas-accounts-empty">{{ t('proxyAutoSwitch.accountsEmpty') }}</td></tr>
+              <tr v-else-if="!filteredAccounts.length"><td colspan="8" class="table-empty" data-testid="pas-accounts-no-match">{{ t('proxyAutoSwitch.accountsNoMatch') }}<button type="button" class="link-btn" data-testid="pas-accounts-clear" @click="clearAccountFilters">{{ t('proxyAutoSwitch.clearFilters') }}</button></td></tr>
             </tbody>
           </table>
         </div>
+        <footer v-if="filteredAccounts.length" class="operations-footer" data-testid="pas-accounts-pager">
+          <span data-testid="pas-accounts-range">{{ t('proxyAutoSwitch.pageInfo', { from: accountPageFrom, to: accountPageTo }) }} · {{ t('proxyAutoSwitch.pageTotal', { total: filteredAccounts.length }) }}</span>
+          <div class="pager">
+            <label class="pager-size"><span>{{ t('proxyAutoSwitch.pageSize') }}</span>
+              <select v-model.number="accountPageSize" class="pager-select" data-testid="pas-accounts-page-size"><option v-for="size in accountPageSizes" :key="size" :value="size">{{ size }}</option></select>
+            </label>
+            <button type="button" class="pager-btn" :disabled="accountPage <= 1" data-testid="pas-accounts-prev" @click="accountPage--">{{ t('proxyAutoSwitch.prevPage') }}</button>
+            <span class="pager-num" data-testid="pas-accounts-page">{{ accountPage }} / {{ accountPages }}</span>
+            <button type="button" class="pager-btn" :disabled="accountPage >= accountPages" data-testid="pas-accounts-next" @click="accountPage++">{{ t('proxyAutoSwitch.nextPage') }}</button>
+          </div>
+        </footer>
       </section>
 
       <section class="workspace-panel" aria-labelledby="pas-events-heading">
@@ -198,7 +226,7 @@ const { t, te } = useI18n()
 const PAGE_SIZE = 50
 const strategies: ProxyAutoSwitchStrategy[] = ['random', 'sequential', 'region']
 
-type NumericKey = 'window_minutes' | 'min_samples' | 'p60_threshold_s' | 'mean_threshold_s' | 'max_accounts_per_proxy'
+type NumericKey = 'window_minutes' | 'min_samples' | 'p60_threshold_s' | 'mean_threshold_s' | 'max_accounts_per_proxy' | 'slow_demotion_hours' | 'slow_demotion_min_accounts'
 interface Draft {
   enabled: boolean
   group_ids: number[]
@@ -209,6 +237,9 @@ interface Draft {
   max_accounts_per_proxy: number | string
   candidate_proxy_ids: number[]
   strategy: ProxyAutoSwitchStrategy
+  // 页面上按小时填，保存时换成分钟；0 = 关闭软降级。
+  slow_demotion_hours: number | string
+  slow_demotion_min_accounts: number | string
 }
 
 // 与后端 PUT /config 的校验范围一致：窗口 1–60 分钟、样本 1–100000、两个阈值 1–600000 毫秒。
@@ -218,8 +249,10 @@ const ranges: Record<NumericKey, { min: number; max: number; integer: boolean }>
   p60_threshold_s: { min: 0.001, max: 600, integer: false },
   mean_threshold_s: { min: 0.001, max: 600, integer: false },
   max_accounts_per_proxy: { min: 1, max: 100, integer: true },
+  slow_demotion_hours: { min: 0, max: 168, integer: false },
+  slow_demotion_min_accounts: { min: 1, max: 100, integer: true },
 }
-const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, max_accounts_per_proxy: 2, candidate_proxy_ids: [], strategy: 'sequential' }
+const defaultConfig: ProxyAutoSwitchConfig = { enabled: false, group_ids: [], window_minutes: 5, min_samples: 20, p60_threshold_ms: 10000, mean_threshold_ms: 15000, max_accounts_per_proxy: 2, candidate_proxy_ids: [], strategy: 'sequential', slow_demotion_window_minutes: 1440, slow_demotion_min_accounts: 2 }
 
 function finiteNumber(value: unknown, fallback: number): number {
   const parsed = Number(value)
@@ -240,6 +273,8 @@ function normalizeConfig(raw: Partial<ProxyAutoSwitchConfig> | null | undefined)
     max_accounts_per_proxy: finiteNumber(raw?.max_accounts_per_proxy, defaultConfig.max_accounts_per_proxy),
     candidate_proxy_ids: Array.isArray(raw?.candidate_proxy_ids) ? [...new Set(raw.candidate_proxy_ids.map(Number).filter(Number.isFinite))] : [],
     strategy: normalizeStrategy(raw?.strategy),
+    slow_demotion_window_minutes: finiteNumber(raw?.slow_demotion_window_minutes, defaultConfig.slow_demotion_window_minutes),
+    slow_demotion_min_accounts: finiteNumber(raw?.slow_demotion_min_accounts, defaultConfig.slow_demotion_min_accounts),
   }
 }
 function toDraft(config: ProxyAutoSwitchConfig): Draft {
@@ -253,6 +288,8 @@ function toDraft(config: ProxyAutoSwitchConfig): Draft {
     max_accounts_per_proxy: config.max_accounts_per_proxy,
     candidate_proxy_ids: [...config.candidate_proxy_ids],
     strategy: config.strategy,
+    slow_demotion_hours: config.slow_demotion_window_minutes / 60,
+    slow_demotion_min_accounts: config.slow_demotion_min_accounts,
   }
 }
 // 固定键顺序、分组和代理池都去重排序，方便比对是否改过（池内顺序由延迟排名决定，加入顺序不重要）。
@@ -267,6 +304,8 @@ function canonical(config: ProxyAutoSwitchConfig): ProxyAutoSwitchUpdate {
     max_accounts_per_proxy: config.max_accounts_per_proxy,
     candidate_proxy_ids: [...new Set(config.candidate_proxy_ids)].sort((a, b) => a - b),
     strategy: config.strategy,
+    slow_demotion_window_minutes: config.slow_demotion_window_minutes,
+    slow_demotion_min_accounts: config.slow_demotion_min_accounts,
   }
 }
 function toPayload(): ProxyAutoSwitchUpdate {
@@ -280,6 +319,8 @@ function toPayload(): ProxyAutoSwitchUpdate {
     max_accounts_per_proxy: Number(draft.max_accounts_per_proxy),
     candidate_proxy_ids: [...draft.candidate_proxy_ids],
     strategy: draft.strategy,
+    slow_demotion_window_minutes: Math.round(Number(draft.slow_demotion_hours) * 60),
+    slow_demotion_min_accounts: Number(draft.slow_demotion_min_accounts),
   })
 }
 
@@ -299,6 +340,11 @@ function fieldError(key: NumericKey): string {
   if (range.integer) {
     const valid = Number.isInteger(value) && value >= range.min && value <= range.max
     return valid ? '' : t('proxyAutoSwitch.integerError', range)
+  }
+  if (key === 'slow_demotion_hours') {
+    // 按分钟存：0（关闭）到 10080 分钟（7 天）。
+    const minutes = Math.round(value * 60)
+    return minutes >= 0 && minutes <= 10080 ? '' : t('proxyAutoSwitch.rangeError', range)
   }
   const ms = Math.round(value * 1000)
   return ms >= 1 && ms <= 600000 ? '' : t('proxyAutoSwitch.rangeError', range)
@@ -402,6 +448,7 @@ function poolNote(proxy: ProxyAutoSwitchProxy): string {
 }
 // 「已满」按已保存的上限算，和后端换代理时用的一致。
 const savedMax = computed(() => saved.value?.max_accounts_per_proxy ?? defaultConfig.max_accounts_per_proxy)
+const savedDemotionHours = computed(() => Math.round((saved.value?.slow_demotion_window_minutes ?? defaultConfig.slow_demotion_window_minutes) / 6) / 10)
 function isFull(proxy: ProxyAutoSwitchProxy) { return proxy.account_count >= savedMax.value }
 function proxyLabel(proxy: ProxyAutoSwitchProxy) { return proxy.name ? `#${proxy.id} ${proxy.name}` : `#${proxy.id}` }
 function removeFromPool(id: number) { draft.candidate_proxy_ids = draft.candidate_proxy_ids.filter(candidate => candidate !== id) }
@@ -457,10 +504,88 @@ async function loadAccounts() {
     accounts.value = page.items ?? []
     accountsWindow.value = page.window_minutes || 0
     accountsLoaded.value = true
+    // 重新加载后页码保持不变，超出范围时退到最后一页。
+    if (accountPage.value > accountPages.value) accountPage.value = accountPages.value
   } catch (err) {
     if (!disposed) accountsError.value = extractApiErrorMessage(err, t('proxyAutoSwitch.accountsLoadFailed'))
   } finally { accountsLoading.value = false }
 }
+
+// 账号监控的筛选、排序、分页都在前端做：接口一次返回所选分组的全部账号。
+const accountStates = ['slow', 'ok', 'insufficient', 'no_proxy', 'unavailable'] as const
+type AccountStateFilter = 'all' | (typeof accountStates)[number]
+type AccountSortKey = 'samples' | 'p60_ms' | 'mean_ms' | 'last_switch_at'
+const accountKeyword = ref(''), accountStateFilter = ref<AccountStateFilter>('all'), accountGroupFilter = ref(0)
+const accountSort = ref<{ key: AccountSortKey; dir: 'asc' | 'desc' } | null>(null)
+// 分组下拉只列配置里选的分组；只有一个分组时不显示。
+const accountGroupOptions = computed(() => {
+  const names = new Map(groupOptions.value.map(group => [group.id, group.name]))
+  return (saved.value?.group_ids ?? []).map(id => ({ id, name: names.get(id) ?? `#${id}` }))
+})
+// 搜索匹配 #账号ID、账号名、#代理ID、代理名，不区分大小写。
+function accountMatchesKeyword(account: ProxyAutoSwitchAccount, keyword: string) {
+  if (!keyword) return true
+  const text = [`#${account.account_id}`, account.account_name, account.proxy_id == null ? '' : `#${account.proxy_id}`, account.proxy_label ?? ''].join(' ').toLowerCase()
+  return text.includes(keyword)
+}
+// 先按搜索和分组过滤；状态按钮上的数量按这一步的结果算。
+const accountsBeforeState = computed(() => {
+  const keyword = accountKeyword.value.trim().toLowerCase()
+  const group = accountGroupFilter.value
+  return accounts.value.filter(account => accountMatchesKeyword(account, keyword) && (!group || account.group_ids.includes(group)))
+})
+const accountStateOptions = computed(() => {
+  const counts = new Map<string, number>()
+  for (const account of accountsBeforeState.value) counts.set(account.state, (counts.get(account.state) ?? 0) + 1)
+  return [
+    { value: 'all' as AccountStateFilter, label: t('proxyAutoSwitch.filterAll'), count: accountsBeforeState.value.length },
+    ...accountStates.map(state => ({ value: state as AccountStateFilter, label: t(`proxyAutoSwitch.stateFilter.${state}`), count: counts.get(state) ?? 0 })),
+  ]
+})
+function accountSortValue(account: ProxyAutoSwitchAccount, key: AccountSortKey): number | null {
+  if (key === 'last_switch_at') return validDate(account.last_switch_at)?.getTime() ?? null
+  const value = account[key]
+  return value == null || !Number.isFinite(value) ? null : value
+}
+// 默认保持接口顺序（账号 ID 升序）；排序时空值始终排最后，同值按账号 ID。
+const filteredAccounts = computed(() => {
+  const list = accountStateFilter.value === 'all' ? accountsBeforeState.value : accountsBeforeState.value.filter(account => account.state === accountStateFilter.value)
+  const sort = accountSort.value
+  if (!sort) return list
+  const sign = sort.dir === 'asc' ? 1 : -1
+  return [...list].sort((a, b) => {
+    const va = accountSortValue(a, sort.key), vb = accountSortValue(b, sort.key)
+    if (va == null || vb == null) return va == null && vb == null ? a.account_id - b.account_id : va == null ? 1 : -1
+    return va === vb ? a.account_id - b.account_id : (va - vb) * sign
+  })
+})
+// 点表头：从大到小 → 从小到大 → 恢复默认顺序。
+function toggleAccountSort(key: AccountSortKey) {
+  const current = accountSort.value
+  if (!current || current.key !== key) accountSort.value = { key, dir: 'desc' }
+  else if (current.dir === 'desc') accountSort.value = { key, dir: 'asc' }
+  else accountSort.value = null
+}
+function sortMark(key: AccountSortKey) { return accountSort.value?.key === key ? (accountSort.value.dir === 'desc' ? '↓' : '↑') : '' }
+function ariaSort(key: AccountSortKey) { return accountSort.value?.key === key ? (accountSort.value.dir === 'desc' ? 'descending' : 'ascending') : 'none' }
+function clearAccountFilters() { accountKeyword.value = ''; accountStateFilter.value = 'all'; accountGroupFilter.value = 0 }
+const accountPageSizes = [20, 50, 100]
+const ACCOUNT_PAGE_SIZE_KEY = 'pas.accountPageSize'
+function readAccountPageSize() {
+  try { const v = Number(localStorage.getItem(ACCOUNT_PAGE_SIZE_KEY)); return accountPageSizes.includes(v) ? v : 20 } catch { return 20 }
+}
+const accountPageSize = ref(readAccountPageSize())
+const accountPage = ref(1)
+const accountPages = computed(() => Math.max(1, Math.ceil(filteredAccounts.value.length / accountPageSize.value)))
+const pagedAccounts = computed(() => filteredAccounts.value.slice((accountPage.value - 1) * accountPageSize.value, accountPage.value * accountPageSize.value))
+const accountPageFrom = computed(() => (filteredAccounts.value.length ? (accountPage.value - 1) * accountPageSize.value + 1 : 0))
+const accountPageTo = computed(() => Math.min(accountPage.value * accountPageSize.value, filteredAccounts.value.length))
+// 改筛选、排序或每页条数都回到第 1 页。
+watch([accountKeyword, accountStateFilter, accountGroupFilter, accountSort], () => { accountPage.value = 1 })
+watch(accountPageSize, size => {
+  accountPage.value = 1
+  try { localStorage.setItem(ACCOUNT_PAGE_SIZE_KEY, String(size)) } catch { /* ignore */ }
+})
 
 // 换代理记录：分页和刷新沿用原来的 cursor 做法。
 const events = ref<ProxyAutoSwitchEvent[]>([]), cursor = ref(0)
@@ -608,6 +733,8 @@ onUnmounted(() => { disposed = true })
 .chip { @apply inline-flex max-w-full cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-600 transition-colors hover:border-gray-300 dark:border-dark-600 dark:bg-dark-900 dark:text-gray-300 dark:hover:border-dark-500; overflow-wrap: anywhere; }
 .chip.on { @apply border-primary-300 bg-primary-50 font-medium text-primary-700 dark:border-primary-700 dark:bg-primary-950/40 dark:text-primary-300; }
 .chip:focus-within { @apply ring-2 ring-primary-400 ring-offset-2 dark:ring-offset-dark-900; }
+.hint { @apply text-xs leading-5 text-gray-500 dark:text-gray-400; }
+.demoted-tag { @apply ml-2 inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300; }
 .rule { @apply rounded-lg border border-dashed border-gray-200 bg-gray-50/70 px-3 py-2 text-[13px] leading-6 text-gray-600 dark:border-dark-600 dark:bg-dark-800/50 dark:text-gray-300; }
 .subsection-heading { @apply flex items-start justify-between gap-3; }
 .subsection-heading h4 { @apply text-sm font-semibold; }
@@ -619,6 +746,14 @@ onUnmounted(() => { disposed = true })
 .link-button { @apply text-xs text-gray-500 underline-offset-2 hover:text-rose-600 hover:underline dark:text-gray-400 dark:hover:text-rose-400; }
 .proxy-table .rank-cell { width: 5.5rem; font-variant-numeric: tabular-nums; }
 .pager { @apply flex flex-wrap items-center gap-2; }
+.accounts-toolbar { @apply flex flex-wrap items-center gap-3 px-5 pb-3; }
+.accounts-search { @apply w-full py-1.5 text-sm sm:w-64; }
+.accounts-group { @apply py-1 text-xs; }
+.chip-count { @apply ml-1.5 tabular-nums text-gray-400 dark:text-gray-500; }
+.chip.on .chip-count { @apply text-primary-500 dark:text-primary-400; }
+.sort-btn { @apply inline-flex items-center gap-1 font-medium hover:text-gray-700 dark:hover:text-gray-200; }
+.sort-mark { @apply inline-block w-2 text-primary-600 dark:text-primary-400; }
+.link-btn { @apply ml-2 text-primary-600 hover:underline dark:text-primary-400; }
 .pager-size { @apply inline-flex items-center gap-1.5; }
 .pager-select { @apply rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-600 dark:border-dark-600 dark:bg-dark-900 dark:text-gray-300; }
 .operations-footer .pager-btn { @apply rounded-md border border-gray-200 px-2.5 py-1 text-gray-600 hover:bg-gray-50 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-800; }
@@ -691,7 +826,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { @apply outline
 @keyframes proxy-pulse { 50% { opacity: .45; } }
 
 @media (max-width: 767px) {
-  .panel-heading, .settings-body, .operations-footer { @apply px-4; }
+  .panel-heading, .settings-body, .operations-footer, .accounts-toolbar { @apply px-4; }
   .panel-error { @apply mx-4; }
 }
 @media (prefers-reduced-motion: reduce) { .cell-skeleton { animation: none; } }

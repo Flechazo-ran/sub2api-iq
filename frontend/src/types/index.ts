@@ -103,6 +103,7 @@ export interface User {
 }
 
 export interface AdminUser extends User {
+  auto_credit_outstanding?: string
   // 管理员备注（普通用户接口不返回）
   notes: string
   last_used_at?: string | null
@@ -189,6 +190,8 @@ export interface SendVerifyCodeResponse {
 export interface CustomMenuItem {
   id: string
   label: string
+  label_zh?: string
+  label_en?: string
   icon_svg: string
   url: string
   page_slug?: string
@@ -291,6 +294,7 @@ export interface PublicSettings {
   plugin_management_enabled: boolean
   /** Opt-in support tickets (sidebar「网站工单」for users and admins). */
   support_ticket_enabled?: boolean
+  lottery_enabled?: boolean
   service_quota_enabled: boolean
   affiliate_enabled: boolean
   allow_user_view_error_requests?: boolean
@@ -610,6 +614,7 @@ export interface Group {
   // 图片生成计费配置
   allow_image_generation: boolean
   allow_batch_image_generation: boolean
+  image_count_billing: boolean
   image_rate_independent: boolean
   image_rate_multiplier: number
   batch_image_discount_multiplier: number
@@ -794,6 +799,10 @@ export interface ApiKey {
   reset_1d_at: string | null
   reset_7d_at: string | null
   group_ids?: number[]
+  model_mapping?: Record<string, string>
+  reasoning_effort?: string
+  allow_long_context?: boolean
+  context_token_limit?: number
 }
 
 export interface ApiKeyConcurrencySnapshot {
@@ -860,6 +869,7 @@ export interface CreateGroupRequest {
   model_pricing?: import('@/api/admin/channels').ChannelModelPricing[]
   allow_image_generation?: boolean
   allow_batch_image_generation?: boolean
+  image_count_billing?: boolean
   image_rate_independent?: boolean
   image_rate_multiplier?: number
   batch_image_discount_multiplier?: number
@@ -930,6 +940,7 @@ export interface UpdateGroupRequest {
   model_pricing?: import('@/api/admin/channels').ChannelModelPricing[]
   allow_image_generation?: boolean
   allow_batch_image_generation?: boolean
+  image_count_billing?: boolean
   image_rate_independent?: boolean
   image_rate_multiplier?: number
   batch_image_discount_multiplier?: number
@@ -981,7 +992,7 @@ export interface UpdateGroupRequest {
 // ==================== Account & Proxy Types ====================
 
 /** 前端内置专属界面（图标、配色、表单等）的平台。 */
-export type KnownAccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'minimax' | 'opencode_go' | 'typesafe' | 'command_code' | 'cline'
+export type KnownAccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'minimax' | 'opencode_go' | 'typesafe' | 'command_code' | 'cline' | 'mistral'
 /**
  * 账号平台：内置平台，或后端平台清单中新登记的平台（任意字符串）。
  * `string & {}` 保留内置平台的字面量补全。
@@ -1368,7 +1379,39 @@ export interface ExcelBPSCredentialState {
  requires_manual_resume?: boolean
 }
 
+export interface GrokCatalogScope {
+  account_id: number
+  account_type: string
+  endpoint: string
+  fingerprint: string
+}
+
+export interface GrokCatalogAttempt {
+  started_at: string
+  finished_at: string
+  status: string
+  error_code?: string
+  scope?: GrokCatalogScope
+}
+
+export interface GrokModelDiagnosticItem {
+  requested: string
+  upstream?: string
+  status: string
+}
+
+export interface GrokModelDiagnostics {
+  state: string
+  endpoint?: string
+  fetched_at?: string
+  expires_at?: string
+  models: string[]
+  last_attempt?: GrokCatalogAttempt
+  mappings: GrokModelDiagnosticItem[]
+}
+
 export interface Account {
+  upstream_channel_binding?: import('@/api/admin/upstreamChannels').ChannelBinding
  excel_bps_credential_state?: ExcelBPSCredentialState
   id: number
   name: string
@@ -1527,6 +1570,8 @@ export interface Account {
   parent_privacy_mode?: string
   parent_subscription_expires_at?: string
   parent_chatgpt_account_id?: string
+
+  grok_model_diagnostics?: GrokModelDiagnostics
 }
 
 // The admin account list may return this compact shape when lite=1. Detail
@@ -1564,6 +1609,19 @@ export interface UsageProgress {
 }
 
 // Antigravity 单个模型的配额信息
+export interface AntigravityQuotaWindow {
+  window: string // '5h' or 'weekly'
+  utilization: number // 0-100
+  resets_at: string | null
+}
+
+export interface AntigravityQuotaGroup {
+  key: string // bucket prefix: 'gemini' or '3p' (Claude and GPT)
+  name: string
+  description?: string
+  windows: AntigravityQuotaWindow[]
+}
+
 export interface AntigravityModelQuota {
   utilization: number // 使用率 0-100
   reset_time: string  // 重置时间 ISO8601
@@ -1627,6 +1685,7 @@ export interface AccountUsageInfo {
   gemini_pro_minute?: UsageProgress | null
   gemini_flash_minute?: UsageProgress | null
   antigravity_quota?: Record<string, AntigravityModelQuota> | null
+  antigravity_quota_groups?: AntigravityQuotaGroup[] | null
   grok_request_quota?: GrokQuotaWindow | null
   grok_token_quota?: GrokQuotaWindow | null
   grok_retry_after_seconds?: number | null
@@ -1708,6 +1767,8 @@ export interface OpenAIResponsesState {
 }
 
 export interface CreateAccountRequest {
+  upstream_channel_id?: number
+  confirm_upstream_channel_binding?: boolean
   name: string
   notes?: string | null
   platform: AccountPlatform
@@ -1962,6 +2023,8 @@ export interface UsageLog {
   cache_read_tokens: number
   cache_creation_5m_tokens: number
   cache_creation_1h_tokens: number
+  cache_creation_30m_tokens?: number
+  cache_creation_12h_tokens?: number
 
   input_cost: number
   output_cost: number
@@ -1979,6 +2042,17 @@ export interface UsageLog {
   native_compaction_v2: boolean
   duration_ms: number | null
   first_token_ms: number | null
+  queue_wait_ms?: number | null
+  queue_timing?: {
+    status: string; source: string; scope: string; queue_clamped: boolean
+    server_first_token_ms: number | null; server_duration_ms: number
+    forward_first_token_ms: number | null; forward_duration_ms: number
+  } | null
+  content_timing?: {
+    sse_event_first_ms?: number | null; semantic_first_ms?: number | null
+    reasoning_first_ms: number | null; visible_text_first_ms: number | null; response_byte_first_ms: number | null
+    status: string; source: string; scope: string; reasoning_streaming_capability: string; capability_source: string
+  }
 
   // 图片生成字段
   image_count: number
@@ -2286,6 +2360,8 @@ export interface ObserverSetupOptions {
 }
 
 export interface UpdateUserRequest {
+  /** Optional operation reason recorded by the admin audit middleware, not user notes. */
+  reason?: string
   email?: string
   password?: string
   username?: string
@@ -2654,11 +2730,15 @@ export interface TotpLogin2FARequest {
 // ==================== Scheduled Test Types ====================
 
 export interface QualityJudgeConfig {
+  kind?: 'llm' | 'jev'
   group_id: number
   model_id: string
   prompt: string
 }
 export interface QualityJudgment {
+  kind?: 'llm' | 'jev'
+  rules_version?: string
+  latency_ms?: number
   verdict: 'correct' | 'incorrect' | 'unknown'
   reason: string
   account_id?: number
@@ -2688,6 +2768,8 @@ export interface QualityBPSPolicy {
 }
 export interface QualityPolicy {
   trigger_on_upstream_5xx?: boolean
+  // OAuth quality rules only: 0 or missing disables automatic rule cleanup.
+  oauth_401_max_rounds?: number
   admission?: import('@/utils/openaiTwoFAAdmission').OpenAITwoFAAdmissionConfig
   judge?: QualityJudgeConfig
   expected_answer: string
@@ -2697,6 +2779,7 @@ export interface QualityPolicy {
   add_group_ids?: number[]
   remove_models?: string[]
   recovery_concurrency?: number
+  retest_rest_minutes?: number
   auto_restore: boolean
   bps?: QualityBPSPolicy
 }
@@ -2717,7 +2800,19 @@ export interface QualityRestoreDiagnostic {
   current_concurrency?: number
 }
 
+export interface PelicanQuestion {
+  id: string
+  version: string
+  round_id: string
+  source: string
+  prompt: string
+  criteria: string[]
+}
+
 export interface PelicanTestConfig {
+  prompt_mode?: 'custom' | 'random'
+  pelican_question?: PelicanQuestion
+  actual_prompt?: string
   // Optional display name, persisted with the rule's editable configuration.
   rule_name?: string
   quality_restore_diagnostic?: QualityRestoreDiagnostic
@@ -2733,6 +2828,20 @@ export interface PelicanTestConfig {
   random_question?: { id: string; family: 'paths' | 'weighted_xor'; version: string }
   // Result-only signature of the candy prompt rendered for this run.
   candy_variant?: string
+  quality_batch?: {
+    route: string
+    mapped_model: string
+    id: string
+    started_at: string
+    start_deadline: string
+    closes_at: string
+    comparison_key: string
+    decision: string
+    peer_accounts: number
+    peer_passed: number
+    peer_failed: number
+    peer_inconclusive: number
+  }
   test_channel?: 'account' | 'bps'
   prompt: string
   reasoning_effort: string

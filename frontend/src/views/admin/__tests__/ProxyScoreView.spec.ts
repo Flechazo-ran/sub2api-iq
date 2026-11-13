@@ -19,7 +19,7 @@ function row(id: number, overrides: Partial<ProxyScoreRow> = {}): ProxyScoreRow 
 }
 
 function result(overrides: Partial<ProxyScoreResult> = {}): ProxyScoreResult {
-  return { range: '7d', rows: [row(1), row(2, { p50_ms: 11000, grade: 'B', advice: 'observe' })], ...overrides }
+  return { range: '7d', computed_at: '2026-11-13T02:30:00Z', rows: [row(1), row(2, { p50_ms: 11000, grade: 'B', advice: 'observe' })], ...overrides }
 }
 
 function mountView() {
@@ -44,6 +44,24 @@ describe('ProxyScoreView', () => {
     wrapper = mountView(); await flushPromises()
     expect(api.getProxyScore).toHaveBeenCalledWith('7d')
     expect(wrapper.findAll('[data-testid^="psc-row-"]')).toHaveLength(2)
+  })
+
+  it('offers 3 / 7 / 30 day ranges and loads 3d when that tab is clicked', async () => {
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.findAll('[role="tab"]').map(tab => tab.attributes('data-testid'))).toEqual(['psc-range-3d', 'psc-range-7d', 'psc-range-30d'])
+    api.getProxyScore.mockResolvedValue(result({ range: '3d' }))
+    await wrapper.get('[data-testid="psc-range-3d"]').trigger('click')
+    await flushPromises()
+    expect(api.getProxyScore).toHaveBeenLastCalledWith('3d')
+  })
+
+  it('shows when the background data was computed, or that it is not ready yet', async () => {
+    wrapper = mountView(); await flushPromises()
+    expect(wrapper.get('[data-testid="psc-computed-at"]').text()).toMatch(/^数据更新于 11-\d\d \d\d:\d\d$/)
+    api.getProxyScore.mockResolvedValue(result({ computed_at: null }))
+    await wrapper.get('[data-testid="psc-refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="psc-computed-at"]').text()).toBe('后台还没算完，稍后刷新')
   })
 
   it('switches to 30d when that tab is clicked', async () => {

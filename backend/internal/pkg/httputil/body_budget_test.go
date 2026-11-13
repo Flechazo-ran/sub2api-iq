@@ -63,9 +63,8 @@ func TestReserveRequestBodyMemorySharesIngressBudgetAndRelease(t *testing.T) {
 		t.Fatalf("failed reservation or cleanup leaked capacity: %v", err)
 	}
 	release2()
-	// A closed request admits (and does not charge) late work instead of failing it.
-	if err := ReserveRequestBodyMemory(ctx, 1); err != nil {
-		t.Fatalf("closed request rejected late work: %v", err)
+	if err := ReserveRequestBodyMemory(ctx, 1); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("closed request accepted a new reservation: %v", err)
 	}
 	if budget.used != 0 {
 		t.Fatalf("leaked reservations: %d", budget.used)
@@ -112,11 +111,12 @@ func TestRequestBodyMemoryBudgetUnknownLengthAndConcurrency(t *testing.T) {
 	}
 }
 
+// 本站不按 zstd 窗口拒绝请求（#10 / #16）：窗口不超过解码上限 64MB 的照常解码，
+// 只有超过解码上限的窗口才拒绝。
 func TestDecompressRequestBodyBoundsZstdWindowByDecodedCap(t *testing.T) {
-	// Windows up to the 64 MB decoded cap decode as before; only larger ones are refused.
 	for _, exponent := range []byte{20, 24, 26, 27, 29} {
 		raw := []byte{0x28, 0xb5, 0x2f, 0xfd, 0, (exponent - 10) << 3, 9, 0, 0, 'x'}
-		decoded, err := decompressRequestBody("zstd", raw, maxDecompressedBodySize)
+		decoded, err := decompressRequestBody("zstd", raw)
 		if exponent <= 26 {
 			if err != nil || string(decoded) != "x" {
 				t.Fatalf("window 2^%d: %q %v", exponent, decoded, err)
@@ -124,6 +124,35 @@ func TestDecompressRequestBodyBoundsZstdWindowByDecodedCap(t *testing.T) {
 		} else if err == nil {
 			t.Fatalf("accepted window 2^%d", exponent)
 		}
+	}
+}
+
+// 峰值和拒绝次数只供运维页显示（#16），不影响准入。
+func TestBodyMemoryBudgetStatsTrackPeakAndRejections(t *testing.T) {
+	budget := NewBodyMemoryBudget(100)
+	PublishBodyMemoryBudget(budget)
+	defer PublishBodyMemoryBudget(nil)
+	ctx, release := WithRequestBodyMemoryBudget(context.Background(), budget)
+	if err := ReserveRequestBodyMemory(ctx, 80); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReserveRequestBodyMemory(ctx, 30); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("want capacity error, got %v", err)
+	}
+	release()
+	stats, ok := ActiveBodyMemoryBudgetStats()
+	if !ok || stats.LimitBytes != 100 || stats.UsedBytes != 0 || stats.PeakBytes != 80 || stats.Rejected != 1 {
+		t.Fatalf("stats = %+v ok=%v", stats, ok)
+	}
+	if taken, _ := TakeActiveBodyMemoryBudgetStats(); taken.PeakBytes != 80 || taken.Rejected != 1 {
+		t.Fatalf("take = %+v", taken)
+	}
+	if after, _ := ActiveBodyMemoryBudgetStats(); after.PeakBytes != 0 || after.Rejected != 0 {
+		t.Fatalf("interval not reset: %+v", after)
+	}
+	PublishBodyMemoryBudget(nil)
+	if _, ok := ActiveBodyMemoryBudgetStats(); ok {
+		t.Fatal("cleared budget still published")
 	}
 }
 
@@ -318,7 +347,7 @@ type requestBodyBudgetReaderFunc func([]byte) (int, error)
 func (read requestBodyBudgetReaderFunc) Read(p []byte) (int, error) { return read(p) }
 
 func TestRequestBodyMemoryBudgetRefundsFailedOwnedBuffers(t *testing.T) {
-	for _, name := range []string{"unknown_length_overload", "concat_overload", "normalization_overload", "normalization_size", "invalid_gzip", "invalid_zstd", "read_error"} {
+	for _, name := range []string{"unknown_length_overload", "concat_overload", "normalization_overload", "normalization_size", "invalid_gzip", "invalid_zstd", "read_error", "cancellation"} {
 		t.Run(name, func(t *testing.T) {
 			budget := NewBodyMemoryBudget(16 << 20)
 			parent, cancel := context.WithCancel(context.Background())
@@ -354,6 +383,8 @@ func TestRequestBodyMemoryBudgetRefundsFailedOwnedBuffers(t *testing.T) {
 				encoding = "zstd"
 			case "read_error":
 				wantErr = io.ErrUnexpectedEOF
+			case "cancellation":
+				wantErr = context.Canceled
 			}
 			req := newRequestWithBody(t, payload, encoding).WithContext(ctx)
 			req.ContentLength = -1
@@ -364,6 +395,14 @@ func TestRequestBodyMemoryBudgetRefundsFailedOwnedBuffers(t *testing.T) {
 				req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(payload), requestBodyBudgetReaderFunc(func([]byte) (int, error) {
 					return 0, io.ErrUnexpectedEOF
 				})))
+			}
+			if name == "cancellation" {
+				reader := bytes.NewReader(payload)
+				req.Body = io.NopCloser(requestBodyBudgetReaderFunc(func(p []byte) (int, error) {
+					n, err := reader.Read(p)
+					cancel()
+					return n, err
+				}))
 			}
 			got, err := ReadLenientJSONRequestBodyWithPrealloc(req, maxNormalized)
 			if got != nil || err == nil || wantErr != nil && !errors.Is(err, wantErr) {
@@ -433,17 +472,14 @@ func TestRequestBodyMemoryScopeReleasesOnlyItsBytes(t *testing.T) {
 	if budget.used != 30 {
 		t.Fatalf("scope release returned %d of the request's bytes", 30-budget.used)
 	}
-	if err := ReserveRequestBodyMemory(scope, 1); err != nil {
-		t.Fatalf("closed scope rejected late work: %v", err)
-	}
-	if budget.used != 30 {
-		t.Fatalf("closed scope charged late work: used=%d", budget.used)
+	if err := ReserveRequestBodyMemory(scope, 1); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("closed scope accepted a new reservation: %v", err)
 	}
 	release()
 	late, releaseLate := WithRequestBodyMemoryScope(ctx)
 	defer releaseLate()
-	if err := ReserveRequestBodyMemory(late, 1); err != nil {
-		t.Fatalf("scope opened after its request rejected work: %v", err)
+	if err := ReserveRequestBodyMemory(late, 1); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("scope outlived its request: %v", err)
 	}
 	if budget.used != 0 {
 		t.Fatalf("leaked reservations: %d", budget.used)
@@ -491,18 +527,8 @@ func TestDetachRequestBodyMemoryOutlivesHandlerRelease(t *testing.T) {
 	if err := ReserveRequestBodyMemory(detached, 30); err != nil {
 		t.Fatalf("detached work must keep reserving after handler release: %v", err)
 	}
-	if budget.used != 70 {
-		t.Fatalf("detached reservations still share the budget: %d", budget.used)
-	}
-	// Accepted work is never failed by accounting: over the limit it proceeds uncharged.
-	if err := ReserveRequestBodyMemory(detached, 31); err != nil {
-		t.Fatalf("detached work was rejected: %v", err)
-	}
-	if budget.used != 70 {
-		t.Fatalf("a full budget must not be exceeded by charges: %d", budget.used)
-	}
-	if stats := budget.Stats(); stats.Rejected != 0 {
-		t.Fatalf("best-effort miss counted as a rejection: %d", stats.Rejected)
+	if err := ReserveRequestBodyMemory(detached, 31); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("detached reservations still share the budget: %v", err)
 	}
 	releaseDetached()
 	releaseDetached()
@@ -535,40 +561,32 @@ func TestDetachRequestBodyMemoryTakesOverTheRequestCharge(t *testing.T) {
 		t.Fatalf("leaked reservations: %d", budget.used)
 	}
 
-	// The remainder that does not fit is left uncharged instead of failing.
 	ctx, release = WithRequestBodyMemoryBudget(context.Background(), budget)
 	if err := ReserveRequestBodyMemory(ctx, 50); err != nil {
 		t.Fatal(err)
 	}
-	_, releaseDetached, err = DetachRequestBodyMemory(ctx, 101)
-	if err != nil {
-		t.Fatalf("detach failed accepted work: %v", err)
+	if _, _, err := DetachRequestBodyMemory(ctx, 101); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("want capacity error, got %v", err)
 	}
 	if budget.used != 50 {
-		t.Fatalf("detach over-charged a full budget: %d", budget.used)
+		t.Fatalf("failed detach must return the body to the request: %d", budget.used)
 	}
 	release()
-	if budget.used != 50 {
-		t.Fatalf("handler release must leave the taken-over body: %d", budget.used)
-	}
-	releaseDetached()
 	if budget.used != 0 {
-		t.Fatalf("detach leaked reservations: %d", budget.used)
+		t.Fatalf("failed detach leaked reservations: %d", budget.used)
 	}
 }
 
-func TestDetachRequestBodyMemoryNeverFailsWhenBudgetExhausted(t *testing.T) {
+func TestDetachRequestBodyMemoryRejectsWhenBudgetExhausted(t *testing.T) {
 	budget := NewBodyMemoryBudget(100)
 	ctx, release := WithRequestBodyMemoryBudget(context.Background(), budget)
 	defer release()
-	detached, releaseDetached, err := DetachRequestBodyMemory(ctx, 101)
-	if err != nil || detached == nil {
-		t.Fatalf("detach failed accepted work: %v", err)
+	if _, _, err := DetachRequestBodyMemory(ctx, 101); !errors.Is(err, ErrRequestBodyMemoryBudget) {
+		t.Fatalf("want capacity error, got %v", err)
 	}
 	if budget.used != 0 {
-		t.Fatalf("uncharged detach consumed budget: %d", budget.used)
+		t.Fatalf("failed detach consumed budget: %d", budget.used)
 	}
-	releaseDetached()
 	if got, releaseNoop, err := DetachRequestBodyMemory(context.Background(), 101); err != nil || got == nil {
 		t.Fatalf("without a budget detach is a no-op: %v", err)
 	} else {
